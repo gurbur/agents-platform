@@ -11,6 +11,7 @@ mod messages;
 mod query;
 mod receiver_url;
 mod request_id;
+mod ui;
 
 use axum::extract::{FromRef, State};
 use axum::routing::get;
@@ -59,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .merge(delivery::routes())
         .merge(messages::routes())
         .merge(inbox::routes())
+        .merge(ui::routes())
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)

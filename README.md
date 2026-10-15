@@ -63,6 +63,26 @@ cargo run -p platform-cli -- --url http://127.0.0.1:7340 --token-file owner.toke
 
 `platform`은 `--url`(또는 `PLATFORM_URL`)과 `--token`/`--token-file`(또는 `PLATFORM_TOKEN`)을 요구하며, `--json`이면 응답 JSON 원문을 출력합니다. 종료 코드는 0 성공, 1 서버 오류 응답, 2 사용법·설정 오류, 3 네트워크 오류입니다.
 
+### 브라우저 화면 (읽기 전용)
+
+`platformd`는 바이너리에 embed한 정적 페이지를 `GET /`로 줍니다(`/assets/app.js`, `/assets/app.css`). 페이지는 같은 v1 API를 `GET`으로만 호출하며 송신·membership·receiver 변경·retry 같은 write는 없습니다. owner token은 메모리에 두고, "이 탭에 보관"을 체크했을 때만 `sessionStorage`에 넣습니다(탭을 닫으면 사라지고, 로그아웃이 지웁니다). 수동 검수 절차는 다음과 같습니다.
+
+1. 위 "로컬 실행"대로 서버를 띄우고 브라우저로 `http://127.0.0.1:7340/`을 엽니다.
+2. `owner.token` 내용을 입력하고 연결합니다. 상단에 `연결됨 — agent N개`가 보여야 합니다.
+3. 확인용 데이터를 만듭니다(agent 두 개 등록, 두 번째 agent로 HTML 모양 body 송신).
+   ```sh
+   T=$(cat owner.token)
+   curl -s -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+     -d '{"agent_id":"agent-a"}' http://127.0.0.1:7340/v1/agents
+   curl -s -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+     -d '{"agent_id":"agent-b"}' http://127.0.0.1:7340/v1/agents      # agent_api_key를 복사
+   curl -s -H "Authorization: Bearer <agent-b의 agent_api_key>" -H 'Content-Type: application/json' \
+     -d '{"to":"all","body":"<b>x</b>","client_key":"ui-check-1"}' http://127.0.0.1:7340/v1/messages
+   ```
+4. 네 탭을 차례로 확인합니다. Directory는 agent 표, History는 `all`과 `dm:agent-a:agent-b` room 목록·최신순 목록·"이전 더 보기"·검색어(`q`), Inbox는 agent 선택 뒤 `read_marker`와 고정된 `snapshot_head_seq`·"더 보기", Delivery는 agent별 상태 표입니다.
+5. History와 agent-a Inbox에서 body가 굵은 글씨가 아니라 `<b>x</b>` 글자 그대로 보여야 합니다.
+6. 새로고침 뒤 보관한 token으로 다시 연결되는지, 로그아웃 뒤 새로고침 버튼이 `401 unauthorized`와 `request_id`를 보여 주는지 확인합니다. 브라우저 콘솔에 CSP 위반이 없어야 합니다.
+
 ### 배포 빌드 (Raspberry Pi, aarch64)
 
 ```sh

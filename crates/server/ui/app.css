@@ -1,0 +1,295 @@
+/* agents-platform read-only console. No external fonts or images. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --text: #1d1f21;
+  --muted: #5c6166;
+  --border: #d6d8da;
+  --accent: #2f5d8a;
+  --accent-text: #ffffff;
+  --error-bg: #fdecea;
+  --error-text: #8a1c12;
+  --ok: #1e6b35;
+  --warn: #8a5a00;
+  --bad: #a3231a;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181b;
+    --surface: #1f2226;
+    --text: #e6e7e8;
+    --muted: #9aa0a6;
+    --border: #3a3f45;
+    --accent: #6fa3d6;
+    --accent-text: #0e1114;
+    --error-bg: #3b1d1a;
+    --error-text: #f4b5ad;
+    --ok: #7fcf96;
+    --warn: #e2b55c;
+    --bad: #f08a80;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+input,
+select {
+  min-height: 2rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+button {
+  min-height: 2rem;
+  padding: 0.2rem 0.8rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-text);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.5rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.token-form,
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.token-form input[type="password"] {
+  width: min(22rem, 100%);
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--muted);
+}
+
+.check input {
+  min-height: 0;
+}
+
+.status {
+  margin: 0;
+  color: var(--muted);
+}
+
+.status.ok {
+  color: var(--ok);
+}
+
+.status.bad {
+  color: var(--bad);
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.5rem 1rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs button {
+  border-color: var(--border);
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.tabs button[aria-selected="true"] {
+  background: var(--surface);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+main {
+  padding: 1rem;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.panel[hidden] {
+  display: none;
+}
+
+.error {
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.error[hidden] {
+  display: none;
+}
+
+.error .code {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.error .request-id {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+
+.summary {
+  margin: 0;
+  color: var(--muted);
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  margin: 0;
+}
+
+.facts div {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  font-family: var(--mono);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+caption {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  color: var(--muted);
+}
+
+th,
+td {
+  padding: 0.4rem 0.75rem;
+  border-top: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+th {
+  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+
+td {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+td.body {
+  min-width: 18rem;
+  font-family: inherit;
+  font-size: 1em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+td.empty {
+  color: var(--muted);
+  font-family: inherit;
+}
+
+.state-idle {
+  color: var(--ok);
+}
+
+.state-pending,
+.state-no_receiver {
+  color: var(--warn);
+}
+
+.state-blocked {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+@media (max-width: 40rem) {
+  .topbar,
+  .tabs,
+  main {
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+}

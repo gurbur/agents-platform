@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>agents-platform</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>agents-platform</h1>
+    <form id="token-form" class="token-form" autocomplete="off">
+      <label for="token-input">Owner token</label>
+      <input id="token-input" type="password" autocomplete="off" spellcheck="false" required>
+      <label class="check" for="token-save">
+        <input id="token-save" type="checkbox">
+        이 탭에 보관 (sessionStorage)
+      </label>
+      <button type="submit">연결</button>
+      <button type="button" id="logout-button">로그아웃</button>
+    </form>
+    <p id="connection-status" class="status" role="status" aria-live="polite">token 없음</p>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="화면">
+    <button type="button" role="tab" id="tab-directory" data-tab="directory" aria-controls="panel-directory" aria-selected="true">Directory</button>
+    <button type="button" role="tab" id="tab-history" data-tab="history" aria-controls="panel-history" aria-selected="false">History</button>
+    <button type="button" role="tab" id="tab-inbox" data-tab="inbox" aria-controls="panel-inbox" aria-selected="false">Inbox</button>
+    <button type="button" role="tab" id="tab-delivery" data-tab="delivery" aria-controls="panel-delivery" aria-selected="false">Delivery</button>
+  </nav>
+
+  <main>
+    <section id="panel-directory" class="panel" role="tabpanel" aria-labelledby="tab-directory">
+      <div class="toolbar">
+        <button type="button" id="directory-refresh">새로고침</button>
+      </div>
+      <div id="directory-error" class="error" role="alert" hidden></div>
+      <div class="table-wrap">
+        <table>
+          <caption>등록된 agent (GET /v1/agents)</caption>
+          <thead>
+            <tr>
+              <th scope="col">agent_id</th>
+              <th scope="col">joined_all</th>
+              <th scope="col">receiver_url</th>
+              <th scope="col">route_version</th>
+              <th scope="col">created_at</th>
+              <th scope="col">delivery.state</th>
+            </tr>
+          </thead>
+          <tbody id="directory-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="panel-history" class="panel" role="tabpanel" aria-labelledby="tab-history" hidden>
+      <form id="history-form" class="toolbar">
+        <label for="history-room">room</label>
+        <select id="history-room"></select>
+        <label for="history-query">검색어 (q)</label>
+        <input id="history-query" type="search" spellcheck="false">
+        <button type="submit">조회</button>
+      </form>
+      <div id="history-error" class="error" role="alert" hidden></div>
+      <p id="history-summary" class="summary"></p>
+      <div class="table-wrap">
+        <table>
+          <caption>room history, 최신순 (GET /v1/messages)</caption>
+          <thead>
+            <tr>
+              <th scope="col">event_seq</th>
+              <th scope="col">created_at</th>
+              <th scope="col">room_id</th>
+              <th scope="col">sender_id</th>
+              <th scope="col">reply_to</th>
+              <th scope="col">message_id</th>
+              <th scope="col">body</th>
+            </tr>
+          </thead>
+          <tbody id="history-rows"></tbody>
+        </table>
+      </div>
+      <div class="toolbar">
+        <button type="button" id="history-more" hidden>이전 더 보기</button>
+      </div>
+    </section>
+
+    <section id="panel-inbox" class="panel" role="tabpanel" aria-labelledby="tab-inbox" hidden>
+      <form id="inbox-form" class="toolbar">
+        <label for="inbox-agent">agent</label>
+        <select id="inbox-agent"></select>
+        <label for="inbox-start">시작</label>
+        <select id="inbox-start">
+          <option value="marker">read_marker 다음부터 (기본)</option>
+          <option value="zero">처음부터 (after_seq=0)</option>
+        </select>
+        <button type="submit">조회</button>
+      </form>
+      <div id="inbox-error" class="error" role="alert" hidden></div>
+      <dl id="inbox-summary" class="facts"></dl>
+      <div class="table-wrap">
+        <table>
+          <caption>agent inbox snapshot (GET /v1/agents/{agent_id}/inbox)</caption>
+          <thead>
+            <tr>
+              <th scope="col">inbox_seq</th>
+              <th scope="col">event_seq</th>
+              <th scope="col">created_at</th>
+              <th scope="col">room_id</th>
+              <th scope="col">sender_id</th>
+              <th scope="col">message_id</th>
+              <th scope="col">body</th>
+            </tr>
+          </thead>
+          <tbody id="inbox-rows"></tbody>
+        </table>
+      </div>
+      <div class="toolbar">
+        <button type="button" id="inbox-more" hidden>더 보기</button>
+      </div>
+    </section>
+
+    <section id="panel-delivery" class="panel" role="tabpanel" aria-labelledby="tab-delivery" hidden>
+      <div class="toolbar">
+        <button type="button" id="delivery-refresh">새로고침</button>
+      </div>
+      <div id="delivery-error" class="error" role="alert" hidden></div>
+      <div class="table-wrap">
+        <table>
+          <caption>agent별 delivery 상태 (GET /v1/agents/{agent_id}/delivery)</caption>
+          <thead>
+            <tr>
+              <th scope="col">agent_id</th>
+              <th scope="col">state</th>
+              <th scope="col">read_marker</th>
+              <th scope="col">inbox_head_seq</th>
+              <th scope="col">pending_seq</th>
+              <th scope="col">last_accepted_seq</th>
+              <th scope="col">route_version</th>
+              <th scope="col">receiver_url_present</th>
+              <th scope="col">last_attempt_at</th>
+              <th scope="col">last_error</th>
+            </tr>
+          </thead>
+          <tbody id="delivery-rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
