@@ -1,0 +1,20 @@
+# platformd configuration for the Raspberry Pi (INTERFACES.md IF-CFG-001).
+#
+# Install as /etc/platformd/platformd.toml, mode 0640 root:platformd. It is
+# deliberately not copied by deploy/deploy.sh: the listen address below is
+# specific to the Pi, and the public repository never holds it.
+
+# The Pi's Tailscale IPv4 address and port 7340 (free in the 2026-10-15
+# preflight: 22, 8080, 8787 and 20241 are taken). Replace the placeholder;
+# `tailscale ip -4` on the Pi prints the address.
+listen = "100.x.y.z:7340"
+
+# The only directory the unit lets platformd write (ReadWritePaths).
+db_path = "/var/lib/platformd/platform.db"
+
+# Created by the operator with `openssl rand -base64 48`; mode 0640
+# root:platformd. Never put the token itself in this file.
+owner_token_file = "/etc/platformd/owner.token"
+
+# Receiver callback tuning is optional; omit [delivery] to use the defaults
+# documented in platformd.example.toml.

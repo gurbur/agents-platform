@@ -1,0 +1,50 @@
+# agents-platform message hub. Installed by deploy/deploy.sh as
+# /etc/systemd/system/platformd.service. Directives follow systemd 257
+# (Debian 13 trixie): systemd.service(5), systemd.exec(5),
+# systemd.resource-control(5). Operating guide: README.md "운영".
+
+[Unit]
+Description=agents-platform message hub (platformd)
+# listen is the Pi's Tailscale address. Ordering only (no Wants=/Requires=):
+# this unit never starts, stops or reconfigures tailscaled.
+Wants=network-online.target
+After=network-online.target tailscaled.service
+# The Tailscale address can appear a few seconds after tailscaled starts;
+# binding before that fails with exit 1 and is retried every RestartSec
+# without a start limit. Configuration errors exit 2 and are not retried
+# (RestartPreventExitStatus below), so a bad config does not loop.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=platformd
+Group=platformd
+ExecStart=/usr/local/bin/platformd --config /etc/platformd/platformd.toml
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=2
+KillSignal=SIGTERM
+# platformd drains requests for up to 10 s and joins the DB thread for up to
+# 5 s after SIGTERM (IF-OPS-001); 20 s leaves a margin before SIGKILL.
+TimeoutStopSec=20
+# Logs go to stderr and from there to journald; LogRateLimit* stay default.
+
+# Hardening.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/platformd
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# New DB, WAL and SHM files are not world-readable (they hold receiver secrets).
+UMask=0027
+
+# Resource control — preflight 2026-10-15 기준 초안, 측정 뒤 조정.
+# (Pi: 4 CPU, 8062 MiB RAM with 7737 MiB available, load 0.00.)
+MemoryMax=512M
+CPUQuota=100%
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

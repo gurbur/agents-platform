@@ -371,6 +371,24 @@ mod tests {
         assert_eq!(config.db_path, fx.dir.path().join("data/platform.db"));
     }
 
+    /// The Pi example carries a placeholder address the operator replaces;
+    /// with a real address in its place it must load unchanged otherwise.
+    #[test]
+    fn pi_example_config_loads_once_the_address_is_filled_in() {
+        let example = include_str!("../../../deploy/platformd.pi.example.toml");
+        assert!(example.contains("\"100.x.y.z:7340\""));
+        let filled = example.replace("100.x.y.z", "100.64.0.1");
+
+        let file: ConfigFile = toml::from_str(&filled).unwrap();
+
+        assert_eq!(file.listen, "100.64.0.1:7340".parse().unwrap());
+        assert_eq!(file.db_path, Path::new("/var/lib/platformd/platform.db"));
+        assert_eq!(
+            file.owner_token_file,
+            Path::new("/etc/platformd/owner.token")
+        );
+    }
+
     #[test]
     fn debug_redacts_owner_token() {
         let token = OwnerToken(VALID_TOKEN.to_owned());

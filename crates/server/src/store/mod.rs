@@ -3,6 +3,7 @@
 //! One OS thread owns the only `rusqlite::Connection`. [`Store`] handles send
 //! closures to it; closures must not perform network I/O or await.
 
+pub mod backup;
 pub mod migrations;
 pub mod queries;
 

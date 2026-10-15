@@ -2,8 +2,9 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use platformd::config::Config;
+use platformd::store::backup;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
@@ -16,8 +17,28 @@ const EXIT_FAILURE: u8 = 1;
 #[command(name = "platformd", version = platformd::VERSION, about = "agents-platform message hub")]
 struct Args {
     /// Path to the TOML configuration file.
-    #[arg(long, env = "PLATFORMD_CONFIG", default_value = "platformd.toml")]
+    #[arg(
+        long,
+        global = true,
+        env = "PLATFORMD_CONFIG",
+        default_value = "platformd.toml"
+    )]
     config: PathBuf,
+
+    /// Without a subcommand, platformd runs the server.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Write an online, integrity-checked snapshot of the database to a new
+    /// file. Safe while the server is running.
+    Backup {
+        /// Snapshot file to create; an existing file is refused.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -32,6 +53,33 @@ fn main() -> ExitCode {
         }
     };
 
+    match args.command {
+        None => serve(config),
+        Some(Command::Backup { out }) => write_backup(&config, &out),
+    }
+}
+
+/// Prints the snapshot summary on stdout: one `key: value` line each, then
+/// one `row_count <table> <rows>` line per table for comparison elsewhere.
+fn write_backup(config: &Config, out: &std::path::Path) -> ExitCode {
+    let snapshot = match backup::snapshot(&config.db_path, out) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            eprintln!("platformd: backup failed: {err}");
+            return ExitCode::from(EXIT_FAILURE);
+        }
+    };
+    println!("backup: {}", snapshot.path.display());
+    println!("bytes: {}", snapshot.bytes);
+    println!("schema_version: {}", snapshot.schema_version);
+    println!("integrity_check: ok");
+    for (table, rows) in &snapshot.row_counts {
+        println!("row_count {table} {rows}");
+    }
+    ExitCode::SUCCESS
+}
+
+fn serve(config: Config) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
