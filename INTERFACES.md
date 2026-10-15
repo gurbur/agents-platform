@@ -189,9 +189,11 @@
 
 - **종류**: 내부 상태 기계 · **제공자**: `platformd::delivery` · **소비자**: `IF-API-DELIVERY` handler
 - 외부 의미(state 이름, 202 의미, retry 분류, route_version 격리, coalescing)는 `IF-RCV-*`와 API_V1 "Delivery 진단" 절이 정본. 여기서는 저장 표현만 정한다: 표시 `state`는 `receiver_url IS NULL → no_receiver`, 그 외 `notification_pending.state`. `read_marker >= inbox_head`가 되면 worker가 `pending → idle`로 내린다.
-- backoff: `min(backoff_max, backoff_min * 2^attempt)`에 ±50% jitter. 유효한 `Retry-After`(초 또는 HTTP-date)가 있으면 그 값(상한 backoff_max)을 쓴다.
-- 자세한 전이표는 S3 slice-spec에서 freeze한다.
-- **상태**: draft · 2026-10-15
+- backoff(1-based attempt): `min(backoff_max, backoff_min · 2^(attempt-1))`에 ±50% jitter, 결과를 `[backoff_min, backoff_max]`로 clamp (RECEIVER §9의 1, 2, 4, 8… 예시와 일치). 유효한 `Retry-After`(초 또는 HTTP-date)가 있으면 지수값 대신 그 값을 쓰되 **같은 범위로 clamp**한다 — `Retry-After: 0`이나 과거 날짜가 tight loop를 만들지 않게.
+- **marker-at-head 우선**: 어떤 사건 뒤에도 URL이 있고 `read_marker >= inbox_head`면 행은 `idle`(deadline·attempt 초기화). 늦게 온 실패 응답이 "미확인 없음"을 pending으로 되돌리지 않는다. route 변경 시 미확인이 없으면 역시 `idle`.
+- `last_error` 코드: `connect`, `timeout`, `network`, `http_NNN`(모든 상태를 그대로), `protocol_mismatch`, `internal`.
+- 전이표 정본은 [S4 slice-spec](docs/slices/S4-delivery-worker.md) "전이" 절. 구현은 `platformd::delivery::transitions`(순수 함수) + `store::queries::delivery`.
+- **상태**: frozen · 2026-10-16
 
 ### `IF-WIRE-001 — GET /v1/agents 응답 형태`
 

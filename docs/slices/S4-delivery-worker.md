@@ -1,6 +1,6 @@
 # 슬라이스 S4: delivery-worker
 
-- **상태**: frozen (2026-10-15)
+- **상태**: done (2026-10-16) — 217 tests. Retry-After 하한 clamp, marker-at-head 우선, 미확인 없는 route 변경 → idle 은 `IF-DLV-001`에 확정 반영.
 - **위험/의존도**: 상 — 외부 HTTP, 재시도, 상태 기계, 재시작 복구가 겹친다. 수용 시나리오 5개가 걸려 있다.
 
 ## 목표
