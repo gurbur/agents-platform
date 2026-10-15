@@ -4,6 +4,7 @@
 //! closures to it; closures must not perform network I/O or await.
 
 pub mod migrations;
+pub mod queries;
 
 use std::path::Path;
 use std::thread::JoinHandle;
@@ -44,6 +45,8 @@ pub enum StoreError {
     ShutdownTimeout(Duration),
     #[error("database thread panicked")]
     ThreadPanicked,
+    #[error("stored data violates an invariant: {0}")]
+    Invariant(String),
 }
 
 /// Handle to the DB thread. Cheap to clone; the thread stops once every clone

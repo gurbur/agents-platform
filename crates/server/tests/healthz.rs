@@ -69,12 +69,16 @@ async fn every_response_gets_a_distinct_request_id() {
 }
 
 #[tokio::test]
-async fn v1_routes_are_not_served_yet() {
+async fn unknown_paths_get_the_error_body() {
     let fx = Fixture::new();
     let server = RunningServer::start(&fx.load_config()).await;
 
-    let response = reqwest::get(server.url("/v1/agents")).await.unwrap();
+    let response = reqwest::get(server.url("/no-such-path")).await.unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let request_id = request_id_of(&response);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "not_found");
+    assert_eq!(body["error"]["request_id"], request_id.as_str());
 
     server.shutdown().await.unwrap();
 }

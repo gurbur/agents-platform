@@ -5,11 +5,17 @@
 //! serde_json and thiserror.
 
 pub mod agent_id;
+pub mod agents;
 pub mod error;
 pub mod health;
 pub mod seq;
 
 pub use agent_id::{AgentId, AgentIdError};
+pub use agents::{
+    AgentEntry, AgentList, DeliveryState, DeliverySummary, MembershipRequest, MembershipResponse,
+    OwnerAgentEntry, ReceiverResponse, RegisterAgentRequest, RegisterAgentResponse,
+    RotateTokensResponse, UpdateReceiverRequest,
+};
 pub use error::{ErrorBody, ErrorDetail, codes};
 pub use health::HealthStatus;
 pub use seq::{Seq, SeqError};

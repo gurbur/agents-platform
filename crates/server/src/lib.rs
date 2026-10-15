@@ -5,6 +5,7 @@
 //! in-process.
 
 pub mod api;
+pub mod auth;
 pub mod clock;
 pub mod config;
 pub mod store;
@@ -79,7 +80,7 @@ pub async fn start(config: &Config) -> Result<Server, StartupError> {
             addr: config.listen,
             source,
         })?;
-    let router = api::router(api::AppState::new(store));
+    let router = api::router(api::AppState::new(store, config.owner_token.clone()));
 
     Ok(Server {
         listener,

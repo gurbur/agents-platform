@@ -59,6 +59,11 @@ pub mod codes {
     pub const INVALID_FIELD: &str = "invalid_field";
     pub const INVALID_JSON: &str = "invalid_json";
     pub const UNSUPPORTED_MEDIA_TYPE: &str = "unsupported_media_type";
+    /// Supplementary codes from `IF-WIRE-003`.
+    pub const AGENT_NOT_FOUND: &str = "agent_not_found";
+    pub const NOT_FOUND: &str = "not_found";
+    pub const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
+    pub const INTERNAL: &str = "internal";
     /// 503 from `GET /healthz` when the database round trip fails. Not listed
     /// in API_V1; chosen in S0 for the `IF-OPS-001` failure path.
     pub const UNAVAILABLE: &str = "unavailable";
