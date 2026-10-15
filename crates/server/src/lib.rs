@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 pub mod clock;
 pub mod config;
+pub mod delivery;
 pub mod store;
 
 use std::future::{Future, IntoFuture};
@@ -20,6 +21,7 @@ use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::delivery::DeliverySignal;
 use crate::store::{Store, StoreError, StoreThread, migrations};
 
 /// Upper bound for in-flight requests to finish after a shutdown signal (`IF-OPS-001`).
@@ -60,6 +62,7 @@ pub struct Server {
     listener: TcpListener,
     router: axum::Router,
     store_thread: StoreThread,
+    delivery: DeliverySignal,
 }
 
 /// Opens the database, applies migrations, then binds the listener.
@@ -80,18 +83,30 @@ pub async fn start(config: &Config) -> Result<Server, StartupError> {
             addr: config.listen,
             source,
         })?;
-    let router = api::router(api::AppState::new(store, config.owner_token.clone()));
+    let delivery = DeliverySignal::new();
+    let router = api::router(api::AppState::new(
+        store,
+        config.owner_token.clone(),
+        delivery.clone(),
+    ));
 
     Ok(Server {
         listener,
         router,
         store_thread,
+        delivery,
     })
 }
 
 impl Server {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    /// The signal raised after every commit that created inbox rows; the
+    /// delivery worker (S4) waits on it.
+    pub fn delivery_signal(&self) -> DeliverySignal {
+        self.delivery.clone()
     }
 
     /// Serves until `shutdown` resolves, then closes the listener, waits up to
@@ -104,6 +119,7 @@ impl Server {
             listener,
             router,
             store_thread,
+            delivery: _,
         } = self;
         if let Ok(addr) = listener.local_addr() {
             info!(%addr, "listening");

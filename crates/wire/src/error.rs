@@ -64,6 +64,8 @@ pub mod codes {
     pub const NOT_FOUND: &str = "not_found";
     pub const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
     pub const INTERNAL: &str = "internal";
+    pub const REPLY_TO_NOT_FOUND: &str = "reply_to_not_found";
+    pub const MESSAGE_NOT_FOUND: &str = "message_not_found";
     /// 503 from `GET /healthz` when the database round trip fails. Not listed
     /// in API_V1; chosen in S0 for the `IF-OPS-001` failure path.
     pub const UNAVAILABLE: &str = "unavailable";

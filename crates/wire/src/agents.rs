@@ -149,7 +149,7 @@ impl fmt::Debug for RotateTokensResponse {
 
 /// Deserializes `Option<T>` through `deserialize_with`, which makes serde
 /// report a missing key as `missing field` instead of defaulting to `None`.
-fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(crate) fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,

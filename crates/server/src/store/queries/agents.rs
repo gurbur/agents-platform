@@ -260,7 +260,7 @@ pub fn current_event_seq(conn: &Connection) -> Result<i64, StoreError> {
     Ok(value)
 }
 
-fn agent_exists(conn: &Connection, agent_id: &AgentId) -> Result<bool, StoreError> {
+pub(crate) fn agent_exists(conn: &Connection, agent_id: &AgentId) -> Result<bool, StoreError> {
     let found: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM agents WHERE agent_id = ?1",
@@ -317,7 +317,7 @@ fn display_state(receiver_url: Option<&str>, stored: &str) -> Result<DeliverySta
     }
 }
 
-fn stored_agent_id(raw: String) -> Result<AgentId, StoreError> {
+pub(crate) fn stored_agent_id(raw: String) -> Result<AgentId, StoreError> {
     AgentId::try_from(raw)
         .map_err(|err| StoreError::Invariant(format!("stored agent_id is invalid: {err}")))
 }

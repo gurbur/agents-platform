@@ -1,8 +1,9 @@
 //! Credentials never reach the logs (`CLAUDE.md` 규약, `IF-AUTH-001`).
 //!
 //! This binary installs a process-wide subscriber at TRACE so that the DB
-//! thread and every task are captured, then drives each S1 endpoint,
-//! including failures that carry credentials in headers and bodies.
+//! thread and every task are captured, then drives each S1 and S2 endpoint,
+//! including failures that carry credentials in headers and bodies. Message
+//! bodies and history search text must not be logged either.
 
 mod common;
 
@@ -88,9 +89,33 @@ async fn credentials_do_not_appear_in_logs() {
     )
     .await
     .assert_error(422, "unexpected_field");
+    let body_marker = "BODY-MARKER-do-not-log";
+    let sender = api.register("agent-c", None).await;
+    let peer = api.register("agent-d", None).await;
+    for to in ["all", "agent-d"] {
+        let reply = api
+            .send_message(&sender.api_key, to, body_marker, &format!("key-{to}"))
+            .await;
+        assert_eq!(reply.status.as_u16(), 201);
+    }
+    api.send_message(&sender.api_key, "all", body_marker, "key-all")
+        .await;
+    api.send_message(&sender.api_key, "all", "BODY-MARKER-conflict", "key-all")
+        .await
+        .assert_error(409, "idempotency_conflict");
+    api.get(
+        &format!("/v1/messages?room_id=all&q={body_marker}"),
+        &peer.api_key,
+    )
+    .await;
     server.shutdown().await.unwrap();
 
     let logs = captured.text();
+    assert!(logs.contains("message committed"), "send is logged");
+    assert!(
+        !logs.contains("BODY-MARKER"),
+        "a message body or q was logged"
+    );
     assert!(
         logs.contains("agent registered"),
         "capture is working: {logs}"

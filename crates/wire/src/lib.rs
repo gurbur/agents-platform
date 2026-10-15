@@ -8,6 +8,7 @@ pub mod agent_id;
 pub mod agents;
 pub mod error;
 pub mod health;
+pub mod messages;
 pub mod seq;
 
 pub use agent_id::{AgentId, AgentIdError};
@@ -18,4 +19,8 @@ pub use agents::{
 };
 pub use error::{ErrorBody, ErrorDetail, codes};
 pub use health::HealthStatus;
+pub use messages::{
+    HistoryCursor, HistoryPage, Message, MessageId, MessageIdError, MessageResponse, Recipient,
+    RecipientError, RoomId, RoomIdError, SendMessageRequest,
+};
 pub use seq::{Seq, SeqError};

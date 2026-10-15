@@ -3,7 +3,9 @@
 
 mod agents;
 mod error;
+mod history;
 mod json;
+mod messages;
 mod receiver_url;
 mod request_id;
 
@@ -15,6 +17,7 @@ use tracing::warn;
 
 use crate::auth::Authenticator;
 use crate::config::OwnerToken;
+use crate::delivery::DeliverySignal;
 use crate::store::{Store, migrations};
 
 pub use error::ApiError;
@@ -26,14 +29,16 @@ pub use request_id::{RequestId, X_REQUEST_ID};
 pub struct AppState {
     store: Store,
     authenticator: Authenticator,
+    delivery: DeliverySignal,
 }
 
 impl AppState {
-    pub fn new(store: Store, owner_token: OwnerToken) -> Self {
+    pub fn new(store: Store, owner_token: OwnerToken, delivery: DeliverySignal) -> Self {
         let authenticator = Authenticator::new(owner_token, store.clone());
         Self {
             store,
             authenticator,
+            delivery,
         }
     }
 }
@@ -48,6 +53,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .merge(agents::routes())
+        .merge(messages::routes())
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)

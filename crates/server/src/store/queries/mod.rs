@@ -3,3 +3,4 @@
 //! besides SQLite.
 
 pub mod agents;
+pub mod messages;

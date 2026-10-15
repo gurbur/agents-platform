@@ -7,6 +7,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use platformd::config::Config;
+use platformd::delivery::DeliverySignal;
+use platformd::store::{Store, StoreError};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -50,10 +52,29 @@ impl Fixture {
     pub fn load_config(&self) -> Config {
         Config::load(&self.write_config("127.0.0.1:0")).expect("valid config")
     }
+
+    /// Runs `f` on a second connection to the database. WAL lets it read
+    /// while a server is running; the connection is closed before returning.
+    pub async fn read_db<T, F>(&self, f: F) -> T
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> Result<T, StoreError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let (store, thread) = Store::open(&self.db_path()).expect("open database");
+        let value = store.run(f).await.expect("database read");
+        drop(store);
+        thread
+            .shutdown(std::time::Duration::from_secs(5))
+            .await
+            .expect("database closes");
+        value
+    }
 }
 
 pub struct RunningServer {
     pub addr: SocketAddr,
+    /// The server's commit signal, for tests that stand in for the S4 worker.
+    pub delivery: DeliverySignal,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<(), platformd::ServeError>>>,
 }
@@ -62,12 +83,14 @@ impl RunningServer {
     pub async fn start(config: &Config) -> Self {
         let server = platformd::start(config).await.expect("server starts");
         let addr = server.local_addr().expect("local addr");
+        let delivery = server.delivery_signal();
         let (stop, stopped) = oneshot::channel::<()>();
         let task = tokio::spawn(server.serve(async move {
             let _ = stopped.await;
         }));
         Self {
             addr,
+            delivery,
             stop: Some(stop),
             task: Some(task),
         }
@@ -204,6 +227,29 @@ impl Api {
         let path = format!("/v1/agents/{agent_id}/tokens/rotate");
         self.send(reqwest::Method::POST, &path, Some(token), None)
             .await
+    }
+
+    /// `POST /v1/messages` with `reply_to` omitted.
+    pub async fn send_message(&self, token: &str, to: &str, body: &str, client_key: &str) -> Reply {
+        self.post(
+            "/v1/messages",
+            token,
+            serde_json::json!({"to": to, "body": body, "client_key": client_key}),
+        )
+        .await
+    }
+
+    /// Sends and asserts 201; returns the message body.
+    pub async fn sent(
+        &self,
+        token: &str,
+        to: &str,
+        body: &str,
+        client_key: &str,
+    ) -> serde_json::Value {
+        let reply = self.send_message(token, to, body, client_key).await;
+        assert_eq!(reply.status.as_u16(), 201, "body: {}", reply.body);
+        reply.body
     }
 
     /// Registers as the owner and asserts 201.
