@@ -11,7 +11,7 @@
 | S4 | [delivery-worker](S4-delivery-worker.md) | 상 | notification_pending, callback client, backoff/Retry-After, blocked 분류, route_version 격리, 300s redrive, `GET delivery`, `POST delivery/retry` | 5, 6, 7, 8, 9 | done 2026-10-16 |
 | S5 | [cli-mapping](S5-cli-mapping.md) | 중 | API_V1 "CLI 매핑" 표 전체 | — | done 2026-10-16 |
 | S6 | [browser-history-ui](S6-browser-history-ui.md) | 중 | embed된 정적 UI: owner token으로 room history·agent directory 조회(read-only) | 12(owner no-ack) | done 2026-10-16 |
-| S7 | [ops-and-deploy](S7-ops-and-deploy.md) | 상 | systemd unit, service account, 배포 스크립트, backup(rusqlite backup API), preflight 측정, Pi 실배포·acceptance 재실행 | 전체 재실행 | frozen (Pi 설치는 사용자 확인 뒤) |
+| S7 | [ops-and-deploy](S7-ops-and-deploy.md) | 상 | systemd unit, service account, 배포 스크립트, backup(rusqlite backup API), preflight 측정, Pi 실배포·acceptance 재실행 | 전체 재실행 | 산출물 done 2026-10-16 · **Pi 설치 대기(사용자 확인)** |
 
 규칙:
 - S1~S3는 `IF-DB-001` schema를 바꾸지 않는다(S0에서 전체 schema를 먼저 둔다 — "아직 없는 표면은 지금이 싸다").

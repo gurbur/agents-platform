@@ -4,7 +4,7 @@ Raspberry Pi 5에서 상시 운영할 개인용 에이전트 메시지 허브의
 
 ## 현재 상태
 
-아직 구현 전인 설계 단계입니다. 이 저장소의 문서는 v1 메시징 범위와 HTTP/JSON 계약, receiver 알림 계약, Rust 기반 운영 선택을 기록합니다.
+v1 서버(`platformd`)·CLI(`platform`)·읽기 전용 브라우저 UI·운영 스크립트가 구현돼 있습니다(2026-10-16). 설계 문서는 wire 계약의 정본이고, 구현 계약은 [INTERFACES.md](INTERFACES.md), 진행 상태는 [슬라이스 계획](docs/slices/README.md)에 있습니다. 운영 Pi 설치는 "운영" 절을 따릅니다.
 
 ## v1 범위
 
@@ -90,3 +90,64 @@ deploy/build-aarch64.sh
 ```
 
 Docker `rust:1-trixie` 컨테이너(`linux/aarch64`)에서 `aarch64-unknown-linux-gnu`로 빌드합니다([ADR-0002](docs/adr/0002-aarch64-gnu-container-build.md)). 산출물은 `target/aarch64/aarch64-unknown-linux-gnu/release/platformd`(와 `platform`)이며, 스크립트가 컨테이너 glibc 버전, 산출 경로, `file` 출력, 바이너리가 요구하는 최고 `GLIBC_x.y`를 출력합니다. 운영 Pi는 glibc 2.41이므로 그 이하여야 합니다.
+
+## 운영 (Raspberry Pi)
+
+운영 Pi는 private Tailscale로만 접근합니다. 스크립트는 접속 대상을 `~/.ssh/config`의 host alias(`<ssh-alias>`)로만 받으며, Pi의 IP·호스트명·사용자명은 저장소에 쓰지 않습니다. Pi의 sudo는 비밀번호가 필요하므로 배포·backup 중 한 번 입력합니다. 경로·권한·unit·복구의 정본은 [기술 스택과 운영 계획](docs/design/TECH_STACK_AND_OPERATIONS.md) "Backup과 복구"·"배포와 기존 서비스 공존" 절입니다.
+
+### 1. preflight (읽기 전용)
+
+```sh
+deploy/preflight.sh <ssh-alias>
+```
+
+디스크·메모리·listen 포트(7340이 비었는지)·실행 중 service·OS/glibc·cgroup controller·platformd 설치 흔적·`sudo -n` 가능 여부를 출력만 합니다. 결과는 날짜와 함께 TECH 문서 "Preflight 실측"에 기록합니다.
+
+### 2. 첫 설치
+
+```sh
+deploy/deploy.sh <ssh-alias> --first-install --dry-run   # 실행될 build·scp·ssh 명령만 출력
+deploy/deploy.sh <ssh-alias> --first-install
+```
+
+처음에는 설정과 owner token이 없으므로 service account와 `/etc/platformd`만 만들고 아무것도 기동하지 않은 채 멈춥니다(exit 3). 안내대로 Pi에서 직접 만듭니다. token은 Pi 밖으로 나가지 않으며 스크립트가 만들지 않습니다.
+
+```sh
+# Pi에서
+sudo sh -c 'umask 0027 && openssl rand -base64 48 > /etc/platformd/owner.token'
+sudo chgrp platformd /etc/platformd/owner.token
+sudo install -m 0640 -o root -g platformd /tmp/platformd-deploy/platformd.pi.example.toml /etc/platformd/platformd.toml
+sudoedit /etc/platformd/platformd.toml   # listen = "<tailscale ip -4 값>:7340"
+```
+
+그다음 같은 명령(`deploy/deploy.sh <ssh-alias> --first-install`)을 다시 실행합니다. 원격 단계는 바이너리를 `/usr/local/bin`에, unit을 `/etc/systemd/system/platformd.service`에 설치하고 `systemd-analyze verify` → `daemon-reload` → `enable --now` → `/healthz` 200·`is-active` → `journalctl -n 20`을 거친 뒤, 기존 unit 넷(`cloudflared`, `garage-docs`, `my-garage-lab-webserver`, `tailscaled`)의 `ActiveState`·`ExecMainStartTimestamp`가 배포 전후 같은지 출력합니다. 다르면 실패로 끝납니다. owner token 파일은 Mac에서 CLI·브라우저용으로 따로 보관합니다(`owner.token`처럼 `.gitignore`에 걸리는 위치나 저장소 밖).
+
+### 3. 재배포
+
+```sh
+deploy/deploy.sh <ssh-alias>
+```
+
+새 바이너리와 unit을 설치하고 `platformd.service`만 `restart`합니다. 데이터(`/var/lib/platformd`)와 설정은 그대로입니다. schema를 올리는 버전이면 먼저 backup을 받습니다.
+
+### 4. backup
+
+```sh
+deploy/backup.sh <ssh-alias> ~/platformd-backups
+```
+
+Pi에서 `platformd backup`(서비스 동작 중 가능, 읽기 전용 연결의 SQLite online backup)으로 `platform-<UTC>.db`를 만들고 Mac으로 가져온 뒤 원격 임시 파일을 지웁니다. 로컬에 `sqlite3`가 있으면 `integrity_check`와 테이블별 행 수를 Pi 출력과 대조합니다. snapshot에는 receiver secret이 평문으로 들어 있으니 보관 위치를 비공개로 둡니다. 주기 실행은 launchd 등으로 직접 예약합니다.
+
+### 5. 스모크
+
+```sh
+python3 -I deploy/mock-receiver.py <Mac의 Tailscale IP> 8799          # 다른 터미널, receiver 시나리오용
+deploy/smoke.sh http://<Pi의 Tailscale IP>:7340 <owner-token-file> \
+  --receiver-url http://<Mac의 Tailscale IP>:8799/notify
+```
+
+`platform` CLI(`PATH` 또는 `--platform <path>`)와 curl로 health, 등록, directory credential 비노출, `all` fanout, DM, unknown·self DM 오류, idempotency, inbox paging snapshot, read marker, owner 조회 no-ack, delivery 상태, rotate 뒤 401, (선택) receiver 202를 실행하고 PASS/FAIL/SKIP 표를 출력합니다. 하나라도 FAIL이면 exit 1. agent는 매번 `smoke-<ulid>`로 새로 만들고(v1에는 삭제가 없어 directory에 남습니다), 끝에 `all`에서 탈퇴시키고 receiver를 해제합니다. `all` 시나리오는 그 시점에 가입한 실제 agent에게도 fanout된다는 점에 유의합니다.
+
+### 6. 복구
+
+TECH 문서 "복구 절차" 7단계를 따릅니다. 요약: snapshot `integrity_check` 확인 → `sudo systemctl stop platformd.service` → 기존 `platform.db`·`-wal`·`-shm`을 `pre-restore-<UTC>/`로 보관 → snapshot을 `/var/lib/platformd/platform.db`로 배치 → 기동 → `/healthz`·`platform agent list`·`platform delivery <agent>` 확인 → snapshot 이후 기록과 sequence continuity는 보장되지 않음을 agent 운영자에게 알림.

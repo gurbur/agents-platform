@@ -62,6 +62,25 @@ WAL은 reader와 writer의 동시성을 돕지만 microSD의 journal, fsync, wri
 
 v1은 history 자동 삭제나 delivery expiry가 없다. `all` 한 건은 참여 agent 수만큼 inbox row와 delivery 대상이 생기므로, agent 수·메시지 rate·burst·보관 기간을 확인한 뒤 storage budget을 정한다. 이 resource bound는 platform process의 운영 한도이며 agent의 model·session·발화 정책을 정하는 값이 아니다.
 
+### Preflight 실측 (2026-10-15T15:36Z)
+
+`deploy/preflight.sh <ssh-alias>`(읽기 전용)와 같은 항목을 읽기 전용 SSH로 측정했다. 시점 기록이며 배포 직전에 다시 측정한다.
+
+| 항목 | 값 |
+| --- | --- |
+| OS·kernel | Debian 13 trixie aarch64, `6.18.50+rpt-rpi-2712` |
+| CPU·load | 4 CPU, load 0.00 |
+| RAM·swap | 8062 MiB(사용 325, 가용 7737), swap 2047 MiB |
+| `/` (microSD) | 29G 중 4.2G 사용·24G 여유 |
+| `/tmp` | tmpfs 4.0G — 배포 스테이징(`/tmp/platformd-deploy`)과 backup 임시 파일(`/tmp/platformd-backup`)에 쓴다 |
+| journald | 사용량 8M |
+| listen 포트 | 22, 8080(`0.0.0.0`), 8787·20241(`127.0.0.1`), tailscaled 2개(`tailscale0`). **7340 비어 있음** |
+| platformd 흔적 | `platformd` 사용자·`/etc/platformd`·`/var/lib/platformd`·`/usr/local/bin/platformd`·unit 모두 없음 |
+| sudo | `sudo -n true` 실패 — **비밀번호 필요**. 배포·backup은 `ssh -t`로 TTY를 확보해 사람이 입력한다. `sudoers`는 바꾸지 않는다 |
+| 도구 | `systemd-analyze`, `curl`, `install` 있음. `useradd`는 `/usr/sbin`(sudo 경로) |
+
+이 측정에서 DB main·WAL과 service log의 실제 크기는 아직 없다(서비스 설치 전). backup 임시 공간은 snapshot 한 개(= DB main 크기 수준)이며 `/tmp` tmpfs 4.0G 안에서 만든 뒤 Mac으로 옮기고 바로 지운다. systemd resource control 초안값(`MemoryMax=512M`, `CPUQuota=100%`, `TasksMax=256`)은 이 수치에서 정했고 `deploy/platformd.service`에만 둔다. 메모리 한도가 적용되려면 cgroup v2 `memory` controller가 켜져 있어야 하므로 `preflight.sh`가 `/sys/fs/cgroup/cgroup.controllers`도 읽는다.
+
 preflight 측정으로 최소 free-space threshold와 DB main·WAL, service log, backup의 budget을 정한다. 저장 공간이 부족하면 신규 write를 fail closed하고 durable commit 성공을 반환하지 않는다. 기존 history와 WAL을 저장 공간 확보를 위해 자동 삭제하지 않으며, service log에는 body와 secret을 기록하지 않고 해당 service log에만 상한을 둔다. delivery scheduler는 idle일 때 tight DB polling loop를 돌지 않고 DB signal 또는 다음 due 시각을 기다린다. 이 규칙은 platform process의 자원 운영에만 적용하며 agent 정책을 정하지 않는다.
 
 ## Backup과 복구
@@ -69,6 +88,24 @@ preflight 측정으로 최소 free-space threshold와 DB main·WAL, service log,
 backup은 다른 머신에 온라인 일관 snapshot으로 보관한다. 활성 DB 파일의 raw copy를 backup으로 사용하지 않으며, 구현 시 rusqlite의 공식 `backup` feature/API를 검토한다. backup 복원 뒤 sequence continuity를 자동 보장하지 않는다는 v1 경계를 유지한다.
 
 복구 절차에는 DB main/WAL 상태, service 중지 여부, restore 후 sequence와 pending delivery 확인을 포함한다. backup은 message history와 delivery state를 함께 복구할 수 있어야 한다. backup 용량과 주기는 32GB microSD free space 및 다른 머신의 보관 예산을 기준으로 정한다.
+
+### Snapshot 만들기
+
+- `platformd backup --config <toml> --out <file>`: 설정의 `db_path`를 **읽기 전용 두 번째 연결**로 열고 rusqlite `backup::Backup`으로 `<file>`에 복사한다. 한 step에 전체 page를 복사하므로 하나의 WAL read snapshot에서 일관되게 읽고, 서비스의 write를 막지 않는다(서비스 동작 중 실행 가능). 산출 파일은 rollback journal(`journal_mode=DELETE`)로 바꿔 `-wal` 없이 파일 하나로 완결되며, 다시 열어 `PRAGMA integrity_check`가 `ok`일 때만 성공(exit 0)이다. 이미 있는 `<file>`은 덮어쓰지 않고 거부하며(exit 1), 실패하면 만들던 파일을 지운다. 설정 오류는 exit 2. stdout에 `integrity_check: ok`와 테이블별 `row_count <table> <rows>`를 출력한다.
+- snapshot은 `receiver_secret`을 평문으로 담는다(`IF-AUTH-001`). 산출 파일은 0600으로 만들고, 보관 위치도 비공개로 둔다.
+- `deploy/backup.sh <ssh-alias> <local-dir>`: Pi에서 `sudo -u platformd platformd backup --config /etc/platformd/platformd.toml --out /tmp/platformd-backup/platform-<UTC>.db`를 실행하고(`ssh -t`, sudo 비밀번호 1회), `scp`로 `<local-dir>`에 가져온 뒤 원격 임시 파일을 지운다. 로컬에 `sqlite3`가 있으면 `PRAGMA integrity_check`와 Pi가 출력한 테이블별 행 수를 비교한다(없으면 생략을 알린다). 주기 실행은 v1 범위 밖이며 Mac launchd 등으로 사용자가 정한다.
+
+### 복구 절차
+
+복구는 snapshot 시점으로 **되돌리는** 작업이다. 아래 순서를 지키고, 기존 파일은 지우지 않고 옆에 보관한다.
+
+1. **snapshot 확인**: 복구할 파일을 Mac에서 `sqlite3 -readonly <file> 'PRAGMA integrity_check;'`로 `ok`인지 확인하고 Pi의 `/tmp`로 복사한다(`scp <file> <ssh-alias>:/tmp/platformd-restore.db`).
+2. **서비스 중지**: `sudo systemctl stop platformd.service` (platformd unit만). `systemctl is-active platformd.service`가 `inactive`인지 확인한다. 중지 전에는 DB 파일을 건드리지 않는다.
+3. **현재 DB 보관**: `/var/lib/platformd/platform.db`와 `-wal`·`-shm`(있으면 셋 다)을 `sudo install -d -m 0750 -o platformd -g platformd /var/lib/platformd/pre-restore-<UTC>` 아래로 `sudo mv`한다. WAL에는 main file에 아직 반영되지 않은 commit이 있을 수 있으므로 main file만 옮기지 않는다.
+4. **snapshot 배치**: `sudo install -m 0640 -o platformd -g platformd /tmp/platformd-restore.db /var/lib/platformd/platform.db` 뒤 `/tmp`의 복사본을 지운다. snapshot에는 `-wal`이 없고, 기동 시 platformd가 WAL로 다시 바꾼다.
+5. **기동**: `sudo systemctl start platformd.service`, `systemctl is-active platformd.service`가 `active`인지와 `journalctl -u platformd.service -n 20 --no-pager`에 `database ready … schema_version=<n>`이 있는지 본다. snapshot의 schema가 바이너리보다 새로우면 기동이 거부된다(`Migration과 운영 변경`).
+6. **확인**: `curl -fsS http://<listen>/healthz`가 200 `{"status":"ok","schema_version":…}`, `platform agent list`가 snapshot 시점의 agent를, `platform delivery <agent_id>`가 agent별 `read_marker`·`inbox_head_seq`·`state`를 보여 주는지 확인한다. pending이던 delivery는 그 상태 그대로 재개된다.
+7. **sequence continuity 경고**: snapshot 이후의 message·inbox row·read marker·token rotation은 사라진다. 같은 `event_seq`·`inbox_seq`가 다른 message로 **다시 발급될 수 있고**, snapshot 뒤에 rotate한 agent는 이전 API key·receiver secret으로 되돌아간다. v1은 이 continuity를 보장하지 않으므로 연결된 agent 운영자에게 복구 시점을 알리고, 필요하면 cursor를 초기화하거나 `agent tokens rotate`로 키를 다시 발급한다. 확인이 끝나면 `pre-restore-<UTC>` 보관본의 처분을 정한다.
 
 ## 배포와 기존 서비스 공존
 
@@ -98,7 +135,29 @@ platform은 독립 systemd unit과 전용 service account로 실행한다. 전�
 3. sudo 권한 사용자로 unit 파일을 설치하고 `systemctl daemon-reload` 뒤 platform unit만 재시작한다. 서비스 process는 전용 service account로 실행한다.
 4. readiness를 확인한다. readiness 확인 전에는 배포를 완료로 간주하지 않는다.
 
+S7에서 이 흐름을 `deploy/deploy.sh <ssh-alias> [--first-install] [--dry-run]`로 구현했다. 원격 단계(`deploy/remote-install.sh`)는 staging 검증(0700, `SHA256SUMS`) → service account → `/etc/platformd` → 설정·token 존재 확인(없거나 `100.x.y.z` 자리표시가 남아 있으면 아무것도 설치하지 않고 만드는 절차를 출력한 뒤 exit 3) → `/var/lib/platformd` → 바이너리 → `systemd-analyze verify` → unit 설치·`daemon-reload` → 첫 설치는 `enable --now`, 재배포는 `restart` → `/healthz` 200 대기·`is-active` → `journalctl -n 20` → 기존 unit 전후 비교 순서다. 첫 설치가 이미 동작 중이면 거부하고, 재배포는 unit이 설치돼 있어야 한다. 읽기 전용 측정은 `deploy/preflight.sh <ssh-alias>`, 외부 수용 스모크는 `deploy/smoke.sh <base-url> <owner-token-file> [--receiver-url URL]`이다.
+
 배포 스크립트는 저장소에 둔다. 저장소는 GitHub public이므로 운영 Pi의 Tailscale IP, 호스트명, 사용자명을 문서·스크립트에 쓰지 않는다. 문서에서는 "운영 Pi" 또는 "Tailscale 노드"로 지칭하고, 스크립트는 접속 대상을 인자 또는 로컬 SSH 설정(`~/.ssh/config`)의 host alias로 받는다. 구체적인 host alias와 주소는 개발 머신의 로컬 설정에만 둔다.
+
+### 실제 배치 (S7)
+
+| 대상 | 경로 | 권한 |
+| --- | --- | --- |
+| service account | `platformd` (system, `/usr/sbin/nologin`, home 없음) | — |
+| 바이너리 | `/usr/local/bin/platformd`, `/usr/local/bin/platform` | 0755 root:root |
+| unit | `/etc/systemd/system/platformd.service` (원본 `deploy/platformd.service`) | 0644 root:root |
+| 설정 | `/etc/platformd/platformd.toml` (예시 `deploy/platformd.pi.example.toml`) | 0640 root:platformd, 디렉터리 0750 root:platformd |
+| owner token | `/etc/platformd/owner.token` — 운영자가 Pi에서 `openssl rand -base64 48`로 만든다. 스크립트는 만들지 않는다 | 0640 root:platformd |
+| 데이터 | `/var/lib/platformd/platform.db` (+ `-wal`, `-shm`) | 디렉터리 0750 platformd:platformd |
+| listen | Pi의 Tailscale IPv4`:7340` — 설정 파일에만 적는다(저장소에는 `100.x.y.z:7340` 자리표시) | — |
+
+포트 7340은 2026-10-15 실측의 사용 중 포트(22, 8080, 8787, 20241, tailscaled)와 겹치지 않는다.
+
+unit(`deploy/platformd.service`)은 `Type=simple`, `User=`/`Group=platformd`, `Restart=on-failure`, `RestartSec=2`, `KillSignal=SIGTERM`, `TimeoutStopSec=20`(drain 10초 + DB thread join 5초 + 여유)과 하드닝 `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `ReadWritePaths=/var/lib/platformd`, `ProtectKernelTunables`, `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`, `UMask=0027`을 쓴다. Tailscale 주소는 tailscaled 기동 뒤 늦게 붙을 수 있어 `After=network-online.target tailscaled.service`(순서만, `Wants=`·`Requires=` 없음)로 두고, bind 실패(exit 1)는 `StartLimitIntervalSec=0`으로 제한 없이 2초 간격 재시도하되 설정 오류(exit 2)는 `RestartPreventExitStatus=2`로 재시도하지 않는다. 로그는 stderr → journald이며 `LogRateLimit*`는 기본값이다.
+
+**sudo 제약**: 운영 Pi의 sudo는 비밀번호가 필요하다(`sudo -n true` 실패). `deploy/deploy.sh`는 binary·unit·예시 설정·`remote-install.sh`·`SHA256SUMS`를 `scp`로 `/tmp/platformd-deploy/`(0700)에 올린 뒤 `ssh -t <alias> sudo bash /tmp/platformd-deploy/remote-install.sh`를 **한 번** 실행해 원격 단계를 하나의 root script로 묶는다(비밀번호 입력 1회). script를 stdin으로 넘기는 `sudo bash -s < script` 형태는 sudo가 비밀번호를 읽을 TTY 입력과 script 입력이 겹쳐 쓰지 않는다. 비대화형 자동 배포와 `sudoers` 변경은 v1 범위 밖이다.
+
+**기존 unit 보호**: 원격 script가 상태를 바꾸는 `systemctl` 호출(`enable --now`, `restart`)은 상수 `platformd.service` 하나에만 하고, 그 밖에는 unit 파일 적용을 위한 `daemon-reload`뿐이다. 위 네 기존 unit은 배포 전후 `systemctl show --property=Id,ActiveState,ExecMainStartTimestamp`로 **읽기만** 해서 비교하고, 달라지면 배포를 실패로 보고한다.
 
 systemd resource control은 측정 결과에 따라 CPU, memory, task 수의 한도를 정한다. service restart policy는 resource control과 별도로 정하며, 두 설정 모두 preflight 결과에 맞춘다. readiness는 DB를 열고 migration 검증을 끝낸 뒤에만 성공으로 보고한다. graceful shutdown은 신규 요청 접수를 중지하고 유한한 DB queue를 정리한 뒤 connection을 닫으며, network callback의 종료를 무한히 기다리지 않고 pending durability를 보존한다.
 
@@ -144,6 +203,8 @@ macOS 호스트 cross-build를 택하면 Rust target과 함께 target용 C compi
 ## Migration과 운영 변경
 
 DB schema version과 migration 순서를 binary release와 함께 관리한다. schema를 변경한 뒤 binary만 이전 버전으로 되돌리면 읽기·쓰기 호환성이 깨질 수 있으므로, migration 전 backup과 backward compatibility 또는 명시적인 복구 절차가 필요하다. v1 구현에서 migration 도구, backup 주기, restore 후 운영 확인 항목을 확정한다.
+
+v1 구현의 확정 사항: migration은 별도 도구 없이 platformd 기동 시 `schema_migrations`의 다음 버전부터 버전마다 한 transaction으로 적용하며(`IF-DB-001`), DB가 바이너리보다 새 schema면 기동을 거부한다. 따라서 **schema를 올리는 바이너리를 배포하기 전에는 반드시 `deploy/backup.sh`로 snapshot을 받는다.** 새 바이너리를 이전 버전으로 되돌릴 때 schema가 바뀌었다면 바이너리만 되돌리지 않고 위 [복구 절차](#복구-절차)로 그 snapshot을 복원한다(그 사이의 기록은 잃는다). backup 주기는 v1에서 정하지 않고 사용자가 Mac launchd 등으로 `deploy/backup.sh`를 예약하며, restore 후 확인 항목은 복구 절차 5~7단계다.
 
 기술 선택은 고정했지만 field·state·worker·timeout의 세부값은 기존 설계 초안의 제안 상태다. 구현 후 Pi 배포 전에 acceptance scenario를 실행해 API, idempotency, paging, read marker, callback 202, retry, route version, crash recovery와 backup 절차를 함께 검증한다.
 

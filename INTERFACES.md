@@ -173,6 +173,7 @@
 - **종류**: REST · **제공자**: `platformd::api` · **소비자**: systemd/운영자, `platform health`, 배포 스크립트
 - `GET /healthz` → 인증 없음. DB가 열리고 최신 migration이 적용됐을 때만 `200 {"status":"ok","schema_version":1}`. 그 전에는 listen 자체를 시작하지 않는다(readiness = listen 시작). 요청마다 DB thread를 한 번 왕복해 schema version을 읽으며, 실패하면 503 `unavailable`(오류 body 형식은 `IF-API-COMMON`).
 - `platformd --version` → 바이너리 버전(Cargo `CARGO_PKG_VERSION`)과 git short hash(빌드 시 환경변수 `PLATFORMD_GIT_SHA`, 없으면 `unknown`)를 한 줄 출력.
+- `platformd backup --config <toml> --out <file>` → 서버 동작 중에도 안전한 online snapshot. 원본을 읽기 전용 두 번째 연결로 열어 rusqlite `backup` API로 복사하고, 산출 파일에 `PRAGMA integrity_check`를 돌려 `ok`가 아니면 exit 1. 기존 파일은 덮어쓰지 않는다(exit 1). 설정 오류 exit 2. stdout에 `backup: <path>`, `bytes:`, `schema_version:`, `integrity_check: ok`, 표마다 `row_count <table> <n>`. 산출 파일 모드 0600, `journal_mode=delete`(단일 파일).
 - graceful shutdown: SIGTERM/SIGINT → listener 닫기 → 진행 중 요청 완료 대기(상한 10초) → Store drop·join → delivery in-flight HTTP는 기다리지 않음(pending state는 DB에 있음).
 - **상태**: frozen · 2026-10-15
 
