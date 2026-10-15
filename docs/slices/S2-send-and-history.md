@@ -1,6 +1,6 @@
 # 슬라이스 S2: send-and-history
 
-- **상태**: frozen (2026-10-15)
+- **상태**: done (2026-10-15) — 151 tests, 구현 판단은 `IF-WIRE-005`
 - **위험/의존도**: 상 — durable commit, hole 없는 두 sequence, idempotency, fanout이 한 transaction에 모인다.
 
 ## 목표

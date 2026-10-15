@@ -244,6 +244,16 @@
 - 인증·권한(401/403)은 body 검사(415/400/422)보다 먼저다. agent principal이 다른 agent 경로를 지정하면 존재 여부와 무관하게 403, owner가 slug가 아닌 경로를 지정하면 404 `agent_not_found`.
 - **상태**: frozen · 2026-10-15
 
+### `IF-WIRE-005 — 송신·history 입력 규칙 보충`
+
+- **종류**: 입력 규칙(S2 구현에서 확정) · **제공자**: `platformd::api::{messages,history}` · **소비자**: `platform`, 브라우저 UI
+- `reply_to`는 `msg-`+ULID 형식이어야 하며 형식 위반은 422 `invalid_field`(`field=reply_to`), `to` 검사 직후에 판정한다. 형식은 맞지만 없는 id는 404 `reply_to_not_found`. (빈 문자열이 null과 같은 해시가 되는 것을 막는다.)
+- 검사 순서는 S2 스펙 그대로: idempotency 조회가 recipient·self-DM·membership보다 먼저다. 따라서 이미 다른 payload에 묶인 key로 self-DM을 보내면 422가 아니라 409다.
+- `GET /v1/messages`·`GET /v1/inbox`류의 **query parameter는 엄격**하다: 알 수 없는 이름 → 422 `unexpected_field`, 같은 이름 반복 → 422 `invalid_field`. 확인 순서: 이름 → `room_id`(422) → 권한(403) → 커서 동시 사용(400) → seq·limit 값(422). 브라우저 UI는 캐시버스터 등 추가 파라미터를 붙이지 않는다.
+- `limit`은 ASCII 숫자만(`+5` 거부). `q`는 form-urlencoded 디코딩(`+`는 공백). `client_key`는 `is_ascii()`만 검사(1..128바이트).
+- `message_id`·`created_at`은 DB transaction 안에서 생성해 `event_seq` 순서와 시각 순서를 맞춘다.
+- **상태**: frozen · 2026-10-15
+
 ## 용어집
 
 - **head**: 한 agent inbox의 마지막 `inbox_seq` (`agents.inbox_head`).

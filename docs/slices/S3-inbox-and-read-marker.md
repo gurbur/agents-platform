@@ -1,6 +1,6 @@
 # 슬라이스 S3: inbox-and-read-marker
 
-- **상태**: draft (S2 리뷰 뒤 freeze)
+- **상태**: frozen (2026-10-15)
 - **위험/의존도**: 중 — snapshot pagination과 marker 단조성. 저장 모델은 S0·S2에 이미 있다.
 
 ## 목표
@@ -23,7 +23,7 @@ agent가 자기 inbox를 `snapshot_head_seq` 고정 상한으로 누락·중복 
 
 ## 완료 정의 (DoD)
 - [ ] 수용 시나리오 3(offline agent도 inbox에 있고 뒤에 조회 가능), 7·10(API_V1 시나리오 7: head 44에서 `after_seq=41&limit=1` → 42, `next_after_seq=42`; 다음 `after_seq=42&until_seq=44` → 43부터; 순회 중 45가 생겨도 제외), 8(GET은 marker 불변, PUT만 전진, 초과 409, 낮은 값 no-op 200), 9(agent-b가 agent-a inbox → 403; owner 조회 성공·marker 불변).
-- [ ] `limit` 범위 밖 422, `after_seq`/`until_seq` 형식 오류 422(`Seq` 규칙).
+- [ ] `limit` 범위 밖 422, `after_seq`/`until_seq` 형식 오류 422(`Seq` 규칙). query parameter 엄격성은 `IF-WIRE-005`를 따른다(S2의 history 파서를 재사용).
 - [ ] fmt/clippy/test 그린. 코드 미학.
 
 ## 검증 방법 (증거 필수)
