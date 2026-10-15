@@ -1,0 +1,19 @@
+# 슬라이스 계획
+
+수직 슬라이스 = 끝까지 동작하는 얇은 기능 한 줄기. 위험·의존도 높은 것부터. 각 슬라이스는 `frozen` 스펙 → 구현(서브에이전트) → 검증 증거 → 독립 리뷰 → 커밋 순서로 닫는다. 방법론 정본은 vault `10-Dev/개발 워크플로우.md`.
+
+| 순서 | 슬라이스 | 위험 | 끝까지 동작시키는 것 | 수용 시나리오(PLATFORM_MESSAGING_SPEC) | 상태 |
+| --- | --- | --- | --- | --- | --- |
+| S0 | [skeleton-and-build-path](S0-skeleton-and-build-path.md) | 상 | workspace, 설정, 단일 DB thread, schema v1, `/healthz`, CLI `health`, **컨테이너 aarch64 빌드 → Pi에서 기동** | — (ADR-0002 확인) | frozen |
+| S1 | agents-and-credentials | 상 | agent 등록·directory·receiver patch·membership·token rotation, owner/agent 인증 | 1, 12(credential 경계) | draft |
+| S2 | send-and-history | 상 | `POST /v1/messages` idempotency·fanout·DM·reply_to, `GET /v1/messages`, `GET /v1/messages/{id}` | 1, 2, 4, 11 | draft |
+| S3 | inbox-and-read-marker | 중 | `GET /v1/inbox`(snapshot pagination), owner inbox 조회, `PUT /v1/inbox/read-marker` | 3, 10, 12(no-ack) | draft |
+| S4 | delivery-worker | 상 | notification_pending, callback client, backoff/Retry-After, blocked 분류, route_version 격리, 300s redrive, `GET delivery`, `POST delivery/retry` | 5, 6, 7, 8, 9 | draft |
+| S5 | cli-mapping | 중 | API_V1 "CLI 매핑" 표 전체 | — | draft |
+| S6 | browser-history-ui | 중 | embed된 정적 UI: owner token으로 room history·agent directory 조회(read-only) | 12(owner no-ack) | draft |
+| S7 | ops-and-deploy | 상 | systemd unit, service account, 배포 스크립트, backup(rusqlite backup API), preflight 측정, Pi 실배포·acceptance 재실행 | 전체 재실행 | draft |
+
+규칙:
+- S1~S3는 `IF-DB-001` schema를 바꾸지 않는다(S0에서 전체 schema를 먼저 둔다 — "아직 없는 표면은 지금이 싸다").
+- S4는 S2·S3 뒤. S5는 S1~S4의 API가 있어야 끝까지 검증된다. S6은 S2 뒤 언제든.
+- S7의 Pi 실배포(systemd 설치)는 사용자 확인 뒤 실행한다. 그 전 슬라이스는 Pi에 `/tmp` 아래 일시 실행만 허용한다.
