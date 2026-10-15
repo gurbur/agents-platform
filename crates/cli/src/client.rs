@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use platform_wire::{ErrorBody, HealthStatus};
-use reqwest::{StatusCode, Url};
+use reqwest::{Method, StatusCode, Url};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::CliError;
@@ -41,8 +42,11 @@ pub struct ApiClient {
 /// A decoded response together with its raw body for `--json`.
 pub struct Decoded<T> {
     pub value: T,
-    pub raw: String,
+    pub raw: Vec<u8>,
 }
+
+/// Query parameters in request order. Absent options are simply not pushed.
+pub type Query = Vec<(&'static str, String)>;
 
 impl ApiClient {
     pub fn new(base_url: &str, token: BearerToken) -> Result<Self, CliError> {
@@ -57,23 +61,52 @@ impl ApiClient {
 
     /// `GET /healthz` (unauthenticated).
     pub async fn health(&self) -> Result<Decoded<HealthStatus>, CliError> {
-        let url = self.url("/healthz")?;
-        let response = self.http.get(url).send().await.map_err(CliError::Network)?;
-        decode(response).await
+        let url = self.url("/healthz", &Query::new())?;
+        execute(self.http.get(url)).await
+    }
+
+    /// Authenticated `GET` with query parameters.
+    pub async fn get<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &Query,
+    ) -> Result<Decoded<T>, CliError> {
+        let url = self.url(path, query)?;
+        execute(self.authorized(self.http.get(url))).await
+    }
+
+    /// Authenticated request with a JSON body (`Content-Type: application/json`).
+    pub async fn send_json<T: DeserializeOwned, B: Serialize>(
+        &self,
+        method: Method,
+        path: &str,
+        body: &B,
+    ) -> Result<Decoded<T>, CliError> {
+        let url = self.url(path, &Query::new())?;
+        execute(self.authorized(self.http.request(method, url)).json(body)).await
+    }
+
+    /// Authenticated `POST` without a body (rotation, delivery retry).
+    pub async fn post_empty<T: DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<Decoded<T>, CliError> {
+        let url = self.url(path, &Query::new())?;
+        execute(self.authorized(self.http.post(url))).await
     }
 
     /// Attaches the bearer credential to an authenticated `/v1` request.
-    #[expect(
-        dead_code,
-        reason = "S0 only has the unauthenticated health command; /v1 commands arrive in S1+"
-    )]
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         request.bearer_auth(&self.token.0)
     }
 
-    fn url(&self, path: &str) -> Result<Url, CliError> {
-        Url::parse(&format!("{}{path}", self.base))
-            .map_err(|err| CliError::Usage(format!("invalid URL: {err}")))
+    fn url(&self, path: &str, query: &Query) -> Result<Url, CliError> {
+        let mut url = Url::parse(&format!("{}{path}", self.base))
+            .map_err(|err| CliError::Usage(format!("invalid URL: {err}")))?;
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query);
+        }
+        Ok(url)
     }
 }
 
@@ -95,21 +128,24 @@ fn normalize_base(base_url: &str) -> Result<String, CliError> {
     Ok(trimmed.to_owned())
 }
 
-async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Result<Decoded<T>, CliError> {
+async fn execute<T: DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+) -> Result<Decoded<T>, CliError> {
+    let response = request.send().await.map_err(CliError::Network)?;
     let status = response.status();
-    let raw = response.text().await.map_err(CliError::Network)?;
+    let raw = response.bytes().await.map_err(CliError::Network)?.to_vec();
     if !status.is_success() {
         return Err(server_error(status, &raw));
     }
-    let value = serde_json::from_str(&raw).map_err(|err| CliError::UnexpectedResponse {
+    let value = serde_json::from_slice(&raw).map_err(|err| CliError::UnexpectedResponse {
         status,
         detail: format!("cannot decode body: {err}"),
     })?;
     Ok(Decoded { value, raw })
 }
 
-fn server_error(status: StatusCode, raw: &str) -> CliError {
-    match serde_json::from_str::<ErrorBody>(raw) {
+fn server_error(status: StatusCode, raw: &[u8]) -> CliError {
+    match serde_json::from_slice::<ErrorBody>(raw) {
         Ok(body) => CliError::Server {
             status,
             code: body.error.code,
@@ -154,9 +190,19 @@ mod tests {
     #[test]
     fn error_body_maps_to_server_error() {
         let raw = r#"{"error":{"code":"unavailable","message":"down","request_id":"req-1","details":{}}}"#;
-        let err = server_error(StatusCode::SERVICE_UNAVAILABLE, raw);
+        let err = server_error(StatusCode::SERVICE_UNAVAILABLE, raw.as_bytes());
         assert!(matches!(err, CliError::Server { ref code, .. } if code == "unavailable"));
         assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn query_is_form_encoded_and_absent_when_empty() {
+        let client = ApiClient::new("http://host/", BearerToken::new("t".into()).unwrap()).unwrap();
+        let plain = client.url("/v1/inbox", &Query::new()).unwrap();
+        assert_eq!(plain.as_str(), "http://host/v1/inbox");
+        let query = vec![("room_id", "dm:a:b".to_owned()), ("q", "a b&c+".to_owned())];
+        let url = client.url("/v1/messages", &query).unwrap();
+        assert_eq!(url.query(), Some("room_id=dm%3Aa%3Ab&q=a+b%26c%2B"));
     }
 
     #[test]

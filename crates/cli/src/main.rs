@@ -5,12 +5,15 @@
 
 mod args;
 mod client;
+mod commands;
 mod error;
+mod output;
 
 use std::process::ExitCode;
 
-use crate::args::{Command, Settings};
+use crate::args::Settings;
 use crate::client::ApiClient;
+use crate::commands::Context;
 use crate::error::CliError;
 
 fn main() -> ExitCode {
@@ -35,23 +38,11 @@ fn main() -> ExitCode {
 }
 
 async fn run(settings: Settings) -> Result<(), CliError> {
-    let client = ApiClient::new(&settings.url, settings.token)?;
-    match settings.command {
-        Command::Health => health(&client, settings.json).await,
-    }
-}
-
-async fn health(client: &ApiClient, json: bool) -> Result<(), CliError> {
-    let response = client.health().await?;
-    if json {
-        println!("{}", response.raw);
-        return Ok(());
-    }
-    println!(
-        "{} (schema_version {})",
-        response.value.status, response.value.schema_version
-    );
-    Ok(())
+    let context = Context {
+        client: ApiClient::new(&settings.url, settings.token)?,
+        json: settings.json,
+    };
+    commands::run(settings.command, &context).await
 }
 
 fn report(err: CliError) -> ExitCode {

@@ -7,6 +7,14 @@ use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::client::BearerToken;
+use crate::commands::agent::AgentCommand;
+use crate::commands::all::AllCommand;
+use crate::commands::delivery::DeliveryArgs;
+use crate::commands::history::HistoryArgs;
+use crate::commands::inbox::InboxArgs;
+use crate::commands::message::MessageCommand;
+use crate::commands::receiver::ReceiverCommand;
+use crate::commands::send::SendArgs;
 use crate::error::CliError;
 
 #[derive(Debug, Parser)]
@@ -32,9 +40,30 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Debug, Clone, Copy, Subcommand)]
+/// The API_V1 "CLI 매핑" table plus `health`.
+#[derive(Debug, Subcommand)]
 pub enum Command {
-    /// GET /healthz
+    /// Agent registration, directory, owner inbox view and token rotation
+    #[command(subcommand)]
+    Agent(AgentCommand),
+    /// Receiver route of an agent
+    #[command(subcommand)]
+    Receiver(ReceiverCommand),
+    /// Membership of the `all` room
+    #[command(subcommand)]
+    All(AllCommand),
+    /// Send to `all` or one agent — POST /v1/messages
+    Send(SendArgs),
+    /// Read your inbox — GET /v1/inbox
+    Inbox(InboxArgs),
+    /// Read a room's history — GET /v1/messages
+    History(HistoryArgs),
+    /// Single message lookup
+    #[command(subcommand)]
+    Message(MessageCommand),
+    /// Delivery diagnostics and manual retry
+    Delivery(DeliveryArgs),
+    /// Server readiness — GET /healthz
     Health,
 }
 
@@ -117,6 +146,49 @@ mod tests {
         let settings = Settings::resolve(cli, true).unwrap();
         assert_eq!(settings.url, "http://x");
         assert!(settings.json);
+    }
+
+    /// clap keys values by arg id across the whole tree, so a subcommand
+    /// field named like a global option silently overwrites it.
+    #[test]
+    fn no_subcommand_argument_shadows_a_global_option() {
+        fn check(command: &clap::Command, globals: &[String]) {
+            for sub in command.get_subcommands() {
+                for arg in sub.get_arguments() {
+                    let id = arg.get_id().as_str();
+                    assert!(
+                        !globals.iter().any(|global| global == id),
+                        "`{}` redefines global `{id}`",
+                        sub.get_name()
+                    );
+                }
+                check(sub, globals);
+            }
+        }
+        let root = Cli::command();
+        let globals: Vec<String> = root
+            .get_arguments()
+            .filter(|arg| arg.is_global_set())
+            .map(|arg| arg.get_id().to_string())
+            .collect();
+        assert!(globals.contains(&"url".to_owned()));
+        check(&root, &globals);
+    }
+
+    #[test]
+    fn receiver_url_does_not_replace_the_server_url() {
+        let cli = cli(&[
+            "receiver",
+            "set",
+            "agent-a",
+            "http://receiver/n",
+            "--url",
+            "http://x",
+            "--token",
+            "t",
+        ]);
+        let settings = Settings::resolve(cli, true).unwrap();
+        assert_eq!(settings.url, "http://x");
     }
 
     #[test]

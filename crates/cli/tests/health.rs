@@ -1,76 +1,13 @@
 //! Runs the real `platform` binary against an in-process platformd.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Command;
 
-use platformd::config::Config;
-use tokio::sync::oneshot;
-
-const BIN: &str = env!("CARGO_BIN_EXE_platform");
-const OWNER_TOKEN: &str = "cli-test-owner-token-0123456789abcdef0123";
-
-struct Platformd {
-    _dir: tempfile::TempDir,
-    url: String,
-    stop: oneshot::Sender<()>,
-    task: tokio::task::JoinHandle<Result<(), platformd::ServeError>>,
-}
-
-impl Platformd {
-    async fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("owner.token"), OWNER_TOKEN).unwrap();
-        let config_path = dir.path().join("platformd.toml");
-        std::fs::write(
-            &config_path,
-            "listen = \"127.0.0.1:0\"\ndb_path = \"platform.db\"\nowner_token_file = \"owner.token\"\n",
-        )
-        .unwrap();
-        let config = Config::load(&config_path).unwrap();
-        let server = platformd::start(&config).await.unwrap();
-        let url = format!("http://{}", server.local_addr().unwrap());
-        let (stop, stopped) = oneshot::channel::<()>();
-        let task = tokio::spawn(server.serve(async move {
-            let _ = stopped.await;
-        }));
-        Self {
-            _dir: dir,
-            url,
-            stop,
-            task,
-        }
-    }
-
-    async fn stop(self) {
-        let _ = self.stop.send(());
-        self.task.await.unwrap().unwrap();
-    }
-}
-
-/// Runs `platform` without inheriting PLATFORM_* from the developer's shell.
-async fn platform(args: &[&str]) -> Output {
-    let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
-    tokio::task::spawn_blocking(move || {
-        Command::new(BIN)
-            .args(&args)
-            .env_remove("PLATFORM_URL")
-            .env_remove("PLATFORM_TOKEN")
-            .output()
-            .unwrap()
-    })
-    .await
-    .unwrap()
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
+use common::{BIN, Platformd, closed_port_addr, platform, stderr, stdout};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn health_prints_status_and_exits_0() {
@@ -175,15 +112,10 @@ async fn server_error_body_exits_1() {
     let output = platform(&["--url", &format!("http://{addr}"), "--token", "x", "health"]).await;
 
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.contains("unavailable"), "{err}");
-    assert!(err.contains("database is not available"), "{err}");
-}
-
-/// An address nothing listens on: bind an ephemeral port, then release it.
-fn closed_port_addr() -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap()
+    assert_eq!(
+        stderr(&output),
+        "platform: unavailable: database is not available (request req-01J00000000000000000000000)\n"
+    );
 }
 
 /// A one-shot HTTP/1.1 responder for exercising the CLI's error path.

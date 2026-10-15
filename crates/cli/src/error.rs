@@ -1,3 +1,5 @@
+use std::io;
+
 use reqwest::StatusCode;
 
 /// Every failure maps to one `IF-CLI-001` exit code.
@@ -5,9 +7,17 @@ use reqwest::StatusCode;
 pub enum CliError {
     #[error("{0}")]
     Usage(String),
+    /// A local file or stream could not be read or written (`--body-file`,
+    /// stdout). Grouped with usage and configuration errors.
+    #[error("{context}: {source}")]
+    Io {
+        context: String,
+        #[source]
+        source: io::Error,
+    },
     #[error("network error: {}", with_causes(.0))]
     Network(#[source] reqwest::Error),
-    #[error("server error {status}: {code}: {message} (request_id {request_id})")]
+    #[error("{code}: {message} (request {request_id})")]
     Server {
         status: StatusCode,
         code: String,
@@ -22,8 +32,15 @@ impl CliError {
     pub fn exit_code(&self) -> u8 {
         match self {
             CliError::Server { .. } | CliError::UnexpectedResponse { .. } => 1,
-            CliError::Usage(_) => 2,
+            CliError::Usage(_) | CliError::Io { .. } => 2,
             CliError::Network(_) => 3,
+        }
+    }
+
+    pub fn io(context: impl Into<String>, source: io::Error) -> Self {
+        CliError::Io {
+            context: context.into(),
+            source,
         }
     }
 }
