@@ -25,3 +25,18 @@ config.local.toml
 
 # Runtime logs
 *.log
+
+# Deployment targets: the repo is public, so the Pi's Tailscale IP, hostname,
+# SSH alias and user never go into tracked files. Keep them in *.local.* files
+# or in ~/.ssh/config.
+*.local.toml
+*.local.env
+*.local.sh
+*.local.json
+deploy/local/
+
+# Claude Code per-machine settings
+.claude/settings.local.json
+
+# macOS
+.DS_Store
