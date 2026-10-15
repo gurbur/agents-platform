@@ -1,0 +1,22 @@
+# platformd configuration (INTERFACES.md IF-CFG-001).
+# Copy to platformd.toml and adjust. Unknown keys are rejected at startup.
+# Relative paths are resolved against the directory of this file.
+
+# Address to listen on. Optional; this is the default.
+listen = "127.0.0.1:7340"
+
+# SQLite database file. The parent directory is created if missing.
+db_path = "data/platform.db"
+
+# File whose trimmed contents are the owner bearer token (at least 32 bytes).
+# Never put the token itself in this file.
+owner_token_file = "owner.token"
+
+# Receiver callback tuning. Every key is optional; the values below are the
+# defaults from RECEIVER_WAKE_CONVENTION.
+[delivery]
+connect_timeout_ms = 2000
+request_timeout_ms = 5000
+backoff_min_secs = 1
+backoff_max_secs = 300
+redrive_after_secs = 300
