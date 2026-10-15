@@ -20,10 +20,10 @@ pub const MAX_BODY_BYTES: usize = 16 * 1024;
 /// Maximum length of a `client_key` in bytes (`IF-API-COMMON`: ASCII 1..=128).
 pub const MAX_CLIENT_KEY_BYTES: usize = 128;
 
-/// History page size when `limit` is absent (`IF-API-COMMON`).
+/// History and inbox page size when `limit` is absent (`IF-API-COMMON`).
 pub const DEFAULT_PAGE_SIZE: u32 = 50;
 
-/// Largest accepted history `limit` (`IF-API-COMMON`).
+/// Largest accepted history and inbox `limit` (`IF-API-COMMON`).
 pub const MAX_PAGE_SIZE: u32 = 100;
 
 /// The only public room.

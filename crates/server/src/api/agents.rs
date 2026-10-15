@@ -69,7 +69,7 @@ impl FromRequestParts<AppState> for ManagedAgent {
 }
 
 /// Extractor: the raw `{agent_id}` path segment, before slug validation.
-struct AgentPath(String);
+pub(super) struct AgentPath(pub(super) String);
 
 impl FromRequestParts<AppState> for AgentPath {
     type Rejection = ApiError;

@@ -4,8 +4,10 @@
 mod agents;
 mod error;
 mod history;
+mod inbox;
 mod json;
 mod messages;
+mod query;
 mod receiver_url;
 mod request_id;
 
@@ -54,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .merge(agents::routes())
         .merge(messages::routes())
+        .merge(inbox::routes())
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)

@@ -358,12 +358,12 @@ impl StoredMessage {
     }
 }
 
-fn stored_message_id(raw: String) -> Result<MessageId, StoreError> {
+pub(crate) fn stored_message_id(raw: String) -> Result<MessageId, StoreError> {
     MessageId::try_from(raw)
         .map_err(|err| StoreError::Invariant(format!("stored message_id is invalid: {err}")))
 }
 
-fn stored_seq(value: i64, column: &str) -> Result<Seq, StoreError> {
+pub(crate) fn stored_seq(value: i64, column: &str) -> Result<Seq, StoreError> {
     Seq::new(value).map_err(|_| StoreError::Invariant(format!("{column} is negative")))
 }
 

@@ -36,6 +36,15 @@ impl Principal {
         }
     }
 
+    /// The calling agent; 403 for the owner (agent-only endpoints such as
+    /// `GET /v1/inbox` and `PUT /v1/inbox/read-marker`).
+    pub fn require_agent(self) -> Result<AgentId, ApiError> {
+        match self {
+            Principal::Agent(agent_id) => Ok(agent_id),
+            Principal::Owner => Err(ApiError::forbidden()),
+        }
+    }
+
     /// 403 unless the caller is the owner or the agent named `agent_id`.
     /// Takes the raw path segment so that it can run before slug validation.
     pub fn require_owner_or_self(&self, agent_id: &str) -> Result<(), ApiError> {
@@ -155,6 +164,8 @@ mod tests {
     fn agent_passes_only_for_itself() {
         let agent = Principal::Agent("agent-a".parse().unwrap());
         assert!(agent.require_owner().is_err());
+        assert_eq!(agent.clone().require_agent().unwrap().as_str(), "agent-a");
+        assert!(Principal::Owner.require_agent().is_err());
         assert!(agent.require_owner_or_self("agent-a").is_ok());
         assert!(agent.require_owner_or_self("agent-b").is_err());
     }
