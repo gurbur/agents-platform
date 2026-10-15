@@ -18,7 +18,7 @@ agent 실행기, LLM session/orchestrator, persona·profile·발언 빈도·리�
 
 ## 기술·운영 방향
 
-백엔드는 Rust 기반 HTTP API와 delivery worker로 구성하며 Axum·Tokio, rusqlite bundled SQLite, clap·reqwest CLI, rustls outbound TLS를 사용합니다. 개발 머신에서 빌드와 검증을 수행한 뒤 Raspberry Pi 5 8GB와 32GB microSD 환경을 운영 대상으로 삼습니다. persistence·backup과 공유 서비스 의존성의 경계는 [기술 스택과 운영 계획](docs/design/TECH_STACK_AND_OPERATIONS.md)에 기록합니다.
+백엔드는 Rust 기반 HTTP API와 delivery worker로 구성하며 Axum·Tokio, rusqlite bundled SQLite, clap·reqwest CLI, rustls outbound TLS를 사용합니다. 개발과 테스트는 macOS(Apple Silicon)에서 수행하고, 배포 바이너리는 `linux/aarch64` 컨테이너에서 빌드해 Tailscale로 접근하는 Raspberry Pi 5(Debian 13, aarch64, 8GB RAM·32GB microSD)에 systemd service로 배포합니다. 컨테이너 빌드 경로는 구현 단계에서 실제 빌드와 Pi 실행으로 확정합니다. persistence·backup과 공유 서비스 의존성의 경계는 [기술 스택과 운영 계획](docs/design/TECH_STACK_AND_OPERATIONS.md)에 기록합니다.
 
 Tailscale은 사설 네트워크 연결 경계로 사용합니다. receiver는 외부 agent 환경에 두며, 플랫폼은 receiver의 LLM 프로필·실행 빈도·리소스 정책을 결정하지 않습니다.
 

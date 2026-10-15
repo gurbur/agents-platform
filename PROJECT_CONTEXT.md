@@ -1,6 +1,6 @@
 ## 현재 확정 범위와 설계 문서
 
-2026년 10월 15일 현재 이 프로젝트의 합의된 v1 범위는 Raspberry Pi 5에서 실행되는 중앙 메시지 저장 허브와 HTTP API다. 플랫폼은 메시지를 영속 저장하고 `all` 전체방 broadcast와 stable agent 간 DM을 전달하며, 브라우저에서는 조회하고 공통 CLI/API에서는 agent token으로 조회·송신할 수 있게 한다. 등록된 외부 receiver를 알리는 notification worker와 그 HTTP 계약도 플랫폼 문서의 범위에 포함한다.
+2026년 10월 15일 현재 이 프로젝트의 합의된 v1 범위는 Raspberry Pi 5에서 실행되는 중앙 메시지 저장 허브와 HTTP API다. 플랫폼은 메시지를 영속 저장하고 `all` 전체방 broadcast와 stable agent 간 DM을 전달하며, 브라우저에서는 조회하고 공통 CLI/API에서는 agent token으로 조회·송신할 수 있게 한다. 등록된 외부 receiver를 알리는 notification worker와 그 HTTP 계약도 플랫폼 문서의 범위에 포함한다. 개발 환경은 macOS(Apple Silicon), 배포 대상은 Tailscale로 접근하는 Raspberry Pi 5(Debian 13 trixie, aarch64)로 확정했으며, 두 환경의 실측값과 빌드·배포 경로는 [기술 스택과 운영 설계](docs/design/TECH_STACK_AND_OPERATIONS.md)에 기록한다.
 
 합의된 scope에는 v1 HTTP API가 포함된다. 이 설계 초안은 문서 간 정합성 검토를 위해 HTTP/JSON wire와 상세 field·state·worker 계약을 하나의 제안 기본값으로 고정해 기술한다. 이는 사용자에게 최종 승인된 모든 세부 계약이라는 뜻이 아니다. field·state·worker·pagination과 timeout의 기본값은 기존 초안의 제안 상태로 두며, 구현 기술 선택은 [기술 스택과 운영 설계](docs/design/TECH_STACK_AND_OPERATIONS.md)에 기록한 사용자 승인 결정을 따른다. 정확한 schema·migration·storage backup 절차와 browser 세부 화면은 구현 단계에서 검토한다. 승인된 것은 platform scope와 해당 기술 선택이며, 아래 정본 문서의 wire 의미는 바꾸지 않는다.
 
@@ -37,7 +37,9 @@ agent profile, persona, 발언 빈도, 자원 정책, model, memory, session run
 
 프로젝트 이름: agents-platform
 
-로컬 작업 디렉토리: `C:\Users\user\Desktop\Jihwan\project\toy-thing\agents-platform`
+로컬 작업 디렉토리: `/Users/gurbur/workspace/personal-projects/agents-platform`
+
+2026-10-15에 개발 환경을 Windows에서 macOS로 이전했다. 이 문서에 남은 Windows 경로(`C:\Users\user\Desktop\Jihwan\project\toy-thing\agents-platform`)는 대화 당시의 역사 기록이다.
 
 ## 사용자의 플랫폼 구상
 
@@ -88,6 +90,8 @@ agent profile, persona, 발언 빈도, 자원 정책, model, memory, session run
 - 정확한 schema·migration·storage backup 관리와 복구 절차
 
 ## 사용자가 제공한 작업 규칙
+
+이 절은 2026-10-14 Codex 세션 당시 사용자가 제공한 규칙의 기록이다. 현재 오케스트레이션 규칙의 정본은 사용자 전역 지침이다. 아래 Git Bash 항목은 Windows 환경을 전제로 하므로 2026-10-15 macOS 이전 뒤에는 적용하지 않는다.
 
 GitHub에 접근할 때는 Git Bash를 사용한다. 사용자는 해당 환경에 접근 키가 있다고 안내했다.
 
