@@ -1,6 +1,6 @@
 # 슬라이스 S4: delivery-worker
 
-- **상태**: draft (S3 리뷰 뒤 freeze)
+- **상태**: frozen (2026-10-15)
 - **위험/의존도**: 상 — 외부 HTTP, 재시도, 상태 기계, 재시작 복구가 겹친다. 수용 시나리오 5개가 걸려 있다.
 
 ## 목표
@@ -32,8 +32,8 @@ inbox head가 올라간 agent의 receiver에 `IF-RCV-BODY` POST를 보내고, �
 | network·connect/전체 timeout·5xx·429 | — | `attempt+=1`, `next_due_at=now+backoff(attempt)` 단 유효 `Retry-After`(초 또는 HTTP-date)가 있으면 `min(그 값, backoff_max)`, `last_error` 코드(`connect`, `timeout`, `http_503`, `http_429` …), `state=pending`. |
 | 그 외 4xx·3xx·202 아닌 2xx·non-empty 202·Content-Length 없는 202 | — | `state=blocked`, `next_due_at=NULL`, `redrive_due_at=NULL`, `last_error`(`http_404`, `http_301`, `http_200`, `protocol_mismatch`). |
 | `redrive_due_at` 도달 | `state=pending`, `read_marker<head`, `next_due_at IS NULL` | `target_seq=head`, `next_due_at=now`. |
-| read marker PUT (S3 hook) | `read_marker >= head` | `state=idle`, `next_due_at=NULL`, `redrive_due_at=NULL`, `attempt=0`. (blocked여도 idle로 — 미확인이 없다.) |
-| receiver PATCH로 URL 변경 / rotate (S1 hook) | `route_version` 증가함 | `attempt=0`, `last_error=NULL`. URL non-null이고 `read_marker<head`면 `state=pending`, `target_seq=head`, `next_due_at=now`; URL null이면 `next_due_at=NULL`(state 유지). blocked는 해제된다. |
+| read marker PUT (S3 hook, `store/queries/inbox.rs::advance_read_marker` 같은 transaction) | `read_marker >= head` | `state=idle`, `next_due_at=NULL`, `redrive_due_at=NULL`, `attempt=0`. (blocked여도 idle로 — 미확인이 없다.) |
+| receiver PATCH로 URL 변경 / rotate (S1 hook) | `route_version` 증가함 | `notification_pending.route_version = agents.route_version`(S1 코드는 `agents`만 올리고 이 표는 건드리지 않았다 — `store/queries/agents.rs::update_receiver`·`rotate_credentials`에 같은 transaction으로 추가), `attempt=0`, `last_error=NULL`. URL non-null이고 `read_marker<head`면 `state=pending`, `target_seq=head`, `next_due_at=now`; URL null이면 `next_due_at=NULL`(state 유지). blocked는 해제된다. |
 | `POST delivery/retry` | URL null | 변경 없음, 응답 `state=no_receiver`. |
 | `POST delivery/retry` | `read_marker >= head` | `state=idle` 보장, 응답 `idle`. |
 | `POST delivery/retry` | blocked | `state=pending`, `attempt=0`, `next_due_at=now`, `target_seq=head`. |

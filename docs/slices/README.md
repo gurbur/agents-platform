@@ -7,8 +7,8 @@
 | S0 | [skeleton-and-build-path](S0-skeleton-and-build-path.md) | 상 | workspace, 설정, 단일 DB thread, schema v1, `/healthz`, CLI `health`, **컨테이너 aarch64 빌드 → Pi에서 기동** | — (ADR-0002 확인) | done 2026-10-15 |
 | S1 | [agents-and-credentials](S1-agents-and-credentials.md) | 상 | agent 등록·directory·receiver patch·membership·token rotation, owner/agent 인증 | 1, 12(credential 경계) | done 2026-10-15 |
 | S2 | [send-and-history](S2-send-and-history.md) | 상 | `POST /v1/messages` idempotency·fanout·DM·reply_to, `GET /v1/messages`, `GET /v1/messages/{id}` | 1, 2, 4, 11 | done 2026-10-15 |
-| S3 | [inbox-and-read-marker](S3-inbox-and-read-marker.md) | 중 | `GET /v1/inbox`(snapshot pagination), owner inbox 조회, `PUT /v1/inbox/read-marker` | 3, 10, 12(no-ack) | frozen |
-| S4 | [delivery-worker](S4-delivery-worker.md) | 상 | notification_pending, callback client, backoff/Retry-After, blocked 분류, route_version 격리, 300s redrive, `GET delivery`, `POST delivery/retry` | 5, 6, 7, 8, 9 | draft |
+| S3 | [inbox-and-read-marker](S3-inbox-and-read-marker.md) | 중 | `GET /v1/inbox`(snapshot pagination), owner inbox 조회, `PUT /v1/inbox/read-marker` | 3, 10, 12(no-ack) | done 2026-10-15 |
+| S4 | [delivery-worker](S4-delivery-worker.md) | 상 | notification_pending, callback client, backoff/Retry-After, blocked 분류, route_version 격리, 300s redrive, `GET delivery`, `POST delivery/retry` | 5, 6, 7, 8, 9 | frozen |
 | S5 | [cli-mapping](S5-cli-mapping.md) | 중 | API_V1 "CLI 매핑" 표 전체 | — | draft |
 | S6 | [browser-history-ui](S6-browser-history-ui.md) | 중 | embed된 정적 UI: owner token으로 room history·agent directory 조회(read-only) | 12(owner no-ack) | draft |
 | S7 | [ops-and-deploy](S7-ops-and-deploy.md) | 상 | systemd unit, service account, 배포 스크립트, backup(rusqlite backup API), preflight 측정, Pi 실배포·acceptance 재실행 | 전체 재실행 | draft |

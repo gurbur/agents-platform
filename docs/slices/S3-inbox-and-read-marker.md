@@ -1,6 +1,6 @@
 # 슬라이스 S3: inbox-and-read-marker
 
-- **상태**: frozen (2026-10-15)
+- **상태**: done (2026-10-15) — 162 tests. owner 경로는 agent 본인도 403, `until_seq > head`는 그대로 echo, 409 details는 `{}`.
 - **위험/의존도**: 중 — snapshot pagination과 marker 단조성. 저장 모델은 S0·S2에 이미 있다.
 
 ## 목표
