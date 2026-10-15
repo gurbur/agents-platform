@@ -2,15 +2,18 @@
 //!
 //! This binary installs a process-wide subscriber at TRACE so that the DB
 //! thread and every task are captured, then drives each S1 and S2 endpoint,
-//! including failures that carry credentials in headers and bodies. Message
-//! bodies and history search text must not be logged either.
+//! including failures that carry credentials in headers and bodies, and one
+//! S4 receiver callback. Message bodies, history search text and the
+//! receiver URL beyond its host must not be logged either.
 
 mod common;
 
 use std::io;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use common::{Fixture, OWNER_TOKEN, RunningServer};
+use common::receiver::MockReceiver;
+use common::{Fixture, OWNER_TOKEN, RunningServer, eventually};
 use reqwest::Method;
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
@@ -108,6 +111,22 @@ async fn credentials_do_not_appear_in_logs() {
         &peer.api_key,
     )
     .await;
+
+    // S4: a callback to a URL whose path and query must stay out of the logs.
+    let mock = MockReceiver::start().await;
+    let wake_url = format!("{}-PATH-MARKER?token=QUERY-MARKER", mock.url());
+    let woken = api.register("agent-e", Some(&wake_url)).await;
+    let reply = api
+        .send_message(&sender.api_key, "agent-e", body_marker, "key-wake")
+        .await;
+    assert_eq!(reply.status.as_u16(), 201);
+    let received = mock.wait_for(1, Duration::from_secs(10)).await;
+    assert!(received[0].path_and_query.ends_with("?token=QUERY-MARKER"));
+    eventually(Duration::from_secs(10), "the outcome is logged", || {
+        let logs = captured.text();
+        async move { logs.contains("receiver accepted the wake").then_some(()) }
+    })
+    .await;
     server.shutdown().await.unwrap();
 
     let logs = captured.text();
@@ -121,6 +140,11 @@ async fn credentials_do_not_appear_in_logs() {
         "capture is working: {logs}"
     );
     assert!(logs.contains("agent credentials rotated"));
+    assert!(logs.contains("delivery worker started"));
+    assert!(
+        !logs.contains("PATH-MARKER") && !logs.contains("QUERY-MARKER"),
+        "a receiver URL path or query was logged"
+    );
     let new_key = rotated.body["agent_api_key"].as_str().unwrap();
     let new_secret = rotated.body["receiver_secret"].as_str().unwrap();
     for secret in [
@@ -128,6 +152,8 @@ async fn credentials_do_not_appear_in_logs() {
         agent.receiver_secret.as_str(),
         new_key,
         new_secret,
+        woken.api_key.as_str(),
+        woken.receiver_secret.as_str(),
         OWNER_TOKEN,
     ] {
         assert!(!logs.contains(secret), "a credential was logged");

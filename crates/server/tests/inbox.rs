@@ -88,7 +88,7 @@ async fn read_marker_in_db(fx: &Fixture, agent_id: &'static str) -> i64 {
     .await
 }
 
-/// Every `notification_pending` column, to show a marker change leaves it alone.
+/// Every `notification_pending` column, to show what a marker change does to it.
 async fn notification_rows(fx: &Fixture) -> Vec<Vec<Option<String>>> {
     fx.read_db(|conn| {
         let mut statement = conn.prepare(
@@ -327,6 +327,12 @@ async fn read_marker_moves_only_up_through_put() {
     assert_eq!(put_marker(&api, &b, "0").await.body["read_marker"], "2");
     assert_eq!(read_marker_in_db(&fx, "agent-b").await, 2);
 
+    assert_eq!(
+        notification_rows(&fx).await,
+        notifications,
+        "GETs and a marker below the head leave delivery state alone"
+    );
+
     let rest = own_page(&api, &b, "").await;
     assert_eq!(rest["read_marker"], "2");
     assert_eq!(
@@ -346,11 +352,11 @@ async fn read_marker_moves_only_up_through_put() {
     let history = api.get("/v1/messages?room_id=all", &b).await;
     assert_eq!(history.body["items"].as_array().unwrap().len(), 3);
     assert_eq!(read_marker_in_db(&fx, "agent-a").await, 0);
-    assert_eq!(
-        notification_rows(&fx).await,
-        notifications,
-        "S3 leaves delivery state to the worker"
-    );
+    // At the head the same transaction makes b idle (IF-DLV-001); a is untouched.
+    let after = notification_rows(&fx).await;
+    assert_eq!(after[0], notifications[0], "agent-a's row");
+    assert_eq!(after[1][2].as_deref(), Some("Text(\"idle\")"));
+    assert_eq!(after[1][6], None, "next_due_at");
     server.shutdown().await.unwrap();
 }
 

@@ -2,11 +2,14 @@
 //! reads (`IF-DB-001` tables `messages`, `inbox_rows`, `idempotency`,
 //! `sequences`, `memberships`, `agents`).
 
+use std::time::SystemTime;
+
 use platform_wire::{AgentId, Message, MessageId, Recipient, RoomId, Seq};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use sha2::{Digest, Sha256};
 
 use super::agents::{ALL_ROOM, agent_exists, stored_agent_id};
+use super::delivery as delivery_queries;
 use crate::store::StoreError;
 
 const MESSAGE_COLUMNS: &str =
@@ -89,8 +92,9 @@ pub fn canonical_request_hash(to: &str, body: &str, reply_to: Option<&str>) -> S
 
 /// The `POST /v1/messages` transaction (S2 "구현 방안" 1): idempotency
 /// lookup first; only a new key is checked against membership, recipient and
-/// `reply_to`, then the message, its inbox rows and the key are written.
-/// Every rejection happens before the first write.
+/// `reply_to`, then the message, its inbox rows (each with the new-inbox-row
+/// delivery transition, `IF-DLV-001`) and the key are written. Every
+/// rejection happens before the first write.
 pub fn commit_send(tx: &Transaction, command: &SendCommand) -> Result<SendOutcome, StoreError> {
     let to_text = command.to.to_string();
     let request_hash = canonical_request_hash(
@@ -136,8 +140,10 @@ pub fn commit_send(tx: &Transaction, command: &SendCommand) -> Result<SendOutcom
         created_at: command.created_at.clone(),
     };
     insert_message(tx, &message)?;
+    let now = SystemTime::now();
     for recipient in &recipients {
         append_inbox_row(tx, recipient, &message.message_id)?;
+        delivery_queries::record_new_inbox_row(tx, recipient, now)?;
     }
     tx.execute(
         "INSERT INTO idempotency (sender_id, client_key, request_hash, message_id)

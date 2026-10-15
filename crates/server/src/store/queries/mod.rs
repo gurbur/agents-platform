@@ -3,5 +3,6 @@
 //! besides SQLite.
 
 pub mod agents;
+pub mod delivery;
 pub mod inbox;
 pub mod messages;

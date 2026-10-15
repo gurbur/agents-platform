@@ -4,7 +4,8 @@
 //! Query order (`IF-WIRE-005`): parameter names (422) → permission (403) →
 //! `after_seq`/`until_seq`/`limit` values (422) → the target agent (404,
 //! owner path only). The GET paths never write; only the PUT moves the
-//! marker, and it leaves delivery state to the worker.
+//! marker, and a marker at the head makes the delivery state idle in the
+//! same transaction.
 
 use axum::extract::{FromRequestParts, RawQuery, State};
 use axum::http::request::Parts;

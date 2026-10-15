@@ -21,7 +21,7 @@ use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::delivery::DeliverySignal;
+use crate::delivery::{CallbackClient, DeliverySignal, Worker, WorkerHandle};
 use crate::store::{Store, StoreError, StoreThread, migrations};
 
 /// Upper bound for in-flight requests to finish after a shutdown signal (`IF-OPS-001`).
@@ -46,6 +46,8 @@ pub enum StartupError {
     Store(#[from] StoreError),
     #[error("cannot listen on {addr}: {source}")]
     Bind { addr: SocketAddr, source: io::Error },
+    #[error("cannot build the receiver callback client: {0}")]
+    CallbackClient(#[source] reqwest::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,16 +58,20 @@ pub enum ServeError {
     Store(#[from] StoreError),
 }
 
-/// A server whose database is open and migrated and whose listener is bound.
-/// Readiness is listen: nothing is bound until migrations succeed.
+/// A server whose database is open and migrated, whose listener is bound
+/// and whose delivery worker is running. Readiness is listen: nothing is
+/// bound until migrations succeed.
 pub struct Server {
     listener: TcpListener,
     router: axum::Router,
     store_thread: StoreThread,
     delivery: DeliverySignal,
+    worker: WorkerHandle,
 }
 
-/// Opens the database, applies migrations, then binds the listener.
+/// Opens the database, applies migrations, binds the listener and starts
+/// the delivery worker, which resumes pending notifications from the
+/// database.
 pub async fn start(config: &Config) -> Result<Server, StartupError> {
     ensure_parent_dir(&config.db_path)?;
 
@@ -83,7 +89,9 @@ pub async fn start(config: &Config) -> Result<Server, StartupError> {
             addr: config.listen,
             source,
         })?;
+    let client = CallbackClient::new(&config.delivery).map_err(StartupError::CallbackClient)?;
     let delivery = DeliverySignal::new();
+    let worker = Worker::spawn(store.clone(), delivery.clone(), client, &config.delivery);
     let router = api::router(api::AppState::new(
         store,
         config.owner_token.clone(),
@@ -95,6 +103,7 @@ pub async fn start(config: &Config) -> Result<Server, StartupError> {
         router,
         store_thread,
         delivery,
+        worker,
     })
 }
 
@@ -103,14 +112,15 @@ impl Server {
         self.listener.local_addr()
     }
 
-    /// The signal raised after every commit that created inbox rows; the
-    /// delivery worker (S4) waits on it.
+    /// The signal raised after every commit that changes what the delivery
+    /// worker should do; the worker waits on it.
     pub fn delivery_signal(&self) -> DeliverySignal {
         self.delivery.clone()
     }
 
     /// Serves until `shutdown` resolves, then closes the listener, waits up to
-    /// [`DRAIN_LIMIT`] for in-flight requests and joins the DB thread.
+    /// [`DRAIN_LIMIT`] for in-flight requests, stops the delivery worker
+    /// without waiting for its HTTP attempts, and joins the DB thread.
     pub async fn serve<S>(self, shutdown: S) -> Result<(), ServeError>
     where
         S: Future<Output = ()> + Send + 'static,
@@ -120,6 +130,7 @@ impl Server {
             router,
             store_thread,
             delivery: _,
+            worker,
         } = self;
         if let Ok(addr) = listener.local_addr() {
             info!(%addr, "listening");
@@ -128,6 +139,8 @@ impl Server {
         // The router owns the last `Store` clones; it must be dropped (with the
         // serve future) before the DB thread can observe the closed queue.
         let http_result = serve_http(listener, router, shutdown).await;
+        // The worker and its attempts hold `Store` clones too.
+        worker.stop().await;
 
         let store_result = store_thread.shutdown(STORE_JOIN_LIMIT).await;
         http_result?;

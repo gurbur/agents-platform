@@ -15,6 +15,8 @@ platformd = { path = "crates/server" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+futures-util = { version = "0.3.34", default-features = false }
+httpdate = "1.0.3"
 rand = "0.10.3"
 # reqwest 0.13: `rustls` = rustls + aws-lc-rs provider + platform verifier. HTTP/1 is always on;
 # default features (default-tls, charset, http2, system-proxy) are deliberately off.

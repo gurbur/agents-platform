@@ -2,9 +2,13 @@
 //! (`IF-DB-001` tables `agents`, `memberships`, `read_state`,
 //! `notification_pending`, `sequences`).
 
+use std::time::SystemTime;
+
 use platform_wire::{AgentId, DeliveryState};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use super::delivery as delivery_queries;
+use crate::delivery::transitions::{self, StoredState};
 use crate::store::StoreError;
 
 /// The only room with memberships in v1.
@@ -13,11 +17,6 @@ pub const ALL_ROOM: &str = "all";
 /// `route_version` and `membership_epoch` of a freshly registered agent.
 const INITIAL_ROUTE_VERSION: i64 = 1;
 const INITIAL_MEMBERSHIP_EPOCH: i64 = 1;
-
-/// Stored `notification_pending.state` values (`IF-DLV-001`).
-const STATE_IDLE: &str = "idle";
-const STATE_PENDING: &str = "pending";
-const STATE_BLOCKED: &str = "blocked";
 
 /// Everything needed to insert an agent. Credentials are already generated;
 /// only the API key hash and the receiver secret are stored.
@@ -104,7 +103,7 @@ pub fn register(tx: &Transaction, agent: &NewAgent) -> Result<Registration, Stor
     tx.execute(
         "INSERT INTO notification_pending (agent_id, route_version, state, target_seq)
          VALUES (?1, ?2, ?3, 0)",
-        params![id, INITIAL_ROUTE_VERSION, STATE_IDLE],
+        params![id, INITIAL_ROUTE_VERSION, StoredState::Idle.as_str()],
     )?;
 
     Ok(Registration::Created(RegisteredAgent {
@@ -166,7 +165,8 @@ pub fn find_by_api_key_hash(
 }
 
 /// Sets the receiver URL. `route_version` grows only when the value changes,
-/// including null ↔ URL. `None` when the agent does not exist.
+/// including null ↔ URL, and a change applies the route-change delivery
+/// transition in the same transaction. `None` when the agent does not exist.
 pub fn update_receiver(
     tx: &Transaction,
     agent_id: &AgentId,
@@ -186,12 +186,14 @@ pub fn update_receiver(
     let route_version = if stored_url == receiver_url {
         stored_version
     } else {
-        tx.query_row(
+        let bumped = tx.query_row(
             "UPDATE agents SET receiver_url = ?1, route_version = route_version + 1
              WHERE agent_id = ?2 RETURNING route_version",
             params![receiver_url, agent_id.as_str()],
             |row| row.get(0),
-        )?
+        )?;
+        delivery_queries::record_route_change(tx, agent_id, SystemTime::now())?;
+        bumped
     };
 
     let state = stored_notification_state(tx, agent_id)?;
@@ -231,8 +233,9 @@ pub fn set_all_membership(
     }))
 }
 
-/// Replaces both credentials and bumps `route_version`. Returns the new
-/// `route_version`, or `None` when the agent does not exist.
+/// Replaces both credentials, bumps `route_version` and applies the
+/// route-change delivery transition. Returns the new `route_version`, or
+/// `None` when the agent does not exist.
 pub fn rotate_credentials(
     tx: &Transaction,
     agent_id: &AgentId,
@@ -247,6 +250,9 @@ pub fn rotate_credentials(
             |row| row.get(0),
         )
         .optional()?;
+    if route_version.is_some() {
+        delivery_queries::record_route_change(tx, agent_id, SystemTime::now())?;
+    }
     Ok(route_version)
 }
 
@@ -304,17 +310,10 @@ fn stored_notification_state(conn: &Connection, agent_id: &AgentId) -> Result<St
 /// `IF-DLV-001`: a null `receiver_url` displays as `no_receiver`; otherwise
 /// the stored `notification_pending.state`.
 fn display_state(receiver_url: Option<&str>, stored: &str) -> Result<DeliveryState, StoreError> {
-    if receiver_url.is_none() {
-        return Ok(DeliveryState::NoReceiver);
-    }
-    match stored {
-        STATE_IDLE => Ok(DeliveryState::Idle),
-        STATE_PENDING => Ok(DeliveryState::Pending),
-        STATE_BLOCKED => Ok(DeliveryState::Blocked),
-        other => Err(StoreError::Invariant(format!(
-            "unknown notification_pending.state '{other}'"
-        ))),
-    }
+    let state = StoredState::parse(stored).ok_or_else(|| {
+        StoreError::Invariant(format!("unknown notification_pending.state '{stored}'"))
+    })?;
+    Ok(transitions::display_state(receiver_url.is_some(), state))
 }
 
 pub(crate) fn stored_agent_id(raw: String) -> Result<AgentId, StoreError> {
@@ -328,7 +327,7 @@ mod tests {
 
     #[test]
     fn null_receiver_displays_no_receiver_whatever_is_stored() {
-        for stored in [STATE_IDLE, STATE_PENDING, STATE_BLOCKED] {
+        for stored in ["idle", "pending", "blocked"] {
             assert_eq!(
                 display_state(None, stored).unwrap(),
                 DeliveryState::NoReceiver
@@ -339,13 +338,13 @@ mod tests {
     #[test]
     fn set_receiver_displays_the_stored_state() {
         let url = Some("http://receiver.test/notify");
-        assert_eq!(display_state(url, STATE_IDLE).unwrap(), DeliveryState::Idle);
+        assert_eq!(display_state(url, "idle").unwrap(), DeliveryState::Idle);
         assert_eq!(
-            display_state(url, STATE_PENDING).unwrap(),
+            display_state(url, "pending").unwrap(),
             DeliveryState::Pending
         );
         assert_eq!(
-            display_state(url, STATE_BLOCKED).unwrap(),
+            display_state(url, "blocked").unwrap(),
             DeliveryState::Blocked
         );
         assert!(display_state(url, "bogus").is_err());

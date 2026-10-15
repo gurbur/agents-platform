@@ -54,7 +54,7 @@ impl FromRequestParts<AppState> for OwnerOnly {
 /// Extractor: the `{agent_id}` path target, which the caller (the owner or
 /// that agent) may manage. An unparsable slug can never name an agent, so
 /// for the owner it is 404 `agent_not_found`; an agent already got 403.
-struct ManagedAgent(AgentId);
+pub(super) struct ManagedAgent(pub(super) AgentId);
 
 impl FromRequestParts<AppState> for ManagedAgent {
     type Rejection = ApiError;
@@ -184,6 +184,8 @@ async fn update_receiver(
         .transaction(move |tx| agent_queries::update_receiver(tx, &target, receiver_url))
         .await?
         .ok_or_else(ApiError::agent_not_found)?;
+    // A new route may have scheduled a notification.
+    state.delivery.notify();
 
     Ok(Json(ReceiverResponse {
         agent_id,
@@ -239,6 +241,7 @@ async fn rotate_tokens(
         })
         .await?
         .ok_or_else(ApiError::agent_not_found)?;
+    state.delivery.notify();
 
     info!(agent_id = %agent_id, route_version, "agent credentials rotated");
     Ok(Json(RotateTokensResponse {

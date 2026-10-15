@@ -6,6 +6,7 @@
 
 pub mod agent_id;
 pub mod agents;
+pub mod delivery;
 pub mod error;
 pub mod health;
 pub mod inbox;
@@ -18,6 +19,7 @@ pub use agents::{
     OwnerAgentEntry, ReceiverResponse, RegisterAgentRequest, RegisterAgentResponse,
     RotateTokensResponse, UpdateReceiverRequest,
 };
+pub use delivery::{DeliveryRetryResponse, DeliveryStatus, WakeNotification};
 pub use error::{ErrorBody, ErrorDetail, codes};
 pub use health::HealthStatus;
 pub use inbox::{InboxItem, InboxPage, ReadMarkerRequest, ReadMarkerResponse};

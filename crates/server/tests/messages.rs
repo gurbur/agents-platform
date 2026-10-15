@@ -5,16 +5,12 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use common::{Api, Fixture, OWNER_TOKEN, RunningServer};
 use platform_wire::messages::{MAX_BODY_BYTES, MAX_CLIENT_KEY_BYTES};
 use platformd::api::MAX_WIRE_BODY_BYTES;
 use reqwest::Method;
 use serde_json::{Value, json};
-
-/// Guards against a hang only; the signal is expected immediately.
-const SIGNAL_WAIT: Duration = Duration::from_secs(5);
 
 async fn start() -> (Fixture, RunningServer, Api) {
     let fx = Fixture::new();
@@ -98,15 +94,47 @@ async fn all_fanout_stores_one_message_and_an_inbox_row_per_member() {
 }
 
 #[tokio::test]
-async fn a_commit_raises_the_delivery_signal() {
-    let (_fx, server, api) = start().await;
+async fn a_commit_schedules_each_recipient_notification_atomically() {
+    let (fx, server, api) = start().await;
     let a = api.register("agent-a", None).await;
+    api.register("agent-b", None).await;
 
     api.sent(&a.api_key, "all", "wake", "k-1").await;
+    api.sent(&a.api_key, "agent-b", "dm", "k-2").await;
 
-    tokio::time::timeout(SIGNAL_WAIT, server.delivery.notified())
-        .await
-        .expect("the 201 commit notifies the delivery signal");
+    // Committed together with the inbox rows (IF-DLV-001 "새 inbox row"):
+    // pending, targeting the new head, due at once. No receiver URL, so the
+    // worker leaves them alone and the directory shows `no_receiver`.
+    let rows = fx
+        .read_db(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT n.agent_id, n.state, n.target_seq, a.inbox_head, n.next_due_at IS NOT NULL
+                 FROM notification_pending n JOIN agents a ON a.agent_id = n.agent_id
+                 ORDER BY n.agent_id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, bool>(4)?,
+                ))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await;
+    assert_eq!(
+        rows,
+        [
+            ("agent-a".to_owned(), "pending".to_owned(), 1, 1, true),
+            ("agent-b".to_owned(), "pending".to_owned(), 2, 2, true),
+        ]
+    );
+    let directory = api.get("/v1/agents", OWNER_TOKEN).await;
+    for item in directory.body["items"].as_array().unwrap() {
+        assert_eq!(item["delivery"]["state"], "no_receiver", "{item}");
+    }
     server.shutdown().await.unwrap();
 }
 

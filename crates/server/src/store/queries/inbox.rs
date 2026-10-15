@@ -1,13 +1,14 @@
 //! Inbox pages and the read marker (`IF-DB-001` tables `agents.inbox_head`,
 //! `inbox_rows`, `messages`, `read_state`).
 //!
-//! Neither function touches `notification_pending`: the delivery state that
-//! follows a marker change belongs to the delivery worker (S4).
+//! A marker that moves up also runs the read-marker delivery transition
+//! (`IF-DLV-001`) in the same transaction: at the head, the agent is idle.
 
 use platform_wire::{AgentId, InboxItem, RoomId, Seq};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
 use super::agents::stored_agent_id;
+use super::delivery as delivery_queries;
 use super::messages::{stored_message_id, stored_seq};
 use crate::store::StoreError;
 
@@ -95,7 +96,8 @@ pub fn page(conn: &Connection, query: &InboxQuery) -> Result<Option<InboxSlice>,
 }
 
 /// Raises the agent's marker to `through_seq` if it lies in
-/// `(read_marker, inbox_head]`. `None` when the agent does not exist.
+/// `(read_marker, inbox_head]`, then applies the read-marker delivery
+/// transition. `None` when the agent does not exist.
 pub fn advance_read_marker(
     tx: &Transaction,
     agent_id: &AgentId,
@@ -114,6 +116,7 @@ pub fn advance_read_marker(
         "UPDATE read_state SET read_marker = ?2 WHERE agent_id = ?1",
         params![agent_id.as_str(), through_seq.get()],
     )?;
+    delivery_queries::record_read_marker(tx, agent_id)?;
     Ok(Some(ReadMarkerOutcome::Advanced(through_seq)))
 }
 

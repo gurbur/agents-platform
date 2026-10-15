@@ -1,10 +1,14 @@
 //! Shared fixtures: a temp directory holding a config file and token file,
-//! and an in-process server bound to an ephemeral port.
+//! an in-process server bound to an ephemeral port, and a mock receiver.
 
 #![allow(dead_code)] // Each test binary uses a different subset.
 
+pub mod receiver;
+
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use platformd::config::Config;
 use platformd::delivery::DeliverySignal;
@@ -53,6 +57,18 @@ impl Fixture {
         Config::load(&self.write_config("127.0.0.1:0")).expect("valid config")
     }
 
+    /// Like [`Fixture::load_config`] with a `[delivery]` table holding
+    /// `delivery` (TOML `key = value` lines).
+    pub fn load_config_with_delivery(&self, delivery: &str) -> Config {
+        let path = self.write_config_text(&format!(
+            "listen = \"127.0.0.1:0\"\n\
+             db_path = \"data/platform.db\"\n\
+             owner_token_file = \"owner.token\"\n\
+             [delivery]\n{delivery}\n"
+        ));
+        Config::load(&path).expect("valid config")
+    }
+
     /// Runs `f` on a second connection to the database. WAL lets it read
     /// while a server is running; the connection is closed before returning.
     pub async fn read_db<T, F>(&self, f: F) -> T
@@ -73,7 +89,7 @@ impl Fixture {
 
 pub struct RunningServer {
     pub addr: SocketAddr,
-    /// The server's commit signal, for tests that stand in for the S4 worker.
+    /// The server's delivery signal.
     pub delivery: DeliverySignal,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<(), platformd::ServeError>>>,
@@ -107,6 +123,26 @@ impl RunningServer {
         }
         let task = self.task.take().expect("task present until shutdown");
         task.await.expect("serve task did not panic")
+    }
+}
+
+/// Polls `probe` every few milliseconds until it returns `Some`; panics with
+/// `what` after `limit`. Bounds a wait without asserting how fast it is.
+pub async fn eventually<T, F, Fut>(limit: Duration, what: &str, mut probe: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<T>>,
+{
+    let started = Instant::now();
+    loop {
+        if let Some(value) = probe().await {
+            return value;
+        }
+        assert!(
+            started.elapsed() < limit,
+            "timed out after {limit:?}: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 

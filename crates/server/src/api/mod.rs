@@ -2,6 +2,7 @@
 //! contain SQL.
 
 mod agents;
+mod delivery;
 mod error;
 mod history;
 mod inbox;
@@ -55,6 +56,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .merge(agents::routes())
+        .merge(delivery::routes())
         .merge(messages::routes())
         .merge(inbox::routes())
         .fallback(not_found)
