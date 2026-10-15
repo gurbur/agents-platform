@@ -1,6 +1,6 @@
 # 슬라이스 S5: cli-mapping
 
-- **상태**: frozen (2026-10-16)
+- **상태**: done (2026-10-16) — 237 tests. CLI는 `platform-wire` 타입으로 입력을 먼저 검사해 형식 오류는 서버에 가지 않고 exit 2. `--json`일 때 생성된 `client_key`는 stderr 한 줄.
 - **위험/의존도**: 중 — 서버 API가 전부 있어야 끝까지 검증된다. 로직은 얇다.
 
 ## 목표

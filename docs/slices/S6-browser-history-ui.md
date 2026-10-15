@@ -1,6 +1,6 @@
 # 슬라이스 S6: browser-history-ui
 
-- **상태**: frozen (2026-10-16) — S5와 병행
+- **상태**: done (2026-10-16) — Orca 브라우저로 수동 검수: 네 탭 동작, `<b>x</b> & <script>` 본문이 글자 그대로(td 자식 요소 0), reload 뒤 sessionStorage 복원, 로그아웃 뒤 새로고침은 `연결 실패 — unauthorized`, 콘솔 메시지 0건, owner 조회 뒤 read_marker 불변. `HEAD /`는 200(RFC 9110).
 - **위험/의존도**: 중 — 보안 경계(owner token 취급, CSP)와 "조회만, marker 부작용 없음"이 핵심. 사람이 브라우저로 직접 검수한다.
 
 ## 목표
