@@ -100,7 +100,7 @@
     effective_event_seq INTEGER NOT NULL,      -- 이 상태가 유효해진 시점의 event_seq
     PRIMARY KEY (room_id, agent_id)
   );
-  sequences(name TEXT PRIMARY KEY, value INTEGER NOT NULL);   -- ('event_seq', n)
+  sequences(name TEXT PRIMARY KEY, value INTEGER NOT NULL);   -- v1 migration이 ('event_seq', 0) 행을 미리 넣는다. 발급은 UPDATE만.
   messages(
     message_id TEXT PRIMARY KEY,
     event_seq INTEGER NOT NULL UNIQUE,
@@ -171,7 +171,7 @@
 ### `IF-OPS-001 — 운영 endpoint`
 
 - **종류**: REST · **제공자**: `platformd::api` · **소비자**: systemd/운영자, `platform health`, 배포 스크립트
-- `GET /healthz` → 인증 없음. DB가 열리고 최신 migration이 적용됐을 때만 `200 {"status":"ok","schema_version":1}`. 그 전에는 listen 자체를 시작하지 않는다(readiness = listen 시작).
+- `GET /healthz` → 인증 없음. DB가 열리고 최신 migration이 적용됐을 때만 `200 {"status":"ok","schema_version":1}`. 그 전에는 listen 자체를 시작하지 않는다(readiness = listen 시작). 요청마다 DB thread를 한 번 왕복해 schema version을 읽으며, 실패하면 503 `unavailable`(오류 body 형식은 `IF-API-COMMON`).
 - `platformd --version` → 바이너리 버전(Cargo `CARGO_PKG_VERSION`)과 git short hash(빌드 시 환경변수 `PLATFORMD_GIT_SHA`, 없으면 `unknown`)를 한 줄 출력.
 - graceful shutdown: SIGTERM/SIGINT → listener 닫기 → 진행 중 요청 완료 대기(상한 10초) → Store drop·join → delivery in-flight HTTP는 기다리지 않음(pending state는 DB에 있음).
 - **상태**: frozen · 2026-10-15
@@ -192,6 +192,48 @@
 - backoff: `min(backoff_max, backoff_min * 2^attempt)`에 ±50% jitter. 유효한 `Retry-After`(초 또는 HTTP-date)가 있으면 그 값(상한 backoff_max)을 쓴다.
 - 자세한 전이표는 S3 slice-spec에서 freeze한다.
 - **상태**: draft · 2026-10-15
+
+### `IF-WIRE-001 — GET /v1/agents 응답 형태`
+
+- **종류**: REST 응답 스키마(API_V1이 필드만 열거하고 모양을 비워 둔 부분) · **제공자**: `platformd::api` · **소비자**: `platform`, 브라우저 UI
+- 페이징 없음(v1 agent 수는 소수). `agent_id` ASCII 오름차순.
+  ```json
+  // Principal::Agent
+  {"items":[{"agent_id":"agent-a","joined_all":true}]}
+  // Principal::Owner
+  {"items":[{"agent_id":"agent-a","joined_all":true,"receiver_url":"http://...","route_version":1,
+             "created_at":"2026-10-15T12:34:56.789Z","delivery":{"state":"idle"}}]}
+  ```
+- `delivery.state`는 `IF-DLV-001` 파생 규칙(`receiver_url IS NULL → no_receiver`, 그 외 `notification_pending.state`). 키·secret은 어떤 형태에도 없다.
+- **상태**: frozen · 2026-10-15
+
+### `IF-WIRE-002 — 요청 JSON 파싱·검증 오류 매핑`
+
+- **종류**: 오류 규칙(API_V1 "잘못된 JSON·필드 형식은 400 또는 422"의 구체화) · **제공자**: `platformd::api::StrictJson` · **소비자**: 모든 write handler
+- `Content-Type`이 `application/json`이 아니면 415 `unsupported_media_type`.
+- body가 JSON으로 파싱되지 않으면 400 `invalid_json`.
+- 허용 밖 필드(`deny_unknown_fields`) → 422 `unexpected_field`, `details: {"field": "<이름>"}`.
+- 필수 필드 누락·타입 불일치·형식 위반(`Seq`, 길이 등) → 422 `invalid_field`, `details: {"field": "<이름>"}`(알 수 있을 때). 단 API_V1이 전용 code를 둔 경우(`invalid_agent_id`, `invalid_receiver_url`, `body_too_large`, `request_too_large`, `self_dm_not_supported`, `reply_to_room_mismatch`, `read_marker_ahead`, `mutually_exclusive_cursors`)는 그 code가 우선.
+- 크기: wire body > 128 KiB → 413 `request_too_large`(파싱 전 차단). decoded `body` > 16 KiB → 413 `body_too_large`.
+- **상태**: frozen · 2026-10-15
+
+### `IF-WIRE-003 — API_V1 오류표 보충 code`
+
+- **종류**: 오류 code(API_V1 "오류와 권한 요약"이 다루지 않은 상황) · **제공자**: `platformd::api` · **소비자**: `platform`, 브라우저 UI
+- | 상황 | 상태 | code |
+  | --- | --- | --- |
+  | `reply_to`가 존재하지 않는 message_id | 404 | `reply_to_not_found` |
+  | `GET /v1/messages/{id}` 대상이 없거나 권한 밖 | 404 | `message_not_found` |
+  | 경로의 `{agent_id}`가 없음(owner 요청) | 404 | `agent_not_found` |
+  | owner 토큰으로 agent 전용 write(`POST /v1/messages`, `PUT /v1/inbox/read-marker`) | 403 | `forbidden` |
+  | `room_id` 형식 오류(`all` 또는 `dm:<a>:<b>`, a<b ASCII, 유효 slug, a≠b 아님) | 422 | `invalid_field` (`details.field="room_id"`) |
+  | `limit`이 1..100 밖 또는 정수 아님 | 422 | `invalid_field` (`details.field="limit"`) |
+  | 알 수 없는 경로 | 404 | `not_found` |
+  | 허용되지 않은 method | 405 | `method_not_allowed` |
+  | 내부 오류(DB 등) | 500 | `internal` (message는 일반 문구, 상세는 로그에만) |
+  | `/healthz`에서 DB 왕복 실패 또는 schema 불일치 | 503 | `unavailable` |
+- `403 또는 404 forbidden`로 적힌 "다른 agent의 DM·inbox·delivery 조회"는 **403 `forbidden`**으로 통일한다(수용 시나리오 10의 403과 일관).
+- **상태**: frozen · 2026-10-15
 
 ## 용어집
 

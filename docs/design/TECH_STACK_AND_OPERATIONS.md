@@ -124,10 +124,10 @@ systemd resource control은 측정 결과에 따라 CPU, memory, task 수의 한
 
 운영 Pi가 glibc 기반 Debian aarch64이므로 Rust target은 `aarch64-unknown-linux-gnu`로 확정한다. 배포 바이너리는 glibc 2.41 이하의 symbol version에만 링크되어야 하며, 2.41보다 새로운 glibc symbol version을 요구하는 바이너리는 운영 Pi에서 로드되지 않는다. `aarch64-unknown-linux-musl`도 bundled SQLite와 rustls로 빌드할 수 있지만, 운영 OS의 기본 ABI와 다른 libc 동작을 따로 검증해야 하므로 기본값으로 택하지 않는다.
 
-배포 바이너리 빌드는 Docker Desktop의 `linux/aarch64` 네이티브 컨테이너 안에서 Debian trixie 기반 Rust 이미지로 수행하는 것을 기본 제안으로 둔다. 이미지 후보는 Docker 공식 `rust` 이미지의 `1-trixie`와 `1-slim-trixie` 태그이며, 2026-10-15 Docker Hub manifest 조회로 두 태그에 `linux/arm64` manifest가 있음을 확인했다. 이 경로는 아직 실제로 빌드해 보지 않았으며, 구현 단계에서 컨테이너 빌드와 운영 Pi 실행으로 확인한 뒤 확정한다. 제안 근거는 다음과 같다.
+배포 바이너리 빌드는 Docker Desktop의 `linux/aarch64` 네이티브 컨테이너 안에서 Debian trixie 기반 Rust 이미지로 수행하는 것을 기본 제안으로 둔다. 이미지 후보는 Docker 공식 `rust` 이미지의 `1-trixie`와 `1-slim-trixie` 태그이며, 2026-10-15 Docker Hub manifest 조회로 두 태그에 `linux/arm64` manifest가 있음을 확인했다. 2026-10-15 S0 슬라이스에서 이 경로로 실제 빌드하고 산출 바이너리를 운영 Pi에서 기동해 `/healthz` 200을 확인했다([ADR-0002](../adr/0002-aarch64-gnu-container-build.md) "S0 실측"). 근거는 다음과 같다.
 
 - 개발 머신의 Docker daemon이 `linux/aarch64` 네이티브이므로 에뮬레이션 없이 target과 같은 architecture에서 빌드한다.
-- 컨테이너가 운영 Pi와 같은 Debian trixie 계열이므로 glibc 2.41 상한에 맞출 수 있다. 이미지 안의 glibc 버전과 실제 빌드 성공은 확인하지 않았으므로, 구현 단계에서 사용한 이미지 안의 `ldd --version` 결과를 기록한다.
+- 컨테이너가 운영 Pi와 같은 Debian trixie 계열이라 glibc 2.41 상한을 지킨다. 실측: 이미지 안 glibc `2.41-12+deb13u4`, `platformd`가 요구하는 최고 symbol version `GLIBC_2.34`.
 - bundled SQLite와 aws-lc-rs가 요구하는 C/C++ 도구를 컨테이너 안에 두므로 macOS 호스트에 Linux target용 cross C toolchain을 설치하지 않는다.
 
 대안으로 `cargo-zigbuild`는 `--target aarch64-unknown-linux-gnu.2.41`처럼 glibc 버전을 지정해 macOS 호스트에서 링크할 수 있다. 이 경로는 `rustup target add aarch64-unknown-linux-gnu`와 zig·cargo-zigbuild 설치가 필요하며, 2026-10-15 현재 모두 미설치다.

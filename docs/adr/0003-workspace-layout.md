@@ -14,7 +14,7 @@ crates/server/ → package platformd      (bin platformd)  config, auth, store, 
 crates/cli/    → package platform-cli   (bin platform)   clap + reqwest(rustls), platform-wire
 ```
 - `Cargo.lock` 커밋. 각 crate `rust-version = "1.98"`.
-- reqwest는 `default-features = false`, features `["rustls-tls", "json", "http1"]`를 기준으로 하되 실제 feature 이름은 구현 시 reqwest 최신 문서로 확정하고 manifest에 명시한다(TECH 문서 규칙).
+- reqwest는 `default-features = false`, features `["rustls", "json"]` (reqwest 0.13 기준 — `rustls`가 rustls + aws-lc-rs provider + platform verifier를 켠다. HTTP/1은 항상 켜져 있어 별도 feature가 없다. S0에서 `cargo info`와 설치된 crate 문서로 확인). 버전이 바뀌면 manifest와 이 줄을 함께 고친다.
 - 통합 테스트는 `crates/server/tests/`에서 임시 디렉터리 DB로 앱을 in-process 기동해 HTTP로 검증한다.
 
 ## 대안
