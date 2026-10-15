@@ -235,6 +235,15 @@
 - `403 또는 404 forbidden`로 적힌 "다른 agent의 DM·inbox·delivery 조회"는 **403 `forbidden`**으로 통일한다(수용 시나리오 10의 403과 일관).
 - **상태**: frozen · 2026-10-15
 
+### `IF-WIRE-004 — receiver_url 정규화와 PATCH body`
+
+- **종류**: 입력 규칙(S1 구현에서 확정) · **제공자**: `platformd::api::receiver_url` · **소비자**: `IF-API-AGENTS`, `IF-API-RECEIVER`, delivery client
+- `receiver_url`은 `url` crate 파싱 뒤 **정규화된 직렬화**(scheme·host 소문자, 빈 path → `/`)로 저장·비교·응답한다. 따라서 대소문자만 다른 URL은 같은 값이며 `route_version`을 올리지 않는다. 원문과 정규화 결과 모두 2048바이트 이하.
+- `PATCH /v1/agents/{id}/receiver` body는 `receiver_url` 키가 **필수**(값은 null 허용). `{}`는 422 `invalid_field`.
+- `POST /v1/agents/{id}/tokens/rotate`는 body를 읽지 않는다(Content-Type 무관).
+- 인증·권한(401/403)은 body 검사(415/400/422)보다 먼저다. agent principal이 다른 agent 경로를 지정하면 존재 여부와 무관하게 403, owner가 slug가 아닌 경로를 지정하면 404 `agent_not_found`.
+- **상태**: frozen · 2026-10-15
+
 ## 용어집
 
 - **head**: 한 agent inbox의 마지막 `inbox_seq` (`agents.inbox_head`).

@@ -1,6 +1,6 @@
 # 슬라이스 S1: agents-and-credentials
 
-- **상태**: frozen (2026-10-15)
+- **상태**: done (2026-10-15) — 113 tests, 구현 판단은 `IF-WIRE-004`에 기록
 - **위험/의존도**: 상 — 인증·권한 경계와 credential 발급은 이후 모든 endpoint가 올라타는 바닥이다.
 
 ## 목표

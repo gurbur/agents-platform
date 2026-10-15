@@ -5,8 +5,8 @@
 | 순서 | 슬라이스 | 위험 | 끝까지 동작시키는 것 | 수용 시나리오(PLATFORM_MESSAGING_SPEC) | 상태 |
 | --- | --- | --- | --- | --- | --- |
 | S0 | [skeleton-and-build-path](S0-skeleton-and-build-path.md) | 상 | workspace, 설정, 단일 DB thread, schema v1, `/healthz`, CLI `health`, **컨테이너 aarch64 빌드 → Pi에서 기동** | — (ADR-0002 확인) | done 2026-10-15 |
-| S1 | [agents-and-credentials](S1-agents-and-credentials.md) | 상 | agent 등록·directory·receiver patch·membership·token rotation, owner/agent 인증 | 1, 12(credential 경계) | frozen |
-| S2 | [send-and-history](S2-send-and-history.md) | 상 | `POST /v1/messages` idempotency·fanout·DM·reply_to, `GET /v1/messages`, `GET /v1/messages/{id}` | 1, 2, 4, 11 | draft |
+| S1 | [agents-and-credentials](S1-agents-and-credentials.md) | 상 | agent 등록·directory·receiver patch·membership·token rotation, owner/agent 인증 | 1, 12(credential 경계) | done 2026-10-15 |
+| S2 | [send-and-history](S2-send-and-history.md) | 상 | `POST /v1/messages` idempotency·fanout·DM·reply_to, `GET /v1/messages`, `GET /v1/messages/{id}` | 1, 2, 4, 11 | frozen |
 | S3 | [inbox-and-read-marker](S3-inbox-and-read-marker.md) | 중 | `GET /v1/inbox`(snapshot pagination), owner inbox 조회, `PUT /v1/inbox/read-marker` | 3, 10, 12(no-ack) | draft |
 | S4 | delivery-worker | 상 | notification_pending, callback client, backoff/Retry-After, blocked 분류, route_version 격리, 300s redrive, `GET delivery`, `POST delivery/retry` | 5, 6, 7, 8, 9 | draft |
 | S5 | cli-mapping | 중 | API_V1 "CLI 매핑" 표 전체 | — | draft |

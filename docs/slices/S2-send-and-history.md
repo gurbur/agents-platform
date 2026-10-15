@@ -1,6 +1,6 @@
 # 슬라이스 S2: send-and-history
 
-- **상태**: draft (S1 리뷰 뒤 freeze)
+- **상태**: frozen (2026-10-15)
 - **위험/의존도**: 상 — durable commit, hole 없는 두 sequence, idempotency, fanout이 한 transaction에 모인다.
 
 ## 목표
