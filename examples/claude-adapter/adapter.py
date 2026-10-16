@@ -7,8 +7,12 @@ Connects one registered agent to the hub:
   docs/agent-kit/RECEIVER_SPEC.md, answers an empty 202 at once and only sets
   an event for the drain loop;
 * one drain worker that, on start, on every wake and every --poll-secs, pages
-  through the inbox snapshot after the read marker, replies to each message as
-  a DM to its sender and advances the read marker page by page.
+  through the inbox snapshot after the read marker, hands each message to a
+  responder and advances the read marker page by page.
+
+Responders: `claude` and `echo` produce a reply that the adapter sends as a DM
+to the sender; `orca-terminal` forwards the message into a live Orca terminal
+and sends nothing (the session in that terminal answers with `platform send`).
 
 The adapter neither registers the agent nor sets its receiver route; the owner
 does that with the `platform` CLI (see README.md). Credentials and message
@@ -50,6 +54,7 @@ DEFAULT_RESPONDER_TIMEOUT_SECS = 120.0
 HUB_REQUEST_TIMEOUT_SECS = 15.0
 SHUTDOWN_GRACE_SECS = 5.0
 STDERR_TAIL_CHARS = 400
+ORCA_WAIT_SUBMIT_SECS = "5"
 
 CLAUDE_SYSTEM_PROMPT = (
     "You are an agent answering a direct message on a personal message hub. "
@@ -82,6 +87,10 @@ class ShuttingDown(Exception):
     pass
 
 
+class ResponderFailed(Exception):
+    """The responder could not handle the message; it must not be acked."""
+
+
 # --------------------------------------------------------------------------
 # Configuration
 
@@ -112,15 +121,19 @@ def parse_args(argv):
     parser.add_argument("--poll-secs", type=float,
                         default=float(env_default("ADAPTER_POLL_SECS", str(DEFAULT_POLL_SECS))),
                         help="fallback inbox poll interval (env ADAPTER_POLL_SECS, default 60)")
-    parser.add_argument("--responder", choices=("claude", "echo"),
+    parser.add_argument("--responder", choices=("claude", "echo", "orca-terminal"),
                         default=env_default("ADAPTER_RESPONDER", "claude"),
                         help="how replies are produced (env ADAPTER_RESPONDER, default claude)")
     parser.add_argument("--responder-timeout", type=float,
                         default=float(env_default("ADAPTER_RESPONDER_TIMEOUT",
                                                   str(DEFAULT_RESPONDER_TIMEOUT_SECS))),
-                        help="claude responder timeout in seconds (env ADAPTER_RESPONDER_TIMEOUT, default 120)")
+                        help="claude / orca-terminal timeout in seconds (env ADAPTER_RESPONDER_TIMEOUT, default 120)")
     parser.add_argument("--claude-model", default=env_default("ADAPTER_CLAUDE_MODEL"),
                         help="passed as `claude --model` when set (env ADAPTER_CLAUDE_MODEL)")
+    parser.add_argument("--orca-terminal", default=env_default("ADAPTER_ORCA_TERMINAL"),
+                        help="Orca terminal handle for --responder orca-terminal (env ADAPTER_ORCA_TERMINAL)")
+    parser.add_argument("--orca-bin", default=env_default("ADAPTER_ORCA_BIN", "orca"),
+                        help="Orca CLI executable (env ADAPTER_ORCA_BIN, default orca)")
     parser.add_argument("--verbose", action="store_true",
                         help="also log message and reply bodies")
     args = parser.parse_args(argv)
@@ -132,6 +145,8 @@ def parse_args(argv):
         parser.error("missing required option(s): " + ", ".join(missing))
     if not args.wake_path.startswith("/"):
         parser.error("--wake-path must start with /")
+    if args.responder == "orca-terminal" and not args.orca_terminal:
+        parser.error("--responder orca-terminal requires --orca-terminal <handle>")
     if args.poll_secs <= 0 or args.responder_timeout <= 0:
         parser.error("--poll-secs and --responder-timeout must be positive")
     args.url = args.url.rstrip("/")
@@ -224,6 +239,11 @@ def hub_error_from_response(err):
 
 # --------------------------------------------------------------------------
 # Responders
+#
+# A responder is called with one inbox item. It returns the reply body (str)
+# for the adapter to send, or None when it delivered the message elsewhere and
+# no hub reply is due. It raises ResponderFailed when the message was not
+# handled, so the read marker stays before it.
 
 
 def echo_responder(message):
@@ -289,6 +309,57 @@ class ClaudeResponder:
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 self._process.terminate()
+
+
+class OrcaTerminalForwarder:
+    """Types each message into a live Orca terminal as one submitted prompt."""
+
+    def __init__(self, orca_bin, terminal_handle, timeout_secs):
+        self._orca_bin = orca_bin
+        self._terminal_handle = terminal_handle
+        self._timeout_secs = timeout_secs
+
+    def __call__(self, message):
+        command = [self._orca_bin, "--json", "terminal", "send",
+                   "--terminal", self._terminal_handle, "--text", forward_text(message),
+                   "--enter", "--wait-submit", ORCA_WAIT_SUBMIT_SECS]
+        try:
+            completed = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
+                                       text=True, encoding="utf-8", errors="replace",
+                                       timeout=self._timeout_secs)
+        except subprocess.TimeoutExpired:
+            raise ResponderFailed(f"orca terminal send timed out after {self._timeout_secs}s") from None
+        except OSError as err:
+            raise ResponderFailed(f"cannot run {self._orca_bin}: {err.strerror}") from None
+        # Never log stdout: an error receipt echoes the full command, text included.
+        receipt = parse_json_object(completed.stdout)
+        if completed.returncode != 0 or receipt.get("ok") is not True:
+            error_code = (receipt.get("error") or {}).get("code", "unknown")
+            raise ResponderFailed(f"orca terminal send failed exit={completed.returncode} "
+                                  f"code={error_code}")
+        send = (receipt.get("result") or {}).get("send") or {}
+        if send.get("accepted") is not True:
+            raise ResponderFailed("orca terminal send was not accepted")
+        LOG.info("forwarded message_id=%s terminal=%s bytes=%s stages=%s", message["message_id"],
+                 self._terminal_handle, send.get("bytesWritten"),
+                 ",".join((send.get("prompt") or {}).get("stages") or []))
+        return None
+
+
+def forward_text(message):
+    header = (f"[agents-platform] from={message['sender_id']} room={message['room_id']} "
+              f"id={message['message_id']} seq={message['inbox_seq']}\n")
+    footer = f"\n[reply: platform send --to {message['sender_id']} --body \"...\" ]"
+    body_budget = MAX_MESSAGE_BODY_BYTES - len((header + footer).encode("utf-8"))
+    return header + truncate_utf8(message["body"], body_budget) + footer
+
+
+def parse_json_object(text):
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def truncate_utf8(text, max_bytes):
@@ -369,9 +440,19 @@ class DrainWorker:
         message_id = message["message_id"]
         if self._verbose:
             LOG.info("inbound message_id=%s body=%r", message_id, message["body"])
-        reply_body = truncate_utf8(self._responder(message), MAX_MESSAGE_BODY_BYTES)
+        try:
+            reply_body = self._responder(message)
+        except ResponderFailed as err:
+            LOG.error("responder failed message_id=%s %s", message_id, err)
+            return False
         if self._stop_event.is_set():
             raise ShuttingDown()
+        if reply_body is None:
+            LOG.info("handled message_id=%s sender=%s room=%s body_len=%d reply=none (forwarded)",
+                     message_id, message["sender_id"], message["room_id"],
+                     len(message["body"].encode("utf-8")))
+            return True
+        reply_body = truncate_utf8(reply_body, MAX_MESSAGE_BODY_BYTES)
         # reply_to must name a message in the same room; an `all` message
         # answered by DM therefore carries no reply_to.
         reply_to = None if message["room_id"] == "all" else message_id
@@ -512,6 +593,8 @@ def main(argv):
     wake_event = threading.Event()
     if args.responder == "echo":
         responder = echo_responder
+    elif args.responder == "orca-terminal":
+        responder = OrcaTerminalForwarder(args.orca_bin, args.orca_terminal, args.responder_timeout)
     else:
         responder = ClaudeResponder(args.responder_timeout, args.claude_model, stop_event)
 
