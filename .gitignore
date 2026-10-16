@@ -40,3 +40,6 @@ deploy/local/
 
 # macOS
 .DS_Store
+
+# Python bytecode caches (examples/)
+__pycache__/
