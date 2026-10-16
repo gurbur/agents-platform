@@ -2,7 +2,7 @@
 
 각 계약은 고유 id를 갖는다. slice-spec과 `CLAUDE.md`는 이 id로 계약을 참조한다.
 
-**정본은 한 곳에만 둔다.** HTTP wire와 receiver wire는 설계 문서가 정본이므로 여기서는 id와 링크만 등록한다(`IF-API-*`, `IF-RCV-*`). 설계 문서가 "구현 세부", "후속 구현"으로 남긴 것만 이 파일이 정한다(`IF-CFG`, `IF-AUTH`, `IF-ID`, `IF-DB`, `IF-OPS`, `IF-CLI`, `IF-DLV`).
+**정본은 한 곳에만 둔다.** HTTP wire, receiver wire, identity token wire는 설계 문서가 정본이므로 여기서는 id와 링크만 등록한다(`IF-API-*`, `IF-RCV-*`, `IF-IDT-*`). 설계 문서가 "구현 세부", "후속 구현"으로 남긴 것만 이 파일이 정한다(`IF-CFG`, `IF-AUTH`, `IF-ID`, `IF-DB`, `IF-OPS`, `IF-CLI`, `IF-DLV`).
 
 ## 변경 규칙
 
@@ -24,6 +24,7 @@
 | `IF-API-HISTORY` | `GET /v1/messages`, `GET /v1/messages/{message_id}` | History 조회 | frozen |
 | `IF-API-DELIVERY` | `GET /v1/agents/{id}/delivery`, `POST /v1/agents/{id}/delivery/retry` | Delivery 진단과 receiver 알림 | frozen |
 | `IF-API-ROTATE` | `POST /v1/agents/{id}/tokens/rotate` | Token rotation | frozen |
+| `IF-API-IDENTITY` | `POST /v1/identity/tokens` (agent 전용, 201 `{token,sub,aud}`, `owner_not_allowed`·`identity_disabled`·`unknown_audience`·`ttl_too_long`) | Identity attestation | frozen · 2026-10-16 |
 
 ## B. Receiver wire (정본: `docs/design/RECEIVER_WAKE_CONVENTION.md`)
 
@@ -33,6 +34,14 @@
 | `IF-RCV-RESPONSE` | 202 + `Content-Length: 0` + 빈 body만 성공; 그 외 분류 | §7, §10 | frozen |
 | `IF-RCV-RETRY` | connect 2s/전체 5s, 1~300s 지수 backoff+jitter, Retry-After, 300s redrive, in-flight 1, coalescing, route_version 격리 | §8, §9, §11 | frozen |
 
+## B-2. Identity token wire (정본: `docs/design/IDENTITY_ATTESTATION.md`)
+
+| id | 계약 | 정본 절 | 상태 |
+| --- | --- | --- | --- |
+| `IF-IDT-JWT` | compact JWS, header `{"alg":"EdDSA","typ":"JWT","kid":..}`(`kid` 필수), claims `iss`·`sub`·`aud`(단일 문자열)·`iat`·`exp`(정수 초)·`jti`(ULID), `0 < exp-iat ≤ 900`, base64url no pad | §5 | frozen · 2026-10-16 |
+| `IF-IDT-VERIFY` | 소비자 검증 순서 alg 고정 → kid → 서명 → iss/aud → exp/iat(skew 60s, 최대 수명) → sub 정규식 → 소비자 ACL, replay 방지 없음 | §6 | frozen · 2026-10-16 |
+| `IF-IDT-KEYS` | keygen 출력(`kid`, 표준 base64 공개키), 교체 순서(새 키 → 소비자에 추가 → 허브 재시작 → `max_ttl_secs`+60s 뒤 옛 키 제거) | §7, §8 | frozen · 2026-10-16 |
+
 ## C. 구현 계약 (이 파일이 정본)
 
 ### `IF-ID-001 — 식별자·sequence·시각 표현`
@@ -40,6 +49,7 @@
 - **종류**: 데이터 형식 · **제공자**: `platform-wire` · **소비자**: `platformd`, `platform`
 - `agent_id`: `^[a-z][a-z0-9_-]{0,63}$`, 예약어 `all`, `owner` 거부 (정본 API_V1 "용어와 식별 규칙"). `platform-wire::AgentId` newtype이 유일한 검증 지점.
 - `message_id`: `msg-` + ULID(26자 Crockford base32, 대문자). `request_id`: `req-` + ULID.
+- identity token의 `jti`: 접두사 없는 ULID(`IF-AUTH-002`). JWT 안의 `iat`·`exp`는 RFC 3339가 아닌 정수 초다(`IF-IDT-JWT`).
 - sequence(`event_seq`, `inbox_seq`, `read_marker`, `through_seq`, `after_seq`, `until_seq`, `snapshot_head_seq`, `next_*_seq`): JSON **string**. 정규식 `^(0|[1-9][0-9]*)$`, 값 `0..=i64::MAX`. 부호·공백·선행 0 거부. `platform-wire::Seq(i64)`가 serde로 이 표현을 강제한다.
 - `route_version`, `membership_epoch`: JSON **number**(정수). API 예시대로.
 - `created_at`, `last_attempt_at` 등 시각: RFC 3339, UTC, `Z` 접미, **밀리초** 정밀도 (`2026-10-15T12:34:56.789Z`). DB에도 같은 문자열로 저장한다.
@@ -61,10 +71,18 @@
   backoff_min_secs = 1
   backoff_max_secs = 300
   redrive_after_secs = 300
+
+  [identity]                          # 선택. 없으면 기능 비활성(POST /v1/identity/tokens → 503 identity_disabled).
+  signing_key_file = "/etc/platformd/identity.key"   # raw seed 32바이트(IF-AUTH-002). 상대 경로는 config 파일 위치 기준.
+  issuer = "agents-platform"          # JWT iss. 고정 문자열(허브는 공개 URL을 모른다).
+  audiences = ["garage-docs"]         # 허용 aud. 1개 이상, 빈 문자열·중복 금지.
+  default_ttl_secs = 600              # 선택. ttl_secs 생략 시.
+  max_ttl_secs = 900                  # 선택. 1 ≤ default_ttl_secs ≤ max_ttl_secs ≤ 900(IF-IDT-JWT 상한) 아니면 기동 거부.
   ```
-- 알 수 없는 키는 기동 거부(`serde(deny_unknown_fields)`). 비밀값은 설정 파일에 직접 넣지 않는다(`owner_token_file`만 허용).
+- 알 수 없는 키는 기동 거부(`serde(deny_unknown_fields)`). 비밀값은 설정 파일에 직접 넣지 않는다(`owner_token_file`, `signing_key_file`처럼 파일 경로만 허용).
+- `[identity]`가 있으면 `signing_key_file`, `issuer`, `audiences`는 필수다.
 - 테스트는 기본값 숫자를 단언하지 않고 "설정이 적용된다"만 확인한다.
-- **상태**: frozen · 2026-10-15
+- **상태**: frozen · 2026-10-15 · `[identity]` 절 frozen 2026-10-16
 
 ### `IF-AUTH-001 — credential 형식과 보관`
 
@@ -75,6 +93,20 @@
 - Bearer 판정 순서: (1) owner token과 상수시간 비교 → `Principal::Owner`; (2) SHA-256(token) → `agents.api_key_hash` 조회 → `Principal::Agent(agent_id)`; (3) 둘 다 아니면 401 `unauthorized`. receiver secret으로는 어떤 API도 통과하지 않는다.
 - rotate는 두 키를 모두 새로 발급하고 `route_version += 1` (정본 API_V1 "Token rotation").
 - **상태**: frozen · 2026-10-15 · 근거 [ADR-0004](docs/adr/0004-credential-format-and-storage.md)
+
+### `IF-AUTH-002 — identity 서명 키와 토큰 발급`
+
+- **종류**: 키 형식/발급 규칙 · **제공자**: `platformd::identity` · **소비자**: `platformd::api`, `platformd`(keygen), `platform`(CLI), 외부 소비자(garage-docs)
+- 서명 키 파일: raw Ed25519 seed **정확히 32바이트**(base64·PEM·개행 없음). mode 0640 root:platformd. `platformd identity keygen --out <path>`만 만든다(기존 파일 덮어쓰기 거부).
+- 공개키 표현: raw 32바이트의 **표준 base64(padding 있음, 44자)**. `kid` = SHA-256(raw 공개키) 앞 4바이트의 소문자 hex 8자.
+- 로드: `[identity]`가 있으면 기동 때 한 번 읽어 메모리에 둔다(owner token과 같은 방식). 읽기 실패·길이 불일치는 기동 거부. 교체는 재시작. 기동 로그에 `kid`·`audiences`만 남긴다.
+- 발급: principal이 `Principal::Agent(id)`일 때만. `Principal::Owner`는 403 `owner_not_allowed`. `sub = id`. `iat` = 현재 시각을 초로 버림, `exp = iat + ttl_secs`, `jti` = 새 ULID(접두사 없음). 응답 201은 정확히 `{token, sub, aud}`이며 만료는 JWT `exp`로만 알린다.
+- 판정 순서: 401 → 403 `owner_not_allowed` → 503 `identity_disabled` → body 검사(413/415/400 → 422 `unexpected_field` → 422 `invalid_field` → 422 `unknown_audience` → 422 `ttl_too_long`). 정본 IDENTITY_ATTESTATION §4.2.
+- 인코딩은 `IF-IDT-JWT`. 구현은 `ed25519-dalek`(`SigningKey::from_bytes`) + 직접 만든 compact JWS 인코더. RFC 8037 Appendix A.4 test vector와 garage-docs(`jwt/v5`) interop test로 검증한다(근거 ADR-0005).
+- DB 변경 없음. Store 명령 신설 없음(인증 계층의 `api_key_hash` 조회가 agent를 이미 확인한다).
+- 로그: 토큰 원문·seed 금지. 발급 1건마다 `sub`, `jti`, `aud`, `exp`만.
+- identity token은 Bearer 판정(`IF-AUTH-001`)의 어느 단계도 통과하지 않는다(→ 401).
+- **상태**: frozen · 2026-10-16 · 근거 [ADR-0005](docs/adr/0005-identity-attestation-tokens.md)
 
 ### `IF-DB-001 — SQLite schema v1`
 
@@ -174,6 +206,7 @@
 - `GET /healthz` → 인증 없음. DB가 열리고 최신 migration이 적용됐을 때만 `200 {"status":"ok","schema_version":1}`. 그 전에는 listen 자체를 시작하지 않는다(readiness = listen 시작). 요청마다 DB thread를 한 번 왕복해 schema version을 읽으며, 실패하면 503 `unavailable`(오류 body 형식은 `IF-API-COMMON`).
 - `platformd --version` → 바이너리 버전(Cargo `CARGO_PKG_VERSION`)과 git short hash(빌드 시 환경변수 `PLATFORMD_GIT_SHA`, 없으면 `unknown`)를 한 줄 출력.
 - `platformd backup --config <toml> --out <file>` → 서버 동작 중에도 안전한 online snapshot. 원본을 읽기 전용 두 번째 연결로 열어 rusqlite `backup` API로 복사하고, 산출 파일에 `PRAGMA integrity_check`를 돌려 `ok`가 아니면 exit 1. 기존 파일은 덮어쓰지 않는다(exit 1). 설정 오류 exit 2. stdout에 `backup: <path>`, `bytes:`, `schema_version:`, `integrity_check: ok`, 표마다 `row_count <table> <n>`. 산출 파일 모드 0600, `journal_mode=delete`(단일 파일).
+- `platformd identity keygen --out <file>` → OS CSPRNG 32바이트를 Ed25519 seed로 `<file>`에 쓴다(새 파일만, umask와 무관하게 mode 0640, 기존 파일이면 exit 1). 설정 파일을 읽지 않는다. stdout에 `kid: <8 hex>`, `public_key: <표준 base64 44자>` 두 줄. seed는 출력하지 않는다. 사용법 오류 exit 2. 공개키를 다시 출력하는 명령은 없다(잃으면 새 키 + 교체). (2026-10-16, `IF-AUTH-002`)
 - graceful shutdown: SIGTERM/SIGINT → listener 닫기 → 진행 중 요청 완료 대기(상한 10초) → Store drop·join → delivery in-flight HTTP는 기다리지 않음(pending state는 DB에 있음).
 - **상태**: frozen · 2026-10-15
 
@@ -184,6 +217,7 @@
 - 서브커맨드와 HTTP 매핑은 API_V1 "CLI 매핑" 표가 정본. 추가로 `health` → `GET /healthz`.
 - 종료 코드: 0 성공, 1 서버가 오류 body 반환(코드·message 출력), 2 사용법·설정 오류, 3 네트워크 오류.
 - CLI는 reqwest client를 서버 delivery client와 공유하지 않는다(별도 crate).
+- `identity token`은 `--json`이 없으면 성공 시 stdout에 토큰 한 줄만 쓴다(캡처용). 진단·오류는 stderr. 만료 출력 옵션은 없다. (2026-10-16)
 - **상태**: frozen · 2026-10-15
 
 ### `IF-DLV-001 — delivery worker 상태 전이`
@@ -216,7 +250,7 @@
 - `Content-Type`이 `application/json`이 아니면 415 `unsupported_media_type`.
 - body가 JSON으로 파싱되지 않으면 400 `invalid_json`.
 - 허용 밖 필드(`deny_unknown_fields`) → 422 `unexpected_field`, `details: {"field": "<이름>"}`.
-- 필수 필드 누락·타입 불일치·형식 위반(`Seq`, 길이 등) → 422 `invalid_field`, `details: {"field": "<이름>"}`(알 수 있을 때). 단 API_V1이 전용 code를 둔 경우(`invalid_agent_id`, `invalid_receiver_url`, `body_too_large`, `request_too_large`, `self_dm_not_supported`, `reply_to_room_mismatch`, `read_marker_ahead`, `mutually_exclusive_cursors`)는 그 code가 우선.
+- 필수 필드 누락·타입 불일치·형식 위반(`Seq`, 길이 등) → 422 `invalid_field`, `details: {"field": "<이름>"}`(알 수 있을 때). 단 API_V1이 전용 code를 둔 경우(`invalid_agent_id`, `invalid_receiver_url`, `body_too_large`, `request_too_large`, `self_dm_not_supported`, `reply_to_room_mismatch`, `read_marker_ahead`, `mutually_exclusive_cursors`, `unknown_audience`, `ttl_too_long`)는 그 code가 우선.
 - 크기: wire body > 128 KiB → 413 `request_too_large`(파싱 전 차단). decoded `body` > 16 KiB → 413 `body_too_large`.
 - **상태**: frozen · 2026-10-15
 
@@ -229,6 +263,7 @@
   | `GET /v1/messages/{id}` 대상이 없거나 권한 밖 | 404 | `message_not_found` |
   | 경로의 `{agent_id}`가 없음(owner 요청) | 404 | `agent_not_found` |
   | owner 토큰으로 agent 전용 write(`POST /v1/messages`, `PUT /v1/inbox/read-marker`) | 403 | `forbidden` |
+  | owner 토큰으로 `POST /v1/identity/tokens` | 403 | `owner_not_allowed` (`IF-API-IDENTITY`, `forbidden`과 공존하는 별도 code) |
   | `room_id` 형식 오류(`all` 또는 `dm:<a>:<b>`, a<b ASCII, 유효 slug, a≠b 아님) | 422 | `invalid_field` (`details.field="room_id"`) |
   | `limit`이 1..100 밖 또는 정수 아님 | 422 | `invalid_field` (`details.field="limit"`) |
   | 알 수 없는 경로 | 404 | `not_found` |
@@ -262,3 +297,5 @@
 - **head**: 한 agent inbox의 마지막 `inbox_seq` (`agents.inbox_head`).
 - **route**: `(receiver_url, receiver_secret)` 조합. 바뀌면 `route_version += 1`.
 - **posted_seq**: 실제 callback body에 넣은 `inbox_seq`. 202를 받으면 그대로 `last_accepted_seq`가 된다.
+- **identity token**: 허브가 agent에게 발급하는 단기 Ed25519 서명 JWT. 제3자에게 `agent:<sub>` 신원을 증명한다. platform API 인증에는 쓰이지 않는다.
+- **kid**: 서명 공개키 식별자. SHA-256(raw 공개키) 앞 8 hex.

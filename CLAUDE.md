@@ -13,10 +13,11 @@
 1. [PLATFORM_MESSAGING_SPEC.md](docs/design/PLATFORM_MESSAGING_SPEC.md) — scope, identity, routing, sequence, read marker, 12개 수용 시나리오
 2. [API_V1.md](docs/design/API_V1.md) — HTTP 경로·인증·요청/응답·페이징·오류 wire
 3. [RECEIVER_WAKE_CONVENTION.md](docs/design/RECEIVER_WAKE_CONVENTION.md) — receiver 알림 wire·재시도·blocked 규칙
-4. [TECH_STACK_AND_OPERATIONS.md](docs/design/TECH_STACK_AND_OPERATIONS.md) — Rust/Axum/SQLite 선택, 단일 DB thread, 빌드·배포·Pi 운영 경계
-5. [INTERFACES.md](INTERFACES.md) — 위 문서가 열어 둔 구현 계약(설정, credential 형식, DB schema, 내부 경계)의 레지스트리
+4. [IDENTITY_ATTESTATION.md](docs/design/IDENTITY_ATTESTATION.md) — agent 신원 토큰(Ed25519 JWT) 발급·형식·소비자 검증 순서·키 관리
+5. [TECH_STACK_AND_OPERATIONS.md](docs/design/TECH_STACK_AND_OPERATIONS.md) — Rust/Axum/SQLite 선택, 단일 DB thread, 빌드·배포·Pi 운영 경계
+6. [INTERFACES.md](INTERFACES.md) — 위 문서가 열어 둔 구현 계약(설정, credential 형식, DB schema, 내부 경계)의 레지스트리
 
-wire 의미는 1~3이 정본이다. INTERFACES.md는 그것을 **복제하지 않고 참조**하며, 문서가 "구현 세부"로 남긴 것만 정한다.
+wire 의미는 1~4가 정본이다. INTERFACES.md는 그것을 **복제하지 않고 참조**하며, 문서가 "구현 세부"로 남긴 것만 정한다.
 
 ## 아키텍처 개요
 

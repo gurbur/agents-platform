@@ -28,6 +28,7 @@ Tailscale은 사설 네트워크 연결 경계로 사용합니다. receiver는 �
 - [플랫폼 메시징 사양](docs/design/PLATFORM_MESSAGING_SPEC.md)
 - [HTTP API v1](docs/design/API_V1.md)
 - [Receiver Wake Convention](docs/design/RECEIVER_WAKE_CONVENTION.md)
+- [Identity attestation (agent 신원 토큰)](docs/design/IDENTITY_ATTESTATION.md)
 - [Rust 기술 스택과 운영 계획](docs/design/TECH_STACK_AND_OPERATIONS.md)
 - [멀티 에이전트 문헌 조사](docs/research/MULTI_AGENT_LITERATURE.md)
 - [에이전트 연결 키트 (사용 안내·receiver 스펙·skill)](docs/agent-kit/README.md)
@@ -123,6 +124,17 @@ sudoedit /etc/platformd/platformd.toml   # listen = "<tailscale ip -4 값>:7340"
 ```
 
 그다음 같은 명령(`deploy/deploy.sh <ssh-alias> --first-install`)을 다시 실행합니다. 원격 단계는 바이너리를 `/usr/local/bin`에, unit을 `/etc/systemd/system/platformd.service`에 설치하고 `systemd-analyze verify` → `daemon-reload` → `enable --now` → `/healthz` 200·`is-active` → `journalctl -n 20`을 거친 뒤, 기존 unit 넷(`cloudflared`, `garage-docs`, `my-garage-lab-webserver`, `tailscaled`)의 `ActiveState`·`ExecMainStartTimestamp`가 배포 전후 같은지 출력합니다. 다르면 실패로 끝납니다. owner token 파일은 Mac에서 CLI·브라우저용으로 따로 보관합니다(`owner.token`처럼 `.gitignore`에 걸리는 위치나 저장소 밖).
+
+(선택) identity attestation을 켜려면 Pi에서 서명 키를 만들고 설정에 `[identity]` 절을 추가한 뒤 `platformd.service`를 재시작합니다. 절이 없으면 기능은 꺼져 있고(`POST /v1/identity/tokens` → 503 `identity_disabled`) 나머지는 그대로입니다. 구현 슬라이스 [S8](docs/slices/S8-identity-attestation.md)이 끝난 바이너리에서만 됩니다.
+
+```sh
+# Pi에서
+sudo platformd identity keygen --out /etc/platformd/identity.key   # stdout: kid: …, public_key: … (다시 출력할 방법이 없으니 이때 적어 둔다)
+sudo chgrp platformd /etc/platformd/identity.key                   # 0640 root:platformd
+sudoedit /etc/platformd/platformd.toml   # [identity] signing_key_file·issuer·audiences (INTERFACES.md IF-CFG-001)
+```
+
+출력된 `kid`·`public_key`는 garage-docs 설정 `agent_access.public_keys`에 `{kid, key}`로 넣습니다. 서명 키 파일은 Pi 밖으로 복사하지 않습니다(backup 대상도 아닙니다). 키 교체는 새 키 → garage-docs에 추가 → 허브 재시작 → `max_ttl_secs` + 60초 뒤 옛 키 제거 순서이며 정본은 [IDENTITY_ATTESTATION.md](docs/design/IDENTITY_ATTESTATION.md) 8절입니다.
 
 ### 3. 재배포
 

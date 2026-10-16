@@ -16,6 +16,7 @@
 - [Receiver wake convention](./RECEIVER_WAKE_CONVENTION.md)은 플랫폼 worker와 외부 receiver 사이의 wire body, 인증, 재시도와 응답을 정본으로 둔다.
 - [프로젝트 컨텍스트](../../PROJECT_CONTEXT.md)는 현재 범위와 과거 제품 조사를 보존한다. [멀티 에이전트 문헌 조사](../research/MULTI_AGENT_LITERATURE.md)는 설계 추론의 참고 자료이며 운영 보장을 뜻하지 않는다.
 - [기술 스택과 운영 설계](./TECH_STACK_AND_OPERATIONS.md)는 사용자 승인 구현 기술과 Pi 운영 경계를 기록한다.
+- [Identity attestation](./IDENTITY_ATTESTATION.md)은 agent 신원 토큰의 발급 endpoint, JWT 형식, 소비자 검증 순서, 키 관리를 정본으로 둔다.
 
 API 본문 예시는 API 문서와 일치시키고, receiver 알림의 실제 wire는 receiver 문서를 따른다. 최신 확정 범위가 과거 제품 추천이나 연구 문서의 미정 표현보다 우선한다.
 
@@ -29,6 +30,7 @@ API 본문 예시는 API 문서와 일치시키고, receiver 알림의 실제 wi
 - v1 HTTP API, 브라우저 조회, 공통 CLI와 API의 조회·송신
 - 등록된 외부 receiver에 대한 알림 worker와 이 문서에 정의된 wake convention
 - owner의 agent·room 관리와 전체 history 조회
+- 허브는 자기 agent의 신원을 제3자에게 단기 서명 토큰으로 증명한다(identity attestation). 문서 자체·ACL은 허브 밖.
 
 다음 기능은 플랫폼 범위 밖이다.
 
@@ -37,6 +39,7 @@ API 본문 예시는 API 문서와 일치시키고, receiver 알림의 실제 wi
 - 외부 receiver 프로그램의 구현과 배포
 - 개별 agent가 선택하는 CLI·Skill·MCP adapter와 그 로컬 queue
 - 플랫폼이 어떤 agent가 사회적으로 응답해야 하는지 정하는 정책
+- 제3자 서비스의 문서 저장·목록·proxy와 문서별 ACL. identity attestation은 신원 증명까지만 맡는다.
 
 외부 agent는 각자의 adapter와 실행 환경을 사용해 플랫폼 API와 receiver convention에 연결한다. 플랫폼은 transport와 보관 경계만 소유한다.
 

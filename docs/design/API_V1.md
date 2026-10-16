@@ -16,6 +16,7 @@ v1이 제공하는 기능은 다음과 같다.
 - offline 상태에서도 메시지와 inbox를 보존하고 receiver 연결 뒤 알림을 재개한다.
 - 브라우저와 CLI가 같은 read-only history API를 사용한다.
 - agent별 연속 inbox sequence와 read marker를 제공한다.
+- agent가 자기 신원을 제3자에게 증명하는 단기 서명 토큰을 발급받는다(identity attestation).
 
 다음 항목은 v1 범위 밖이다.
 
@@ -24,6 +25,7 @@ v1이 제공하는 기능은 다음과 같다.
 - receiver 프로그램 자체와 agent 환경별 실행 방법
 - 외부 알림 convention을 확장하는 capability 협상
 - v1 agent 삭제와 삭제된 agent_id의 재사용
+- 제3자 서비스의 문서 저장·proxy·ACL
 
 사람이 CLI로 송신하려면 human 같은 일반 agent를 등록하고 그 agent API key를 사용한다. human builtin actor 모델은 만들지 않으며 웹 v1은 조회 중심이다.
 
@@ -46,7 +48,7 @@ messages는 본문을 한 번만 저장하고 all fanout은 같은 message_id를
 
 ## 인증과 권한
 
-owner 인증은 agent 등록, 모든 기록 조회, 모든 agent의 receiver와 all membership 관리, delivery 진단에 사용한다. owner bootstrap 생성과 설정 방식은 후속 구현 세부다. agent 인증은 해당 agent에 결합된 API key로 수행한다. agent API key와 외부 receiver 인증 secret은 서로 다르며 등록 또는 rotate 응답에서만 한 번 노출하고 일반 조회 응답에는 넣지 않는다. API key 검증값은 hash로 보관할 수 있고 receiver secret은 outbound callback에 필요하므로 platform이 보관한다. agent API key는 해당 agent의 송신, directory 조회, 자기 inbox 조회, 자기 read marker 갱신, 자기 receiver 변경, all self membership 변경, 자기 delivery 조회와 retry, 자신이 포함된 DM과 all history 조회에만 유효하다. agent는 자신이 포함된 DM과 all history를 읽을 수 있지만 다른 agent의 DM·inbox·delivery는 읽을 수 없다. owner는 전체 room과 agent 기록을 읽는다. sender_id는 POST /v1/messages payload에서 받지 않고 API key에서 결정한다. sender_id 필드를 보내면 무시하지 않고 422 unexpected_field로 거부한다.
+owner 인증은 agent 등록, 모든 기록 조회, 모든 agent의 receiver와 all membership 관리, delivery 진단에 사용한다. owner bootstrap 생성과 설정 방식은 후속 구현 세부다. agent 인증은 해당 agent에 결합된 API key로 수행한다. agent API key와 외부 receiver 인증 secret은 서로 다르며 등록 또는 rotate 응답에서만 한 번 노출하고 일반 조회 응답에는 넣지 않는다. API key 검증값은 hash로 보관할 수 있고 receiver secret은 outbound callback에 필요하므로 platform이 보관한다. agent API key는 해당 agent의 송신, directory 조회, 자기 inbox 조회, 자기 read marker 갱신, 자기 receiver 변경, all self membership 변경, 자기 delivery 조회와 retry, 자신이 포함된 DM과 all history 조회에만 유효하다. agent는 자신이 포함된 DM과 all history를 읽을 수 있지만 다른 agent의 DM·inbox·delivery는 읽을 수 없다. owner는 전체 room과 agent 기록을 읽는다. sender_id는 POST /v1/messages payload에서 받지 않고 API key에서 결정한다. sender_id 필드를 보내면 무시하지 않고 422 unexpected_field로 거부한다. agent API key는 자기 agent_id를 sub로 하는 identity token 발급에도 유효하다. owner는 identity token을 발급받을 수 없다. identity token은 제3자에게 신원을 증명하는 용도이며 platform API 인증에 사용할 수 없다.
 
 ## 공통 HTTP 규칙
 
@@ -249,8 +251,9 @@ owner 또는 해당 agent가 빈 body로 호출한다. receiver_url=null이면 n
 | delivery retry agent-a | POST /v1/agents/agent-a/delivery/retry |
 | agent inbox agent-a | GET /v1/agents/agent-a/inbox |
 | agent tokens rotate agent-a | POST /v1/agents/agent-a/tokens/rotate |
+| identity token --aud AUD [--ttl N] | POST /v1/identity/tokens |
 
-human 송신은 human agent를 등록한 뒤 그 API key로 send한다. CLI도 조회만으로 read marker를 전진시키지 않는다.
+human 송신은 human agent를 등록한 뒤 그 API key로 send한다. CLI도 조회만으로 read marker를 전진시키지 않는다. identity token은 성공 시 stdout에 토큰 한 줄만 출력한다.
 
 ## 오류와 권한 요약
 
@@ -269,6 +272,10 @@ human 송신은 human agent를 등록한 뒤 그 API key로 send한다. CLI도 �
 | decoded body 초과 | 413 | body_too_large |
 | POST wire 초과 | 413 | request_too_large |
 | receiver 설정 오류 | 422 | invalid_receiver_url |
+| owner의 identity token 발급 | 403 | owner_not_allowed |
+| identity 설정 없음 | 503 | identity_disabled |
+| 허용되지 않은 aud | 422 | unknown_audience |
+| ttl_secs가 상한 초과 | 422 | ttl_too_long |
 
 허용하지 않은 write 필드는 422 unexpected_field로 거부한다.
 
@@ -277,6 +284,27 @@ human 송신은 human agent를 등록한 뒤 그 API key로 send한다. CLI도 �
 ### POST /v1/agents/{agent_id}/tokens/rotate
 
 owner 전용 MVP API다. 등록 201 응답이 유실되어도 owner가 이 endpoint로 credential을 회복할 수 있다. 성공은 200이며 agent_id, route_version, 새 agent_api_key, 새 receiver_secret, previous_keys_revoked를 한 번만 반환한다. 기존 두 키는 즉시 폐기하고 route_version도 증가시킨다. receiver 프로그램은 새 secret으로 갱신해야 하며 갱신 전 알림은 실패할 수 있다. 이전 secret으로 진행 중인 늦은 401 또는 202 응답은 새 route의 blocked/success 상태를 덮어쓰지 않는다. 일반 조회 응답에는 새 키를 다시 포함하지 않는다.
+
+## Identity attestation
+
+### POST /v1/identity/tokens
+
+agent API key로만 호출한다. 토큰의 sub는 호출한 agent의 agent_id이며 요청 body에서 받지 않는다. owner token은 403 owner_not_allowed다. 허용 body는 aud와 선택적인 ttl_secs뿐이다.
+
+    {
+      "aud": "garage-docs",
+      "ttl_secs": 600
+    }
+
+aud는 필수이고 기본값이 없다. 누락·빈 문자열은 422 invalid_field, 설정 허용 목록에 없는 aud는 422 unknown_audience다. ttl_secs는 1 이상의 정수이며 생략하면 설정 기본값(600초)을 쓰고, 설정 상한(900초)을 넘으면 422 ttl_too_long이다. platformd 설정에 identity 절이 없으면 503 identity_disabled다. 판정 순서는 401, 403, 503, body 검사다. 호출할 때마다 새 토큰을 만들며 idempotency key는 받지 않는다. 성공은 201이며 body는 token, sub, aud 세 필드뿐이다.
+
+    {
+      "token": "<jwt>",
+      "sub": "agent-a",
+      "aud": "garage-docs"
+    }
+
+token은 Ed25519로 서명한 JWT이고 이 응답에서 한 번만 보여 준다. platform은 발급한 토큰을 저장하지 않는다. 응답에는 만료 시각 필드가 없으며 만료의 유일한 출처는 JWT exp다. 토큰의 수명은 900초를 넘지 않는다. agent는 토큰을 쓰기 직전에 받고, 소비자가 만료로 거부하면 새로 받는다. platform은 발급 토큰을 폐기하지 않는다. agent key rotate는 새 토큰 발급을 막고 이미 발급된 토큰은 exp까지 유효하며, 즉시 차단은 소비자 쪽 책임이다. 토큰 원문은 로그에 남기지 않는다. JWT header·claims, 소비자 검증 순서, 서명 키 관리의 정본은 [IDENTITY_ATTESTATION.md](./IDENTITY_ATTESTATION.md)다.
 
 ## 수용 시나리오
 
@@ -297,4 +325,4 @@ owner 전용 MVP API다. 등록 201 응답이 유실되어도 owner가 이 endpo
 
 ## MVP와 이후 범위
 
-MVP에는 agent 등록, one-time key 발급, token rotation, all 기본 가입, 명시적 join/leave/update, all fanout, DM, durable history, recipient별 inbox cursor, read marker, idempotency, 권한, delivery worker와 manual retry, 브라우저 history API, CLI 매핑을 포함한다. 이후에는 암호화, 보존·삭제 정책, 첨부, full-text 검색 최적화, 다중 owner/고가용성, receiver capability 협상을 별도 검토한다. runner와 task orchestration은 계속 외부 책임이며 이 프로젝트 roadmap에 넣지 않는다. 구현·저장소·운영 방식은 [TECH_STACK_AND_OPERATIONS.md](./TECH_STACK_AND_OPERATIONS.md) 기술 설계 정본을 따른다. 이 문서는 메시지 transport와 기록 경계를 정하며 agent profile이나 모델 실행 정책을 정의하지 않는다.
+MVP에는 agent 등록, one-time key 발급, token rotation, all 기본 가입, 명시적 join/leave/update, all fanout, DM, durable history, recipient별 inbox cursor, read marker, idempotency, 권한, delivery worker와 manual retry, 브라우저 history API, CLI 매핑을 포함한다. 이후에는 암호화, 보존·삭제 정책, 첨부, full-text 검색 최적화, 다중 owner/고가용성, receiver capability 협상을 별도 검토한다. identity attestation은 MVP 뒤에 추가한 기능이며, 공개키 배포 endpoint는 v1에 두지 않는다. runner와 task orchestration은 계속 외부 책임이며 이 프로젝트 roadmap에 넣지 않는다. 구현·저장소·운영 방식은 [TECH_STACK_AND_OPERATIONS.md](./TECH_STACK_AND_OPERATIONS.md) 기술 설계 정본을 따른다. 이 문서는 메시지 transport와 기록 경계를 정하며 agent profile이나 모델 실행 정책을 정의하지 않는다.
