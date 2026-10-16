@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use platformd::config::Config;
+use platformd::identity::keygen;
 use platformd::store::backup;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
@@ -39,23 +40,61 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
+    /// Identity attestation signing key management
+    #[command(subcommand)]
+    Identity(IdentityCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum IdentityCommand {
+    /// Generate a new Ed25519 signing key (raw 32-byte seed, mode 0640) and
+    /// print its kid and public key. Does not read the configuration.
+    Keygen {
+        /// Key file to create; an existing file is refused.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    init_tracing();
-
-    let config = match Config::load(&args.config) {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!("platformd: {err}");
-            return ExitCode::from(EXIT_CONFIG);
-        }
-    };
-
     match args.command {
-        None => serve(config),
-        Some(Command::Backup { out }) => write_backup(&config, &out),
+        // keygen needs no configuration (IDENTITY_ATTESTATION §7.1).
+        Some(Command::Identity(IdentityCommand::Keygen { out })) => generate_identity_key(&out),
+        Some(Command::Backup { out }) => match load_config(&args.config) {
+            Ok(config) => write_backup(&config, &out),
+            Err(code) => code,
+        },
+        None => match load_config(&args.config) {
+            Ok(config) => serve(config),
+            Err(code) => code,
+        },
+    }
+}
+
+/// Starts logging and loads the configuration; a config error is one line
+/// on stderr and exit 2.
+fn load_config(path: &std::path::Path) -> Result<Config, ExitCode> {
+    init_tracing();
+    Config::load(path).map_err(|err| {
+        eprintln!("platformd: {err}");
+        ExitCode::from(EXIT_CONFIG)
+    })
+}
+
+/// Prints exactly `kid: <8 hex>` and `public_key: <base64>` on stdout. The
+/// seed goes only into the new file.
+fn generate_identity_key(out: &std::path::Path) -> ExitCode {
+    match keygen::generate(out) {
+        Ok(key) => {
+            println!("kid: {}", key.kid);
+            println!("public_key: {}", key.public_key);
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("platformd: identity keygen failed: {err}");
+            ExitCode::from(EXIT_FAILURE)
+        }
     }
 }
 

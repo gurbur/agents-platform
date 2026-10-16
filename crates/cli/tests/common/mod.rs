@@ -22,16 +22,30 @@ pub struct Platformd {
     task: tokio::task::JoinHandle<Result<(), platformd::ServeError>>,
 }
 
+const BASE_CONFIG: &str =
+    "listen = \"127.0.0.1:0\"\ndb_path = \"platform.db\"\nowner_token_file = \"owner.token\"\n";
+
 impl Platformd {
     pub async fn start() -> Self {
+        Self::start_with(BASE_CONFIG, false).await
+    }
+
+    /// With an `[identity]` table appended (`signing_key_file` is added and
+    /// a key is generated into it).
+    pub async fn start_with_identity(identity: &str) -> Self {
+        let config =
+            format!("{BASE_CONFIG}[identity]\nsigning_key_file = \"identity.key\"\n{identity}\n");
+        Self::start_with(&config, true).await
+    }
+
+    async fn start_with(config_text: &str, with_identity_key: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("owner.token"), OWNER_TOKEN).unwrap();
+        if with_identity_key {
+            platformd::identity::keygen::generate(&dir.path().join("identity.key")).unwrap();
+        }
         let config_path = dir.path().join("platformd.toml");
-        std::fs::write(
-            &config_path,
-            "listen = \"127.0.0.1:0\"\ndb_path = \"platform.db\"\nowner_token_file = \"owner.token\"\n",
-        )
-        .unwrap();
+        std::fs::write(&config_path, config_text).unwrap();
         let config = Config::load(&config_path).unwrap();
         let server = platformd::start(&config).await.unwrap();
         let addr = server.local_addr().unwrap();

@@ -18,6 +18,9 @@ readonly STAGING_DIR=/tmp/platformd-deploy
 readonly CONFIG_DIR=/etc/platformd
 readonly CONFIG_FILE=$CONFIG_DIR/platformd.toml
 readonly TOKEN_FILE=$CONFIG_DIR/owner.token
+# Suggested path in the operator steps. Install requires a key file only
+# when the config enables [identity] (see identity_key_file).
+readonly IDENTITY_KEY_FILE=$CONFIG_DIR/identity.key
 readonly DATA_DIR=/var/lib/platformd
 readonly BIN_DIR=/usr/local/bin
 readonly UNIT_PATH=/etc/systemd/system/$UNIT
@@ -149,15 +152,41 @@ with the same arguments. Nothing was started.
   sudo install -m 0640 -o root -g $SERVICE_USER $STAGING_DIR/platformd.pi.example.toml $CONFIG_FILE
   sudoedit $CONFIG_FILE
 
+  # OPTIONAL identity attestation signing key (skip unless [identity] is
+  # wanted). keygen prints kid and public_key for the consumer's config; the
+  # seed never leaves the Pi. Then uncomment [identity] in $CONFIG_FILE.
+  # Before the first install completes, run $STAGING_DIR/platformd instead.
+  sudo platformd identity keygen --out $IDENTITY_KEY_FILE
+  sudo chown root:$SERVICE_USER $IDENTITY_KEY_FILE
+  sudo chmod 0640 $IDENTITY_KEY_FILE
+
 STEPS
 }
 
+# `signing_key_file` of an uncommented [identity] table, relative paths
+# resolved against the config directory (IF-CFG-001); empty without one.
+identity_key_file() {
+  local path
+  path="$(awk '
+    /^[[:space:]]*\[/ { in_identity = /^[[:space:]]*\[identity\]/; next }
+    in_identity && /^[[:space:]]*signing_key_file[[:space:]]*=/ {
+      sub(/^[^"]*"/, ""); sub(/".*$/, ""); print; exit
+    }' "$CONFIG_FILE")"
+  [[ -z "$path" || "$path" == /* ]] || path="$CONFIG_DIR/$path"
+  printf '%s\n' "$path"
+}
+
 # Stops before anything is installed when the operator's files are missing
-# or still hold the example placeholder. The script never creates the token.
+# or still hold the example placeholder. The script never creates the token
+# or the identity key; the key is required only when [identity] is enabled.
 check_operator_files() {
-  local missing=()
+  local missing=() identity_key=""
   [[ -f "$CONFIG_FILE" ]] || missing+=("$CONFIG_FILE")
   [[ -f "$TOKEN_FILE" ]] || missing+=("$TOKEN_FILE")
+  if [[ -f "$CONFIG_FILE" ]]; then
+    identity_key="$(identity_key_file)"
+    [[ -z "$identity_key" || -f "$identity_key" ]] || missing+=("$identity_key")
+  fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     printf 'error: [pi] missing: %s\n' "${missing[*]}" >&2
     print_operator_steps
@@ -168,9 +197,11 @@ check_operator_files() {
     print_operator_steps
     exit "$EXIT_NEEDS_OPERATOR"
   fi
-  log "operator files present; enforce 0640 root:$SERVICE_USER"
-  chown root:"$SERVICE_USER" "$CONFIG_FILE" "$TOKEN_FILE"
-  chmod 0640 "$CONFIG_FILE" "$TOKEN_FILE"
+  local secured=("$CONFIG_FILE" "$TOKEN_FILE")
+  [[ -z "$identity_key" ]] || secured+=("$identity_key")
+  log "operator files present; enforce 0640 root:$SERVICE_USER on ${secured[*]}"
+  chown root:"$SERVICE_USER" "${secured[@]}"
+  chmod 0640 "${secured[@]}"
 }
 
 ensure_data_dir() {

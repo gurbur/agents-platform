@@ -9,6 +9,7 @@ pub mod auth;
 pub mod clock;
 pub mod config;
 pub mod delivery;
+pub mod identity;
 pub mod store;
 
 use std::future::{Future, IntoFuture};
@@ -92,10 +93,21 @@ pub async fn start(config: &Config) -> Result<Server, StartupError> {
     let client = CallbackClient::new(&config.delivery).map_err(StartupError::CallbackClient)?;
     let delivery = DeliverySignal::new();
     let worker = Worker::spawn(store.clone(), delivery.clone(), client, &config.delivery);
+    let identity = config.identity.as_ref().map(|identity| identity.issuer());
+    match &identity {
+        // kid and audiences are public; the seed is never logged.
+        Some(issuer) => info!(
+            kid = issuer.kid(),
+            audiences = ?issuer.policy().audiences,
+            "identity attestation enabled"
+        ),
+        None => info!("identity attestation disabled (no [identity] table)"),
+    }
     let router = api::router(api::AppState::new(
         store,
         config.owner_token.clone(),
         delivery.clone(),
+        identity,
     ));
 
     Ok(Server {

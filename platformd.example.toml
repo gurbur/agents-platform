@@ -20,3 +20,19 @@ request_timeout_ms = 5000
 backoff_min_secs = 1
 backoff_max_secs = 300
 redrive_after_secs = 300
+
+# Identity attestation (docs/design/IDENTITY_ATTESTATION.md). Optional:
+# without this table POST /v1/identity/tokens answers 503 identity_disabled
+# and the rest of the API is unaffected. To enable, create the key with
+#   platformd identity keygen --out identity.key
+# (it prints the kid and public key consumers need), then uncomment below.
+# signing_key_file, issuer and audiences are required. The seed lives only in
+# signing_key_file (raw 32 bytes, mode 0640 root:platformd on the Pi); never
+# put it in this file. 1 <= default_ttl_secs <= max_ttl_secs <= 900, or
+# startup is refused.
+#[identity]
+#signing_key_file = "identity.key"
+#issuer = "agents-platform"
+#audiences = ["garage-docs"]
+#default_ttl_secs = 600
+#max_ttl_secs = 900

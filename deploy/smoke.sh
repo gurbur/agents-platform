@@ -2,11 +2,13 @@
 # Acceptance smoke against a running platformd, through the `platform` CLI
 # and curl. Prints a PASS/FAIL/SKIP table; exits 1 if anything failed.
 #
-# Usage: deploy/smoke.sh <base-url> <owner-token-file> [--receiver-url URL] [--platform PATH]
+# Usage: deploy/smoke.sh <base-url> <owner-token-file> [--receiver-url URL] [--identity-aud AUD] [--platform PATH]
 #   <base-url>          e.g. http://100.x.y.z:7340 or http://127.0.0.1:7340
 #   <owner-token-file>  file holding the owner token (read, never printed)
 #   --receiver-url URL  a mock receiver the server can reach (deploy/mock-receiver.py);
 #                       without it the receiver scenario is SKIP
+#   --identity-aud AUD  audience for the identity token scenario (default: garage-docs);
+#                       a hub without [identity] makes that scenario SKIP
 #   --platform PATH     platform CLI binary (default: `platform` on PATH)
 #
 # Every run registers new agents named smoke-<ulid> (v1 has no delete), so
@@ -22,10 +24,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 readonly RECEIVER_WAIT_SECS=30
 readonly PAGE_LIMIT=2
 readonly ULID_ALPHABET=0123456789abcdefghjkmnpqrstvwxyz
+readonly DEFAULT_IDENTITY_AUD=garage-docs
 
 base_url=""
 owner_token_file=""
 receiver_url=""
+identity_aud="$DEFAULT_IDENTITY_AUD"
 platform_bin=platform
 workdir=""
 
@@ -40,7 +44,7 @@ all_message_id="" dm_message_id="" dm_room=""
 snapshot_head=""
 
 usage() {
-  sed -n '5,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '5,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -51,6 +55,11 @@ parse_args() {
       --receiver-url)
         [[ $# -ge 2 ]] || usage
         receiver_url="$2"
+        shift
+        ;;
+      --identity-aud)
+        [[ $# -ge 2 ]] || usage
+        identity_aud="$2"
         shift
         ;;
       --platform)
@@ -122,6 +131,17 @@ api() {
   http_body="$(cat "$out" 2>/dev/null || true)"
 }
 
+# Decodes one unpadded base64url JWT segment (jq's @base64d wants the
+# standard alphabet with padding).
+b64url_decode() {
+  local segment
+  segment="$(tr '_-' '/+' <<<"$1")"
+  while ((${#segment} % 4)); do
+    segment="$segment="
+  done
+  jq -nr --arg segment "$segment" '$segment | @base64d'
+}
+
 # Fails the current scenario with a note unless `jq -e FILTER` holds.
 note=""
 expect_json() {
@@ -153,12 +173,19 @@ record() {
   printf '%-4s %s%s\n' "$2" "$1" "${3:+  ($3)}" >&2
 }
 
-# scenario NAME FUNCTION: runs FUNCTION and records PASS or FAIL with its note.
+# scenario NAME FUNCTION: runs FUNCTION and records PASS or FAIL with its
+# note. A FUNCTION that succeeds after setting skip_note records SKIP.
+skip_note=""
 scenario() {
   local name="$1" fn="$2"
   note=""
+  skip_note=""
   if "$fn"; then
-    record "$name" PASS "$note"
+    if [[ -n "$skip_note" ]]; then
+      record "$name" SKIP "$skip_note"
+    else
+      record "$name" PASS "$note"
+    fi
   else
     record "$name" FAIL "${note:-failed}"
   fi
@@ -414,6 +441,43 @@ check_receiver() {
   note="last_accepted_seq $seq, then idle at marker=head"
 }
 
+# The owner is refused before the configuration is consulted; an agent gets
+# a three-part EdDSA JWT with a kid, or 503 when [identity] is not set. The
+# token stays in the private workdir and is never printed.
+check_identity_token() {
+  local request
+  request="$(jq -nc --arg aud "$identity_aud" '{aud: $aud}')"
+  api POST /v1/identity/tokens "$owner_token_file" "$request"
+  expect_status 403 "owner token" || return 1
+  expect_json "$http_body" '.error.code == "owner_not_allowed"' "owner code: $http_body" || return 1
+
+  api POST /v1/identity/tokens "$(token_file "$agent_b")" "$request"
+  if [[ "$http_status" == 503 ]]; then
+    expect_json "$http_body" '.error.code == "identity_disabled"' "503 code: $http_body" || return 1
+    skip_note="identity disabled"
+    return 0
+  fi
+  expect_status 201 "agent token (aud $identity_aud)" || {
+    note="$note: $(jq -c .error <<<"$http_body" 2>/dev/null)"
+    return 1
+  }
+  expect_json "$http_body" "(keys == [\"aud\", \"sub\", \"token\"]) and .sub == \"$agent_b\" and .aud == \"$identity_aud\"" \
+    "response is not exactly {token, sub, aud} for the caller" || return 1
+  local token header claims kid
+  token="$(jq -r .token <<<"$http_body")"
+  [[ "$token" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]] || {
+    note="token is not three base64url parts"
+    return 1
+  }
+  header="$(b64url_decode "${token%%.*}")"
+  expect_json "$header" '.alg == "EdDSA" and .typ == "JWT" and (.kid | test("^[0-9a-f]{8}$"))' \
+    "header: $header" || return 1
+  claims="$(b64url_decode "$(cut -d. -f2 <<<"$token")")"
+  expect_json "$claims" ".sub == \"$agent_b\" and (.exp - .iat) > 0" "claims sub/exp" || return 1
+  kid="$(jq -r .kid <<<"$header")"
+  note="kid $kid, exp-iat $(jq '.exp - .iat' <<<"$claims")s, owner 403"
+}
+
 # Leaves `all` and drops receivers so smoke agents stop accumulating.
 check_cleanup() {
   local agent failed=""
@@ -482,6 +546,7 @@ main() {
   else
     record "receiver 202 keeps marker (5)" SKIP "no --receiver-url"
   fi
+  scenario "identity token" check_identity_token
   scenario "cleanup (leave all, unset receiver)" check_cleanup
   print_table
 }

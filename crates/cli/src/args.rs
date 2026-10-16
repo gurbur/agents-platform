@@ -11,6 +11,7 @@ use crate::commands::agent::AgentCommand;
 use crate::commands::all::AllCommand;
 use crate::commands::delivery::DeliveryArgs;
 use crate::commands::history::HistoryArgs;
+use crate::commands::identity::IdentityCommand;
 use crate::commands::inbox::InboxArgs;
 use crate::commands::message::MessageCommand;
 use crate::commands::receiver::ReceiverCommand;
@@ -63,6 +64,9 @@ pub enum Command {
     Message(MessageCommand),
     /// Delivery diagnostics and manual retry
     Delivery(DeliveryArgs),
+    /// Identity tokens for third parties
+    #[command(subcommand)]
+    Identity(IdentityCommand),
     /// Server readiness — GET /healthz
     Health,
 }

@@ -15,6 +15,8 @@ platformd = { path = "crates/server" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+# Ed25519 signing for identity attestation tokens (ADR-0005). Pure Rust.
+ed25519-dalek = "3.0.0"
 futures-util = { version = "0.3.34", default-features = false }
 httpdate = "1.0.3"
 rand = "0.10.3"

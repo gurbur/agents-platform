@@ -2,16 +2,25 @@
 //!
 //! Relative paths are resolved against the directory containing the config
 //! file. Secrets never live in the file itself: the owner token is read from
-//! `owner_token_file`.
+//! `owner_token_file` and the identity signing seed from
+//! `[identity].signing_key_file`.
 
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
+use platform_wire::identity::MAX_TOKEN_LIFETIME_SECS;
 use serde::Deserialize;
+
+use crate::identity::{self, IssuePolicy, Issuer, KeyFileError, SigningIdentity};
 
 /// Minimum owner token length in bytes after trimming.
 pub const OWNER_TOKEN_MIN_BYTES: usize = 32;
+
+/// `[identity]` lifetime defaults (IDENTITY_ATTESTATION §9). Tuning values:
+/// tests never assert them.
+const DEFAULT_IDENTITY_TTL_SECS: u64 = 600;
+const DEFAULT_IDENTITY_MAX_TTL_SECS: u64 = 900;
 
 const DEFAULT_LISTEN: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7340));
 
@@ -39,6 +48,8 @@ pub enum ConfigError {
     TokenTooShort { path: PathBuf, actual: usize },
     #[error("invalid config file {path}: {message}")]
     Invalid { path: PathBuf, message: String },
+    #[error("{0}")]
+    IdentityKey(#[from] KeyFileError),
 }
 
 /// The owner bearer token. Kept in memory only; `Debug` never prints it.
@@ -64,6 +75,77 @@ pub struct Config {
     pub owner_token_file: PathBuf,
     pub owner_token: OwnerToken,
     pub delivery: DeliveryConfig,
+    /// `None` when the `[identity]` table is absent: identity attestation is
+    /// disabled.
+    pub identity: Option<IdentityConfig>,
+}
+
+/// `[identity]` after validation, with the signing key loaded.
+#[derive(Debug, Clone)]
+pub struct IdentityConfig {
+    pub signing_key_file: PathBuf,
+    pub policy: IssuePolicy,
+    pub signing: SigningIdentity,
+}
+
+impl IdentityConfig {
+    pub fn issuer(&self) -> Issuer {
+        Issuer::new(self.signing.clone(), self.policy.clone())
+    }
+}
+
+/// On-disk `[identity]`. `signing_key_file`, `issuer` and `audiences` are
+/// required.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityFile {
+    signing_key_file: PathBuf,
+    issuer: String,
+    audiences: Vec<String>,
+    #[serde(default = "default_identity_ttl_secs")]
+    default_ttl_secs: u64,
+    #[serde(default = "default_identity_max_ttl_secs")]
+    max_ttl_secs: u64,
+}
+
+fn default_identity_ttl_secs() -> u64 {
+    DEFAULT_IDENTITY_TTL_SECS
+}
+
+fn default_identity_max_ttl_secs() -> u64 {
+    DEFAULT_IDENTITY_MAX_TTL_SECS
+}
+
+impl IdentityFile {
+    /// Startup checks: a non-empty issuer, at least one audience, every
+    /// audience non-empty and listed once, and
+    /// `1 <= default_ttl_secs <= max_ttl_secs <= MAX_TOKEN_LIFETIME_SECS`.
+    fn validate(&self) -> Result<(), String> {
+        if self.issuer.is_empty() {
+            return Err("identity.issuer must not be empty".into());
+        }
+        if self.audiences.is_empty() {
+            return Err("identity.audiences must list at least one audience".into());
+        }
+        for (index, audience) in self.audiences.iter().enumerate() {
+            if audience.is_empty() {
+                return Err("identity.audiences must not contain an empty string".into());
+            }
+            if self.audiences[..index].contains(audience) {
+                return Err(format!("identity.audiences lists {audience:?} twice"));
+            }
+        }
+        let in_order = 1 <= self.default_ttl_secs
+            && self.default_ttl_secs <= self.max_ttl_secs
+            && self.max_ttl_secs <= MAX_TOKEN_LIFETIME_SECS;
+        if !in_order {
+            return Err(format!(
+                "identity requires 1 <= default_ttl_secs ({}) <= max_ttl_secs ({}) <= {MAX_TOKEN_LIFETIME_SECS}",
+                self.default_ttl_secs, self.max_ttl_secs
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Receiver callback tuning. Defaults follow RECEIVER_WAKE_CONVENTION.
@@ -120,6 +202,8 @@ struct ConfigFile {
     owner_token_file: PathBuf,
     #[serde(default)]
     delivery: DeliveryConfig,
+    #[serde(default)]
+    identity: Option<IdentityFile>,
 }
 
 fn default_listen() -> SocketAddr {
@@ -138,17 +222,23 @@ impl Config {
             location: line_suffix(&text, err.span()),
             message: err.message().to_owned(),
         })?;
-        file.delivery
-            .validate()
-            .map_err(|message| ConfigError::Invalid {
-                path: path.to_owned(),
-                message,
-            })?;
+        let invalid = |message| ConfigError::Invalid {
+            path: path.to_owned(),
+            message,
+        };
+        file.delivery.validate().map_err(invalid)?;
+        if let Some(identity) = &file.identity {
+            identity.validate().map_err(invalid)?;
+        }
 
         let base = config_dir(path);
         let db_path = base.join(&file.db_path);
         let owner_token_file = base.join(&file.owner_token_file);
         let owner_token = read_owner_token(&owner_token_file)?;
+        let identity = file
+            .identity
+            .map(|identity| load_identity(&base, identity))
+            .transpose()?;
 
         Ok(Self {
             listen: file.listen,
@@ -156,6 +246,7 @@ impl Config {
             owner_token_file,
             owner_token,
             delivery: file.delivery,
+            identity,
         })
     }
 }
@@ -181,6 +272,22 @@ fn read_owner_token(path: &Path) -> Result<OwnerToken, ConfigError> {
         });
     }
     Ok(OwnerToken(token.to_owned()))
+}
+
+/// Reads the signing seed; a missing file or a wrong length refuses startup.
+fn load_identity(base: &Path, file: IdentityFile) -> Result<IdentityConfig, ConfigError> {
+    let signing_key_file = base.join(&file.signing_key_file);
+    let signing = identity::load_signing_key(&signing_key_file)?;
+    Ok(IdentityConfig {
+        signing_key_file,
+        policy: IssuePolicy {
+            issuer: file.issuer,
+            audiences: file.audiences,
+            default_ttl_secs: file.default_ttl_secs,
+            max_ttl_secs: file.max_ttl_secs,
+        },
+        signing,
+    })
 }
 
 /// " at line N" for a parse error span, so the error stays on one line.
@@ -387,6 +494,236 @@ mod tests {
             file.owner_token_file,
             Path::new("/etc/platformd/owner.token")
         );
+    }
+
+    // ---- [identity] ----------------------------------------------------------
+
+    const SEED: [u8; 32] = [9; 32];
+
+    /// `MINIMAL` plus an `[identity]` table holding `body`, with a valid key.
+    fn identity_config(fx: &Fixture, body: &str) -> PathBuf {
+        fx.write("owner.token", VALID_TOKEN);
+        std::fs::write(fx.dir.path().join("identity.key"), SEED).unwrap();
+        fx.config(&format!("{MINIMAL}[identity]\n{body}"))
+    }
+
+    const IDENTITY_REQUIRED: &str = "signing_key_file = \"identity.key\"\n\
+         issuer = \"agents-platform\"\n\
+         audiences = [\"garage-docs\"]\n";
+
+    fn assert_invalid(path: &Path, needle: &str) {
+        let err = Config::load(path).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { .. }), "{err}");
+        assert!(err.to_string().contains(needle), "{err}");
+    }
+
+    #[test]
+    fn identity_is_disabled_without_the_table() {
+        let fx = Fixture::new();
+        fx.write("owner.token", VALID_TOKEN);
+        assert!(
+            Config::load(&fx.config(MINIMAL))
+                .unwrap()
+                .identity
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn identity_applies_explicit_values_and_loads_the_key() {
+        let fx = Fixture::new();
+        let path = identity_config(
+            &fx,
+            "signing_key_file = \"identity.key\"\n\
+             issuer = \"hub-x\"\n\
+             audiences = [\"garage-docs\", \"other\"]\n\
+             default_ttl_secs = 7\n\
+             max_ttl_secs = 8\n",
+        );
+
+        let identity = Config::load(&path).unwrap().identity.unwrap();
+
+        assert_eq!(
+            identity.signing_key_file,
+            fx.dir.path().join("identity.key")
+        );
+        assert_eq!(
+            identity.policy,
+            IssuePolicy {
+                issuer: "hub-x".into(),
+                audiences: vec!["garage-docs".into(), "other".into()],
+                default_ttl_secs: 7,
+                max_ttl_secs: 8,
+            }
+        );
+        assert_eq!(
+            identity.signing.kid(),
+            SigningIdentity::from_seed(&SEED).kid()
+        );
+    }
+
+    #[test]
+    fn identity_defaults_are_within_bounds() {
+        let fx = Fixture::new();
+        let identity = Config::load(&identity_config(&fx, IDENTITY_REQUIRED))
+            .unwrap()
+            .identity
+            .unwrap();
+        let policy = identity.policy;
+        assert!(1 <= policy.default_ttl_secs);
+        assert!(policy.default_ttl_secs <= policy.max_ttl_secs);
+        assert!(policy.max_ttl_secs <= MAX_TOKEN_LIFETIME_SECS);
+    }
+
+    #[test]
+    fn identity_ttl_bounds_are_enforced() {
+        let limit = MAX_TOKEN_LIFETIME_SECS;
+        let accepted = [(1, 1), (1, limit), (limit, limit)];
+        for (default, max) in accepted {
+            let fx = Fixture::new();
+            let path = identity_config(
+                &fx,
+                &format!("{IDENTITY_REQUIRED}default_ttl_secs = {default}\nmax_ttl_secs = {max}\n"),
+            );
+            assert!(Config::load(&path).is_ok(), "{default} {max}");
+        }
+        let rejected = [
+            (0, 1),
+            (0, 0),
+            (2, 1),
+            (1, limit + 1),
+            (limit + 1, limit + 1),
+        ];
+        for (default, max) in rejected {
+            let fx = Fixture::new();
+            let path = identity_config(
+                &fx,
+                &format!("{IDENTITY_REQUIRED}default_ttl_secs = {default}\nmax_ttl_secs = {max}\n"),
+            );
+            assert_invalid(&path, "max_ttl_secs");
+        }
+    }
+
+    #[test]
+    fn identity_max_alone_cannot_drop_below_the_default() {
+        let fx = Fixture::new();
+        let path = identity_config(&fx, &format!("{IDENTITY_REQUIRED}max_ttl_secs = 1\n"));
+        assert_invalid(&path, "default_ttl_secs");
+    }
+
+    #[test]
+    fn identity_audiences_and_issuer_are_checked() {
+        let cases = [
+            ("audiences = []\n", "at least one"),
+            ("audiences = [\"\"]\n", "empty string"),
+            ("audiences = [\"a\", \"\"]\n", "empty string"),
+            ("audiences = [\"a\", \"b\", \"a\"]\n", "twice"),
+        ];
+        for (audiences, needle) in cases {
+            let fx = Fixture::new();
+            let path = identity_config(
+                &fx,
+                &format!("signing_key_file = \"identity.key\"\nissuer = \"i\"\n{audiences}"),
+            );
+            assert_invalid(&path, needle);
+        }
+        let fx = Fixture::new();
+        let path = identity_config(
+            &fx,
+            "signing_key_file = \"identity.key\"\nissuer = \"\"\naudiences = [\"a\"]\n",
+        );
+        assert_invalid(&path, "issuer");
+    }
+
+    #[test]
+    fn identity_rejects_unknown_and_missing_keys() {
+        for body in [
+            format!("{IDENTITY_REQUIRED}seed = \"inline\"\n"),
+            "issuer = \"i\"\naudiences = [\"garage-docs\"]\n".to_owned(),
+            "signing_key_file = \"identity.key\"\naudiences = [\"garage-docs\"]\n".to_owned(),
+            "signing_key_file = \"identity.key\"\nissuer = \"i\"\n".to_owned(),
+        ] {
+            let fx = Fixture::new();
+            let path = identity_config(&fx, &body);
+            let err = Config::load(&path).unwrap_err();
+            assert!(matches!(err, ConfigError::Parse { .. }), "{body}: {err}");
+        }
+    }
+
+    #[test]
+    fn identity_refuses_a_bad_key_file() {
+        for contents in [&b""[..], &[1u8; 31], &[1u8; 33]] {
+            let fx = Fixture::new();
+            let path = identity_config(&fx, IDENTITY_REQUIRED);
+            std::fs::write(fx.dir.path().join("identity.key"), contents).unwrap();
+            let err = Config::load(&path).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::IdentityKey(KeyFileError::Length { .. })),
+                "{err}"
+            );
+            assert!(!err.to_string().contains('\n'), "one line: {err}");
+        }
+        let fx = Fixture::new();
+        let path = identity_config(&fx, IDENTITY_REQUIRED);
+        std::fs::remove_file(fx.dir.path().join("identity.key")).unwrap();
+        assert!(matches!(
+            Config::load(&path),
+            Err(ConfigError::IdentityKey(KeyFileError::Read { .. }))
+        ));
+    }
+
+    /// The example's `[identity]` block is commented out with `#` directly
+    /// before each TOML line; uncommented, it must load.
+    fn uncomment_identity_block(example: &str) -> String {
+        let start = example
+            .find("#[identity]")
+            .expect("commented [identity] block");
+        let (before, block) = example.split_at(start);
+        let uncommented: Vec<&str> = block
+            .lines()
+            .map(|line| match line.strip_prefix('#') {
+                Some(rest) if !rest.starts_with([' ', '#']) && !rest.is_empty() => rest,
+                _ => line,
+            })
+            .collect();
+        format!("{before}{}\n", uncommented.join("\n"))
+    }
+
+    #[test]
+    fn example_identity_block_loads_once_uncommented() {
+        let example = include_str!("../../../platformd.example.toml");
+        let fx = Fixture::new();
+        fx.write("owner.token", VALID_TOKEN);
+        let enabled = uncomment_identity_block(example);
+        let path = fx.config(&enabled);
+        let key_name = "identity.key";
+        assert!(enabled.contains(&format!("signing_key_file = \"{key_name}\"")));
+        std::fs::write(fx.dir.path().join(key_name), SEED).unwrap();
+
+        let identity = Config::load(&path).unwrap().identity.unwrap();
+
+        assert_eq!(identity.policy.audiences, ["garage-docs"]);
+        assert!(
+            Config::load(&fx.config(example))
+                .unwrap()
+                .identity
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pi_example_identity_block_parses_once_uncommented() {
+        let example = include_str!("../../../deploy/platformd.pi.example.toml")
+            .replace("100.x.y.z", "100.64.0.1");
+        let file: ConfigFile = toml::from_str(&uncomment_identity_block(&example)).unwrap();
+        let identity = file.identity.expect("identity table");
+        identity.validate().unwrap();
+        assert_eq!(
+            identity.signing_key_file,
+            Path::new("/etc/platformd/identity.key")
+        );
+        let commented: ConfigFile = toml::from_str(&example).unwrap();
+        assert!(commented.identity.is_none());
     }
 
     #[test]

@@ -69,6 +69,24 @@ impl Fixture {
         Config::load(&path).expect("valid config")
     }
 
+    /// Like [`Fixture::load_config`] with an `[identity]` table holding
+    /// `identity` (TOML `key = value` lines; `signing_key_file` is added) and
+    /// a signing key generated into `identity.key`.
+    pub fn load_config_with_identity(&self, identity: &str) -> Config {
+        let key = self.path().join("identity.key");
+        if !key.exists() {
+            platformd::identity::keygen::generate(&key).expect("generate identity key");
+        }
+        let path = self.write_config_text(&format!(
+            "listen = \"127.0.0.1:0\"\n\
+             db_path = \"data/platform.db\"\n\
+             owner_token_file = \"owner.token\"\n\
+             [identity]\n\
+             signing_key_file = \"identity.key\"\n{identity}\n"
+        ));
+        Config::load(&path).expect("valid config")
+    }
+
     /// Runs `f` on a second connection to the database. WAL lets it read
     /// while a server is running; the connection is closed before returning.
     pub async fn read_db<T, F>(&self, f: F) -> T

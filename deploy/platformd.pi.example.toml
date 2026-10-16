@@ -18,3 +18,17 @@ owner_token_file = "/etc/platformd/owner.token"
 
 # Receiver callback tuning is optional; omit [delivery] to use the defaults
 # documented in platformd.example.toml.
+
+# Identity attestation is optional; without [identity] the token endpoint
+# answers 503 identity_disabled. To enable it, create the key with
+#   sudo platformd identity keygen --out /etc/platformd/identity.key
+#   sudo chown root:platformd /etc/platformd/identity.key
+#   sudo chmod 0640 /etc/platformd/identity.key
+# register the printed kid and public_key with the consumer, uncomment the
+# table below and restart platformd.service. The seed stays in that file
+# only (0640 root:platformd); never put it here. Lifetime keys
+# (default_ttl_secs, max_ttl_secs) are documented in platformd.example.toml.
+#[identity]
+#signing_key_file = "/etc/platformd/identity.key"
+#issuer = "agents-platform"
+#audiences = ["garage-docs"]

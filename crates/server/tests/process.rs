@@ -69,6 +69,26 @@ fn missing_token_file_exits_with_2() {
 }
 
 #[test]
+fn bad_identity_key_file_exits_with_2() {
+    for key in [&b"short"[..], &[0u8; 33]] {
+        let fx = Fixture::new();
+        std::fs::write(fx.path().join("identity.key"), key).unwrap();
+        let config = fx.write_config_text(
+            "listen = \"127.0.0.1:0\"\n\
+             db_path = \"data/platform.db\"\n\
+             owner_token_file = \"owner.token\"\n\
+             [identity]\n\
+             signing_key_file = \"identity.key\"\n\
+             issuer = \"agents-platform\"\n\
+             audiences = [\"garage-docs\"]\n",
+        );
+        let output = run_with_config(&config);
+        assert_config_error(&output);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("identity.key"));
+    }
+}
+
+#[test]
 fn config_path_can_come_from_the_environment() {
     let fx = Fixture::new();
     let config = fx.write_config_text("bogus = true\n");

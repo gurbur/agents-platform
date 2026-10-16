@@ -69,6 +69,11 @@ pub mod codes {
     /// 503 from `GET /healthz` when the database round trip fails. Not listed
     /// in API_V1; chosen in S0 for the `IF-OPS-001` failure path.
     pub const UNAVAILABLE: &str = "unavailable";
+    /// Identity attestation codes (IDENTITY_ATTESTATION §4.4).
+    pub const OWNER_NOT_ALLOWED: &str = "owner_not_allowed";
+    pub const IDENTITY_DISABLED: &str = "identity_disabled";
+    pub const UNKNOWN_AUDIENCE: &str = "unknown_audience";
+    pub const TTL_TOO_LONG: &str = "ttl_too_long";
 }
 
 #[cfg(test)]

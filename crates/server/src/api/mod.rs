@@ -5,6 +5,7 @@ mod agents;
 mod delivery;
 mod error;
 mod history;
+mod identity;
 mod inbox;
 mod json;
 mod messages;
@@ -12,6 +13,8 @@ mod query;
 mod receiver_url;
 mod request_id;
 mod ui;
+
+use std::sync::Arc;
 
 use axum::extract::{FromRef, State};
 use axum::routing::get;
@@ -22,6 +25,7 @@ use tracing::warn;
 use crate::auth::Authenticator;
 use crate::config::OwnerToken;
 use crate::delivery::DeliverySignal;
+use crate::identity::Issuer;
 use crate::store::{Store, migrations};
 
 pub use error::ApiError;
@@ -34,15 +38,23 @@ pub struct AppState {
     store: Store,
     authenticator: Authenticator,
     delivery: DeliverySignal,
+    /// `None` when identity attestation is disabled.
+    identity: Option<Arc<Issuer>>,
 }
 
 impl AppState {
-    pub fn new(store: Store, owner_token: OwnerToken, delivery: DeliverySignal) -> Self {
+    pub fn new(
+        store: Store,
+        owner_token: OwnerToken,
+        delivery: DeliverySignal,
+        identity: Option<Issuer>,
+    ) -> Self {
         let authenticator = Authenticator::new(owner_token, store.clone());
         Self {
             store,
             authenticator,
             delivery,
+            identity: identity.map(Arc::new),
         }
     }
 }
@@ -60,6 +72,7 @@ pub fn router(state: AppState) -> Router {
         .merge(delivery::routes())
         .merge(messages::routes())
         .merge(inbox::routes())
+        .merge(identity::routes())
         .merge(ui::routes())
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)

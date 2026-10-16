@@ -7,8 +7,8 @@ use std::io::Write;
 
 use platform_wire::{
     AgentEntry, DeliveryRetryResponse, DeliveryState, DeliveryStatus, HealthStatus, HistoryCursor,
-    HistoryPage, InboxItem, InboxPage, MembershipResponse, Message, MessageResponse,
-    OwnerAgentEntry, ReadMarkerResponse, ReceiverResponse, RegisterAgentResponse,
+    HistoryPage, IdentityTokenResponse, InboxItem, InboxPage, MembershipResponse, Message,
+    MessageResponse, OwnerAgentEntry, ReadMarkerResponse, ReceiverResponse, RegisterAgentResponse,
     RotateTokensResponse, Seq,
 };
 
@@ -150,6 +150,11 @@ pub fn health(status: &HealthStatus) -> String {
         "{} (schema_version {})\n",
         status.status, status.schema_version
     )
+}
+
+/// The token alone on one line, for `token=$(…)` capture.
+pub fn identity_token(issued: &IdentityTokenResponse) -> String {
+    format!("{}\n", issued.token)
 }
 
 pub fn registration(agent: &RegisterAgentResponse) -> String {

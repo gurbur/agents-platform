@@ -7,6 +7,7 @@ pub mod all;
 pub mod delivery;
 pub mod health;
 pub mod history;
+pub mod identity;
 pub mod inbox;
 pub mod message;
 pub mod receiver;
@@ -47,6 +48,7 @@ pub async fn run(command: Command, context: &Context) -> Result<(), CliError> {
         Command::History(args) => history::run(args, context).await,
         Command::Message(command) => message::run(command, context).await,
         Command::Delivery(args) => delivery::run(args, context).await,
+        Command::Identity(command) => identity::run(command, context).await,
         Command::Health => health::run(context).await,
     }
 }

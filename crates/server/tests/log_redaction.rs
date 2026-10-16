@@ -4,13 +4,20 @@
 //! thread and every task are captured, then drives each S1 and S2 endpoint,
 //! including failures that carry credentials in headers and bodies, and one
 //! S4 receiver callback. Message bodies, history search text and the
-//! receiver URL beyond its host must not be logged either.
+//! receiver URL beyond its host must not be logged either. Identity tokens
+//! and the signing seed never reach the logs (IDENTITY_ATTESTATION §11).
+//!
+//! The subscriber is installed once and shared by every test in this binary;
+//! each test asserts only on the secrets it created.
 
 mod common;
 
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 
 use common::receiver::MockReceiver;
 use common::{Fixture, OWNER_TOKEN, RunningServer, eventually};
@@ -43,14 +50,19 @@ impl io::Write for Captured {
 }
 
 fn install_capture() -> Captured {
-    let captured = Captured::default();
-    let writer = captured.clone();
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new("trace"))
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .init();
-    captured
+    static CAPTURED: OnceLock<Captured> = OnceLock::new();
+    CAPTURED
+        .get_or_init(|| {
+            let captured = Captured::default();
+            let writer = captured.clone();
+            tracing_subscriber::fmt()
+                .with_env_filter(EnvFilter::new("trace"))
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .init();
+            captured
+        })
+        .clone()
 }
 
 #[tokio::test]
@@ -163,4 +175,89 @@ async fn credentials_do_not_appear_in_logs() {
         !logs.contains("prs_"),
         "a receiver secret prefix was logged"
     );
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::test]
+async fn tokens_and_seed_do_not_appear_in_logs() {
+    let captured = install_capture();
+    let fx = Fixture::new();
+    let config = fx
+        .load_config_with_identity("issuer = \"agents-platform\"\naudiences = [\"garage-docs\"]\n");
+    let kid = config.identity.as_ref().unwrap().signing.kid().to_owned();
+    let server = RunningServer::start(&config).await;
+    let api = server.api();
+    let agent = api.register("agent-a", None).await;
+
+    let mut tokens = Vec::new();
+    for body in [
+        json!({"aud": "garage-docs"}),
+        json!({"aud": "garage-docs", "ttl_secs": 5}),
+    ] {
+        let reply = api.post("/v1/identity/tokens", &agent.api_key, body).await;
+        assert_eq!(reply.status.as_u16(), 201, "{}", reply.body);
+        tokens.push(reply.body["token"].as_str().unwrap().to_owned());
+    }
+    api.post(
+        "/v1/identity/tokens",
+        OWNER_TOKEN,
+        json!({"aud": "garage-docs"}),
+    )
+    .await
+    .assert_error(403, "owner_not_allowed");
+    api.post(
+        "/v1/identity/tokens",
+        &agent.api_key,
+        json!({"aud": "nope"}),
+    )
+    .await
+    .assert_error(422, "unknown_audience");
+    // A token presented back to the hub is a failed bearer, not a log entry.
+    api.get("/v1/inbox", &tokens[0])
+        .await
+        .assert_error(401, "unauthorized");
+    server.shutdown().await.unwrap();
+
+    let logs = captured.text();
+    assert!(
+        logs.contains("identity attestation enabled") && logs.contains(&kid),
+        "startup logs the kid: {logs}"
+    );
+    let issued: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("identity token issued"))
+        .collect();
+    assert_eq!(issued.len(), tokens.len(), "{logs}");
+    for line in &issued {
+        let fields = line
+            .split_once("identity token issued ")
+            .map(|(_, fields)| fields)
+            .unwrap_or_else(|| panic!("fields follow the message: {line}"));
+        let names: Vec<&str> = fields
+            .split(' ')
+            .map(|field| field.split_once('=').map_or(field, |(name, _)| name))
+            .collect();
+        assert_eq!(names, ["sub", "jti", "aud", "exp"], "{line}");
+        assert!(fields.starts_with("sub=agent-a jti="), "{line}");
+        assert!(fields.contains(" aud=garage-docs exp="), "{line}");
+    }
+
+    for token in &tokens {
+        assert!(!logs.contains(token.as_str()), "a token was logged");
+        for part in token.split('.').skip(1) {
+            assert!(!logs.contains(part), "a token segment was logged");
+        }
+    }
+    let seed = std::fs::read(fx.path().join("identity.key")).unwrap();
+    for encoded in [
+        hex(&seed),
+        STANDARD.encode(&seed),
+        URL_SAFE_NO_PAD.encode(&seed),
+    ] {
+        assert!(!logs.contains(&encoded), "the seed was logged");
+    }
+    assert!(!logs.contains(&agent.api_key), "an API key was logged");
 }
