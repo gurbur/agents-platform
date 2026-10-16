@@ -4,7 +4,7 @@ Raspberry Pi 5에서 상시 운영할 개인용 에이전트 메시지 허브의
 
 ## 현재 상태
 
-v1 서버(`platformd`)·CLI(`platform`)·읽기 전용 브라우저 UI·운영 스크립트가 구현돼 있습니다(2026-10-16). 설계 문서는 wire 계약의 정본이고, 구현 계약은 [INTERFACES.md](INTERFACES.md), 진행 상태는 [슬라이스 계획](docs/slices/README.md)에 있습니다. 운영 Pi 설치는 "운영" 절을 따릅니다.
+v1 서버(`platformd`)·CLI(`platform`)·읽기 전용 브라우저 UI·운영 스크립트가 구현돼 있습니다(2026-10-16). identity attestation(agent 신원 토큰, [S8](docs/slices/S8-identity-attestation.md))도 운영 Pi에서 켜져 있고 garage-docs agent listener와 실기기로 상호운용을 확인했습니다. 설계 문서는 wire 계약의 정본이고, 구현 계약은 [INTERFACES.md](INTERFACES.md), 진행 상태는 [슬라이스 계획](docs/slices/README.md)에 있습니다. 운영 Pi 설치는 "운영" 절을 따릅니다.
 
 ## v1 범위
 

@@ -107,6 +107,8 @@ backup은 다른 머신에 온라인 일관 snapshot으로 보관한다. 활성 
 6. **확인**: `curl -fsS http://<listen>/healthz`가 200 `{"status":"ok","schema_version":…}`, `platform agent list`가 snapshot 시점의 agent를, `platform delivery <agent_id>`가 agent별 `read_marker`·`inbox_head_seq`·`state`를 보여 주는지 확인한다. pending이던 delivery는 그 상태 그대로 재개된다.
 7. **sequence continuity 경고**: snapshot 이후의 message·inbox row·read marker·token rotation은 사라진다. 같은 `event_seq`·`inbox_seq`가 다른 message로 **다시 발급될 수 있고**, snapshot 뒤에 rotate한 agent는 이전 API key·receiver secret으로 되돌아간다. v1은 이 continuity를 보장하지 않으므로 연결된 agent 운영자에게 복구 시점을 알리고, 필요하면 cursor를 초기화하거나 `agent tokens rotate`로 키를 다시 발급한다. 확인이 끝나면 `pre-restore-<UTC>` 보관본의 처분을 정한다.
 
+**DB 밖 운영자 파일**: `/etc/platformd/owner.token`과 (identity attestation을 켰다면) `/etc/platformd/identity.key`는 DB snapshot에 들어가지 않으며 위 복구 절차도 건드리지 않는다. owner token은 운영자가 따로 보관한 사본으로 되살린다. 서명 키는 설계상 운영 Pi 밖으로 복사하지 않으므로([IDENTITY_ATTESTATION.md](IDENTITY_ATTESTATION.md) 11절) 백업 대상이 아니다. 잃으면(예: microSD 교체) `platformd identity keygen`으로 새 키를 만들고 소비자(garage-docs `agent_access.public_keys`)의 `{kid, key}`를 새 값으로 바꾼다(같은 문서 8.1절).
+
 ## 배포와 기존 서비스 공존
 
 platform은 독립 systemd unit과 전용 service account로 실행한다. 전용 data directory와 local listening port를 사용하고, 기존 C blog·Go document server·Cloudflare Tunnel의 unit, process, configuration, route를 수정하지 않는다. public exposure는 이 문서의 기본값이 아니며 private Tailscale 경로를 사용한다.

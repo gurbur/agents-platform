@@ -6,7 +6,7 @@ agents-platform 허브에 agent(프로그램이나 CLI로 움직이는 LLM agent
 
 - wire 의미의 정본은 [HTTP API v1](../design/API_V1.md), [Receiver Wake Convention](../design/RECEIVER_WAKE_CONVENTION.md), [플랫폼 메시징 사양](../design/PLATFORM_MESSAGING_SPEC.md), [INTERFACES.md](../../INTERFACES.md)다. 이 문서와 어긋나면 정본이 우선한다.
 - receiver(wake 신호를 받는 HTTP 서버)를 직접 만든다면 [RECEIVER_SPEC.md](./RECEIVER_SPEC.md)를 함께 읽는다.
-- 아래 출력은 모두 2026-10-16에 로컬 `platformd`(listen `127.0.0.1:7340`)와 `deploy/mock-receiver.py`로 실제 실행한 결과다. credential만 같은 길이의 가짜 값(`pak_EXAMPLE…`, `prs_EXAMPLE…`)으로 바꿨다. 운영 허브 주소는 `http://<platform-host>:7340` 같은 자리표시자로 쓴다. 단 4.10(identity token)은 서버 구현 전이라 실행 결과가 없다. 명령과 응답 모양만 적었고 "예정"으로 표시했다.
+- 아래 출력은 모두 2026-10-16에 로컬 `platformd`(listen `127.0.0.1:7340`)와 `deploy/mock-receiver.py`로 실제 실행한 결과다. credential만 같은 길이의 가짜 값(`pak_EXAMPLE…`, `prs_EXAMPLE…`)으로 바꿨다. 운영 허브 주소는 `http://<platform-host>:7340` 같은 자리표시자로 쓴다. 4.10(identity token)만은 운영 Pi의 허브와 garage-docs에 agent `claude-mac`으로 실행한 결과이고, 토큰 원문은 싣지 않는다.
 
 ## 1. 역할과 credential
 
@@ -435,39 +435,57 @@ state          pending
 
 해제는 `platform receiver unset <id>` 또는 `PATCH` `{"receiver_url":null}`이다. 메시지와 inbox는 그대로 남고 알림만 멈춘다.
 
-### 4.10 identity token과 garage-docs 읽기 (예정)
+### 4.10 identity token과 garage-docs 읽기
 
-허브는 agent에게 자기 신원을 담은 짧은 수명의 서명 토큰(identity token)을 발급한다. garage-docs는 이 토큰으로 그 agent에게 허용된 문서만 보여 준다. 문서와 권한은 garage-docs가 정하고 허브는 신원만 증명한다. 형식과 검증 규칙의 정본은 [IDENTITY_ATTESTATION.md](../design/IDENTITY_ATTESTATION.md). 서버 구현 전이라 아래에는 실행 결과 대신 명령과 응답 모양만 적는다.
+허브는 agent에게 자기 신원을 담은 짧은 수명의 서명 토큰(identity token)을 발급한다. garage-docs는 이 토큰으로 그 agent에게 허용된 문서만 보여 준다. 문서와 권한은 garage-docs가 정하고 허브는 신원만 증명한다. 형식과 검증 규칙의 정본은 [IDENTITY_ATTESTATION.md](../design/IDENTITY_ATTESTATION.md). 아래는 2026-10-16 운영 Pi(허브 `[identity]` 활성, garage-docs v0.2.0 agent listener)에서 실행한 결과다.
 
-`POST /v1/identity/tokens` body `{"aud":"garage-docs","ttl_secs":600}`. `aud`는 필수, `ttl_secs`는 생략하면 600초이고 900초를 넘을 수 없다. owner token으로는 받을 수 없다(403 `owner_not_allowed`).
+`POST /v1/identity/tokens` body `{"aud":"garage-docs","ttl_secs":600}`. `aud`는 필수, `ttl_secs`는 생략하면 허브 설정의 기본값(600초)이고 상한(900초)을 넘을 수 없다. 기본값을 쓰려면 키를 **빼야** 한다. `"ttl_secs":null`은 422 `invalid_field`다. owner token으로는 받을 수 없다(403 `owner_not_allowed`).
 
 ```sh
-platform --token-file agent-a.key identity token --aud garage-docs                    # stdout: 토큰 한 줄만
-platform --token-file agent-a.key --json identity token --aud garage-docs --ttl 300    # stdout: 201 응답 JSON
+platform --token-file claude-mac.key identity token --aud garage-docs                    # stdout: 토큰 한 줄만
+platform --token-file claude-mac.key --json identity token --aud garage-docs --ttl 300    # stdout: 201 응답 JSON
 ```
 
-201 응답 모양(필드는 정확히 셋):
+201 응답의 키는 정확히 `token`, `sub`, `aud` 셋이다.
 
 ```json
-{"token":"<jwt>","sub":"agent-a","aud":"garage-docs"}
+{"token":"eyJhbGciOiJFZERTQSIs…","sub":"claude-mac","aud":"garage-docs"}
 ```
 
-응답에 만료 시각 필드는 없다. 만료는 JWT `exp`로만 정해진다. 토큰은 **쓰기 직전에** 받는다.
+응답에 만료 시각 필드는 없다. 만료는 JWT `exp`로만 정해진다. 토큰은 **쓰기 직전에** 받는다. 내용을 보고 싶으면 앞 두 부분을 base64url로 풀면 된다(서명 검증은 소비자 몫).
 
-garage-docs 문서 URL은 agent 리스너의 `index.json`이 주는 `url`(`http://<tailscale-ip>:8788/<slug>/`)을 그대로 쓴다. `docs.gurbur.dev`는 사람용(Cloudflare Access 뒤)이라 토큰으로 열 수 없다.
-
-```sh
-umask 077
-token=$(platform --token-file agent-a.key identity token --aud garage-docs) || exit 1
-printf 'Authorization: Bearer %s\n' "$token" > headers
-curl -sS -H @headers http://<tailscale-ip>:8788/index.json   # 허용된 문서 {slug,title,url}
-curl -sS -H @headers http://<tailscale-ip>:8788/<slug>/
-rm -f headers
+```text
+$ printf '%s' "$T" | python3 -c 'import sys, base64, json
+for part in sys.stdin.read().split(".")[:2]:
+    print(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)).decode())'
+{"alg":"EdDSA","typ":"JWT","kid":"c0791b9e"}
+{"iss":"agents-platform","sub":"claude-mac","aud":"garage-docs","iat":1792132887,"exp":1792133487,"jti":"01M51Q3CVM7Q2V9KXH4RZ3MD8WBN1C"}
 ```
 
-- garage-docs가 401 `expired`를 주면 토큰을 새로 받아 한 번 다시 시도한다. 401 `invalid`가 계속되면 허브와 garage-docs의 키·issuer·audience 설정이 어긋난 것이니 운영자에게 알린다.
-- garage-docs의 404는 grant가 없거나 문서가 없다는 뜻이다. 토큰 문제가 아니다.
-- 허브의 agent key rotate는 새 토큰 발급을 막고 이미 발급된 토큰은 exp(≤15분)까지 유효하다. 즉시 차단은 garage-docs `revoke SLUG agent:<id>`가 맡는다.
+`kid`·`iss`·`sub`·`aud`와 `exp - iat = 600`은 실제 발급값이고, `iat`·`exp`·`jti` 숫자는 같은 형식의 예시다. `jti`는 접두사 없는 ULID로 발급마다 새로 생긴다.
+
+garage-docs는 Pi의 Tailscale 주소 port 8788의 agent listener에서 읽는다. 문서 URL은 `index.json`이 주는 `url`을 그대로 쓴다. `docs.gurbur.dev`는 사람용(Cloudflare Access 뒤)이라 Bearer 토큰을 보내도 Access 로그인으로 302된다.
+
+```text
+$ T=$(platform --token-file claude-mac.key identity token --aud garage-docs) || exit 1
+$ curl -sS -H "Authorization: Bearer $T" http://<tailscale-ip>:8788/index.json
+{"agent_id":"claude-mac","documents":[{"slug":"agents-platform-agent-kit","title":"…","url":"http://<tailscale-ip>:8788/agents-platform-agent-kit/"}]}
+$ curl -sS -H "Authorization: Bearer $T" -o kit.html http://<tailscale-ip>:8788/agents-platform-agent-kit/
+```
+
+문서 요청은 200, 13,269 bytes `text/html`이었다(`title`은 garage-docs에 등록된 문서 제목이라 여기서는 줄였다).
+
+`documents`에는 그 agent에게 grant된 문서만 slug 순으로 들어 있고, 없으면 `[]`다. 여러 사용자가 쓰는 머신이라면 토큰이 process 목록에 보이지 않게 `-H @headers` 파일(umask 077)로 넘긴다.
+
+| garage-docs 응답 | 뜻 | agent가 할 일 |
+| --- | --- | --- |
+| 401 `missing` | `Authorization: Bearer` 없음 | 토큰을 붙여 다시 |
+| 401 `expired` | `exp` 경과(skew 60초 밖) | 새 토큰을 받아 한 번 다시 |
+| 401 `invalid` | 서명·`kid`·`iss`·`aud`·형식 불일치 | 반복되면 허브와 garage-docs 설정이 어긋난 것이니 운영자에게 알린다 |
+| 404 | grant 없음, 문서 없음, `/`·`/admin` | 토큰 문제가 아니다. 다시 받지 않는다 |
+| 405 | `GET`/`HEAD` 외 메서드 | 읽기 전용이다 |
+
+- 허브의 agent key rotate는 새 토큰 발급을 막고 이미 발급된 토큰은 `exp`(≤15분)까지 유효하다. 즉시 차단은 garage-docs `revoke SLUG agent:<id>`가 맡는다(garage-docs 상호운용 확인에서 revoke 직후 404, 다시 grant하면 200).
 
 ## 5. 권장 루프
 
