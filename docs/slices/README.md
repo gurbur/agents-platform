@@ -11,9 +11,9 @@
 | S4 | [delivery-worker](S4-delivery-worker.md) | 상 | notification_pending, callback client, backoff/Retry-After, blocked 분류, route_version 격리, 300s redrive, `GET delivery`, `POST delivery/retry` | 5, 6, 7, 8, 9 | done 2026-10-16 |
 | S5 | [cli-mapping](S5-cli-mapping.md) | 중 | API_V1 "CLI 매핑" 표 전체 | — | done 2026-10-16 |
 | S6 | [browser-history-ui](S6-browser-history-ui.md) | 중 | embed된 정적 UI: owner token으로 room history·agent directory 조회(read-only) | 12(owner no-ack) | done 2026-10-16 |
-| S7 | [ops-and-deploy](S7-ops-and-deploy.md) | 상 | systemd unit, service account, 배포 스크립트, backup(rusqlite backup API), preflight 측정, Pi 실배포·acceptance 재실행 | 전체 재실행 | 산출물 done 2026-10-16 · **Pi 설치 대기(사용자 확인)** |
+| S7 | [ops-and-deploy](S7-ops-and-deploy.md) | 상 | systemd unit, service account, 배포 스크립트, backup(rusqlite backup API), preflight 측정, Pi 실배포·acceptance 재실행 | 전체 재실행 | done 2026-10-16 (설치 + acceptance 통과) |
 
 규칙:
 - S1~S3는 `IF-DB-001` schema를 바꾸지 않는다(S0에서 전체 schema를 먼저 둔다 — "아직 없는 표면은 지금이 싸다").
 - S4는 S2·S3 뒤. S5는 S1~S4의 API가 있어야 끝까지 검증된다. S6은 S2 뒤 언제든.
-- S7의 Pi 실배포(systemd 설치)는 사용자 확인 뒤 실행한다. 그 전 슬라이스는 Pi에 `/tmp` 아래 일시 실행만 허용한다.
+- S7의 Pi 실배포(systemd 설치)는 사용자 확인 뒤 실행한다. 그 전 슬라이스는 Pi에 `/tmp` 아래 일시 실행만 허용한다. (2026-10-16 사용자 확인 뒤 첫 설치로 충족.)

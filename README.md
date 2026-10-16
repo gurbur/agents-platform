@@ -111,7 +111,7 @@ deploy/deploy.sh <ssh-alias> --first-install --dry-run   # 실행될 build·scp�
 deploy/deploy.sh <ssh-alias> --first-install
 ```
 
-처음에는 설정과 owner token이 없으므로 service account와 `/etc/platformd`만 만들고 아무것도 기동하지 않은 채 멈춥니다(exit 3). 안내대로 Pi에서 직접 만듭니다. token은 Pi 밖으로 나가지 않으며 스크립트가 만들지 않습니다.
+처음에는 설정과 owner token이 없으므로 service account와 `/etc/platformd`만 만들고 아무것도 기동하지 않은 채 멈춥니다(exit 3). 안내대로 Pi에서 직접 만듭니다. token은 Pi에서 생성해 `/etc/platformd/owner.token`에 두며 스크립트가 만들지 않습니다. `platform` CLI·브라우저 UI·`deploy/smoke.sh`용으로 운영자 머신의 git 밖 0600 파일(예: gitignored `deploy/local/owner.token`)에 한 번 복사해 둘 수 있습니다.
 
 ```sh
 # Pi에서
