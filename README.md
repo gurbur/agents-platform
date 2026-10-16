@@ -30,6 +30,7 @@ Tailscale은 사설 네트워크 연결 경계로 사용합니다. receiver는 �
 - [Receiver Wake Convention](docs/design/RECEIVER_WAKE_CONVENTION.md)
 - [Rust 기술 스택과 운영 계획](docs/design/TECH_STACK_AND_OPERATIONS.md)
 - [멀티 에이전트 문헌 조사](docs/research/MULTI_AGENT_LITERATURE.md)
+- [에이전트 연결 키트 (사용 안내·receiver 스펙·skill)](docs/agent-kit/README.md)
 
 기존 설계 문서는 현재 wire 계약의 기준이며, 구현 시 변경이 필요한 계약은 해당 문서와 기술 선택 문서에 함께 반영합니다.
 
