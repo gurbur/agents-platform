@@ -15,8 +15,8 @@
 | id | 계약 | 정본 절 | 상태 |
 | --- | --- | --- | --- |
 | `IF-API-COMMON` | media type, Bearer 인증, 상태 코드 규칙, 크기 제한(decoded body 16 KiB, wire 128 KiB, client_key ASCII 1~128), page 50/100, 오류 body `{error:{code,message,request_id,details}}` | 공통 HTTP 규칙, 오류와 권한 요약 | frozen |
-| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`) | Agent 등록과 directory | frozen · S9 개정 frozen-pending 2026-10-17 |
-| `IF-API-PROFILE` | `PUT /v1/agents/{id}/profile`(owner 또는 그 agent, 부분 갱신 — 생략=유지·`null`=비움, `name`은 owner만 → agent key면 403 `forbidden`, `name: null` 422, 200 `{agent_id, name, profile}`), 필드 규칙 | Agent 등록과 directory("PUT /v1/agents/{agent_id}/profile", "Directory profile 필드 규칙") | frozen-pending · 2026-10-17 |
+| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`) | Agent 등록과 directory | frozen · S9 개정 frozen 2026-10-17 |
+| `IF-API-PROFILE` | `PUT /v1/agents/{id}/profile`(owner 또는 그 agent, 부분 갱신 — 생략=유지·`null`=비움, `name`은 owner만 → agent key면 403 `forbidden`, `name: null` 422, 200 `{agent_id, name, profile}`), 필드 규칙 | Agent 등록과 directory("PUT /v1/agents/{agent_id}/profile", "Directory profile 필드 규칙") | frozen · 2026-10-17 |
 | `IF-API-RECEIVER` | `PATCH /v1/agents/{id}/receiver` | Receiver 경로와 membership | frozen |
 | `IF-API-MEMBERSHIP` | `PUT /v1/agents/{id}/membership/all` | Receiver 경로와 membership | frozen |
 | `IF-API-SEND` | `POST /v1/messages` (idempotency, fanout, DM, reply_to) | Message 송신과 durable commit | frozen |
@@ -187,7 +187,7 @@
 - canonical(to, body, reply_to) 해시 입력: `to` 바이트, `0x00`, `body` 바이트, `0x00`, `reply_to`(없거나 null이면 빈 문자열) 바이트. trim·정규화 없음 (API_V1 "canonical request" 규칙).
 - `inbox_seq` 발급: `agents.inbox_head + 1`을 같은 transaction에서 갱신. `event_seq` 발급: `sequences('event_seq') + 1`을 같은 transaction에서 갱신. 둘 다 hole 없음.
 - v1 삭제 없음: agents·messages·inbox_rows에 DELETE 경로를 만들지 않는다.
-- **상태**: frozen · 2026-10-15 · v2 frozen-pending 2026-10-17
+- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17
 
 ### `IF-DB-002 — Store 명령 큐 (단일 DB thread)`
 
@@ -236,7 +236,7 @@
   - `profile show <agent_id>` — `GET /v1/agents`를 받아 그 agent item만 출력. 기본 출력은 `agent_id`, `name`, `gender_form`, `age_band`, `role`, `updated_at` 키-값 줄(값이 null이면 `-`) 뒤에 `intro` 원문. `--json`은 그 item JSON 하나. 목록에 없으면 stderr `platform: agent_not_found: …`, exit 1(서버 오류와 같은 형식).
   - `profile set`·`set-name`의 기본 출력은 `profile show`와 같은 형식(200 응답 기준). `--json`은 200 원문.
   - `agent list` 열: agent 시점 `AGENT_ID NAME JOINED_ALL ROLE`, owner 시점 `AGENT_ID NAME JOINED_ALL DELIVERY ROUTE_VERSION CREATED_AT RECEIVER_URL ROLE`. null은 `-`. `intro`는 표에 넣지 않는다(`profile show` 또는 `--json`).
-- **상태**: frozen · 2026-10-15 · S9 추가분 frozen-pending 2026-10-17
+- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17
 
 ### `IF-DLV-001 — delivery worker 상태 전이`
 
@@ -266,7 +266,7 @@
   ```
 - `name`과 `profile`은 두 형태 모두에 있다(S9). `name`은 v1 행에서 owner가 정하기 전까지 `null`. `profile`의 다섯 키는 항상 있고 선언하지 않은 값은 `null`(키를 생략하지 않는다). `PUT …/profile` 200의 `profile`과 `POST /v1/agents` 201의 `profile`도 같은 객체다.
 - `delivery.state`는 `IF-DLV-001` 파생 규칙(`receiver_url IS NULL → no_receiver`, 그 외 `notification_pending.state`). 키·secret은 어떤 형태에도 없다.
-- **상태**: frozen · 2026-10-15 · `name`·`profile` 추가 frozen-pending 2026-10-17
+- **상태**: frozen · 2026-10-15 · `name`·`profile` 추가 frozen 2026-10-17
 
 ### `IF-WIRE-002 — 요청 JSON 파싱·검증 오류 매핑`
 
@@ -339,7 +339,7 @@
 - `POST /v1/agents` 판정 순서(S1 순서에 `name`을 끼운다): 401 → 403 → 413/415/400 → 422 `unexpected_field`(`name` 외 profile 필드 포함) → 422 `invalid_field`(누락·타입, `name` 누락 포함) → 422 `invalid_agent_id` → 422 `invalid_field`(`name` 값) → 422 `invalid_receiver_url` → 409 `agent_id_taken` → 201.
 - `profile_updated_at`: 등록 transaction은 `created_at`과 같은 값을 쓴다. `PUT`은 같은 transaction에서 현재 행과 비교해 저장값이 하나라도 바뀔 때만 갱신하고, 바뀐 것이 없으면 행을 쓰지 않는다(`route_version`·`epoch`의 "값이 바뀔 때만" 관례).
 - 로그: `name`·`role`·`intro` 값은 로그에 남기지 않는다(다른 agent가 읽는 자유 텍스트라 메시지 body처럼 다룬다). 갱신 로그는 `agent_id`와 바뀐 필드 이름만.
-- **상태**: frozen-pending · 2026-10-17 · 근거 [ADR-0006](docs/adr/0006-agent-directory-profile.md)
+- **상태**: frozen · 2026-10-17(S9 done) · 근거 [ADR-0006](docs/adr/0006-agent-directory-profile.md)
 
 ## 용어집
 

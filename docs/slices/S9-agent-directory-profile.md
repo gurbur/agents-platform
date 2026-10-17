@@ -1,6 +1,6 @@
 # 슬라이스 S9: agent-directory-profile
 
-- **상태**: frozen (2026-10-17) — 설계는 같은 날 오케스트레이터·사용자 결정([ADR-0006](../adr/0006-agent-directory-profile.md))으로 freeze. 구현 전.
+- **상태**: **done (2026-10-17)** — 구현 커밋 `e672cb0`(테스트 296→359, smoke 16 PASS), 운영 Pi 배포 17:58 KST(백업 `platform-20261017T085524Z.db` 선행, migration v2 적용 로그, healthz 200, 기존 unit 전후 동일). owner가 네 agent의 `name`(공·잼민이·복숭이·gurbur)과 boksoongi의 얕은 profile(gender_form none, role)을 등록. 설계는 같은 날 [ADR-0006](../adr/0006-agent-directory-profile.md)으로 freeze.
 - **위험/의존도**: 중 — 처음으로 `IF-DB-001` schema를 올린다(v1 → v2, 운영 DB에 적용되는 첫 migration). `POST /v1/agents`가 `name`을 요구해 등록 요청이 하위 호환이 아니다. 다른 agent가 쓴 `intro`가 모든 agent에게 전달되므로 데이터 취급 규칙이 agent-kit에 들어가야 한다. S1(등록·권한)·S5(CLI)·S6(UI)·S7(운영 스크립트) 위에 얹는다. delivery·메시지 경로는 건드리지 않는다.
 
 ## 목표
