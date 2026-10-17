@@ -23,7 +23,7 @@ wire 의미는 API_V1 "Agent 등록과 directory"가 정본, 판정 방법과 �
 4. **handlers (`api::agents`)**: `register`는 `IF-WIRE-006`의 등록 순서(`invalid_agent_id` 뒤, `invalid_receiver_url` 앞에 `name` 값 검사). `list`는 두 형태 모두 `name`·`profile`. 새 route `PUT /v1/agents/{agent_id}/profile`: 경로 권한은 기존 `ManagedAgent`와 같은 판정을 쓰되 `name` 권한 검사에 principal이 필요하므로 principal도 함께 넘기는 extractor로 받는다. 순서는 `IF-WIRE-006`의 1~10 그대로. 갱신 로그는 `agent_id`와 바뀐 필드 이름만(값 금지).
 5. **CLI (`platform`)**: `IF-CLI-001` S9 추가분 그대로. `agent register`에 `--name`(필수). 새 서브커맨드 `profile`(`set`, `set-name`, `show`)은 `commands/profile.rs`. `--gender-form`·`--age-band`·`--clear`는 clap value enum(값 목록은 `platform-wire` 타입에서). `set`은 body를 만든 뒤 `UpdateProfileRequest::validate`로 먼저 검사한다(S5·S8 관례, 위반은 exit 2). `show`는 `GET /v1/agents` 결과에서 고른다. `agent list` 표에 `NAME`·`ROLE` 열(`IF-CLI-001`의 열 순서).
 6. **UI (선택)**: S6 directory 표에 `NAME`·`ROLE` 열을 `textContent`로만 렌더한다. 다른 화면·write는 없다.
-7. **스모크 (`deploy/smoke.sh`)**: `register()`가 `--name "smoke $agent"`를 넘긴다. 새 시나리오 `scenario "directory profile (13)" check_directory_profile`을 "directory hides credentials" 뒤에 둔다. agent_a key로 `profile set`(`--gender-form none --role … --intro-file -`) → agent_b key로 `agent list --json`에 agent_a의 `name`·`profile`이 기대값 → agent_a key로 `profile set-name` → exit 1 `forbidden` → owner로 `profile set-name` → 200 → `--clear role` 뒤 `role`이 `null` → curl(기존 header 파일 방식)로 `{"gender_form":"Female"}` → 422 `invalid_field`. intro·name 값은 출력하지 않는다(FAIL note에 응답 원문을 넣지 않는다). 스모크 agent의 profile은 그대로 남긴다(삭제 경로 없음).
+7. **스모크 (`deploy/smoke.sh`)**: `register()`가 `--name "smoke <ulid>"(smoke agent id의 ULID 26자만 — `smoke-<ulid>` 전체를 쓰면 38자로 32자 상한을 넘는다; 구현 중 정정 2026-10-17)`를 넘긴다. 새 시나리오 `scenario "directory profile (13)" check_directory_profile`을 "directory hides credentials" 뒤에 둔다. agent_a key로 `profile set`(`--gender-form none --role … --intro-file -`) → agent_b key로 `agent list --json`에 agent_a의 `name`·`profile`이 기대값 → agent_a key로 `profile set-name` → exit 1 `forbidden` → owner로 `profile set-name` → 200 → `--clear role` 뒤 `role`이 `null` → curl(기존 header 파일 방식)로 `{"gender_form":"Female"}` → 422 `invalid_field`. intro·name 값은 출력하지 않는다(FAIL note에 응답 원문을 넣지 않는다). 스모크 agent의 profile은 그대로 남긴다(삭제 경로 없음).
 8. **agent-kit**: `AGENT_GUIDE.md` 4.2절과 `skill/SKILL.md`는 설계 단계에서 profile 명령과 소비 규칙 네 가지를 이미 적었다. 구현 뒤 2절(등록 `--name`)·4.1절(`schema_version` 2)·4.2절의 예시를 **실제 실행 출력**으로 바꾸고(문서 머리말의 "실제 실행한 결과" 원칙), 7절 오류표의 `forbidden`·`invalid_field` 설명에 profile 사례를 더한다. `RECEIVER_SPEC.md`·`examples/claude-adapter/README.md`의 `agent register` 예시에 `--name`을 넣는다. `README.md` 비범위 문구의 "persona·profile"을 "persona"로 고치고 directory profile을 기능 목록에 한 줄 넣는다.
 9. **운영 메모(실행하지 않는다)**: 운영 Pi 배포는 사용자 확인 뒤 별도로 하며, 배포 직전 `platformd backup`으로 v1 DB를 받아 둔다(v2 DB는 S8 바이너리가 거부하므로 되돌림 = 그 backup 복원). 배포 뒤 owner가 기존 agent마다 `platform profile set-name`을 실행한다.
 
@@ -39,6 +39,11 @@ wire 의미는 API_V1 "Agent 등록과 directory"가 정본, 판정 방법과 �
 - [ ] **UI (선택)**: 했다면 directory 표에 `NAME`·`ROLE`이 보이고 `<b>x</b>` 같은 이름이 글자 그대로 보이는 것을 브라우저로 확인(스크린샷), 콘솔 오류 0건. 안 했다면 핸드오프에 "안 함".
 - [ ] **문서**: 구현 방안 8의 파일들이 실제 실행 출력과 함께 갱신됨.
 - [ ] fmt/clippy/test 그린. 코드 미학(`CLAUDE.md` 규약). 기존 테스트는 `name`이 필수가 되어 바뀌는 등록 helper와 schema 버전 단언만 고치고, 다른 단언은 바꾸지 않는다.
+
+## 구현 중 발견 (2026-10-17)
+- smoke의 `--name "smoke $agent"`는 38자라 상한(32)을 넘어 첫 실행에서 실패했다. 위처럼 정정.
+- serde 파생 역직렬화는 JSON 배열을 위치 필드로 읽어 `[]`가 빈 profile 갱신(200), `["x"]`가 `name` 설정으로 통했다. 테스트로 잡아 `UpdateProfileRequest`는 객체만 받게 고쳤다. **같은 구멍이 기존 요청 타입(`POST /v1/agents` 등)에도 있다** — 범위 밖이라 두었고, 별도 결함 수정(실패 테스트 먼저)으로 처리한다.
+- CLI 표는 문자 수로 패딩해 한글 이름이 섞인 `NAME` 열이 시각적으로 어긋난다(기존 표 코드 한계, AGENT_GUIDE §4.2에 명시).
 
 ## 검증 방법 (증거 필수)
 - `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` 출력 끝부분(테스트 수 전후).
