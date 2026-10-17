@@ -12,6 +12,7 @@ pub mod health;
 pub mod identity;
 pub mod inbox;
 pub mod messages;
+pub mod profile;
 pub mod seq;
 
 pub use agent_id::{AgentId, AgentIdError};
@@ -28,5 +29,10 @@ pub use inbox::{InboxItem, InboxPage, ReadMarkerRequest, ReadMarkerResponse};
 pub use messages::{
     HistoryCursor, HistoryPage, Message, MessageId, MessageIdError, MessageResponse, Recipient,
     RecipientError, RoomId, RoomIdError, SendMessageRequest,
+};
+pub use profile::{
+    AgeBand, AgentProfile, FieldPatch, GenderForm, MAX_INTRO_CHARS, MAX_NAME_CHARS, MAX_ROLE_CHARS,
+    ProfileField, ProfileFieldError, ProfileFieldProblem, ProfileResponse, ProfileUpdate,
+    UnknownValue, UpdateProfileRequest, validate_name,
 };
 pub use seq::{Seq, SeqError};

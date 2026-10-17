@@ -39,10 +39,15 @@ pub struct ApiClient {
     http: reqwest::Client,
 }
 
+/// Response header carrying the server's request id (`IF-API-COMMON`).
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
 /// A decoded response together with its raw body for `--json`.
 pub struct Decoded<T> {
     pub value: T,
     pub raw: Vec<u8>,
+    /// The `x-request-id` header, empty when absent.
+    pub request_id: String,
 }
 
 /// Query parameters in request order. Absent options are simply not pushed.
@@ -133,6 +138,12 @@ async fn execute<T: DeserializeOwned>(
 ) -> Result<Decoded<T>, CliError> {
     let response = request.send().await.map_err(CliError::Network)?;
     let status = response.status();
+    let request_id = response
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
     let raw = response.bytes().await.map_err(CliError::Network)?.to_vec();
     if !status.is_success() {
         return Err(server_error(status, &raw));
@@ -141,7 +152,11 @@ async fn execute<T: DeserializeOwned>(
         status,
         detail: format!("cannot decode body: {err}"),
     })?;
-    Ok(Decoded { value, raw })
+    Ok(Decoded {
+        value,
+        raw,
+        request_id,
+    })
 }
 
 fn server_error(status: StatusCode, raw: &[u8]) -> CliError {

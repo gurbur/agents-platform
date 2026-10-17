@@ -357,7 +357,7 @@ last_accepted_seq  3
 
 ```sh
 python3 -I deploy/mock-receiver.py 127.0.0.1 8799
-platform --token-file owner.token agent register agent-a --receiver-url http://127.0.0.1:8799/notify
+platform --token-file owner.token agent register agent-a --name "에이전트 A" --receiver-url http://127.0.0.1:8799/notify
 ```
 
 ```text

@@ -15,7 +15,10 @@ async fn agent_register_list_inbox_and_token_rotation() {
     let server = Platformd::start().await;
 
     let registered = server
-        .cli(OWNER_TOKEN, &["agent", "register", "agent-a"])
+        .cli(
+            OWNER_TOKEN,
+            &["agent", "register", "agent-a", "--name", "에이전트 A"],
+        )
         .await;
     let out = ok(&registered);
     let key_a = value(&out, "agent_api_key");
@@ -32,6 +35,8 @@ async fn agent_register_list_inbox_and_token_rotation() {
                 "agent",
                 "register",
                 "agent-b",
+                "--name",
+                "B",
                 "--receiver-url",
                 "http://127.0.0.1:9/n",
                 "--json",
@@ -44,7 +49,10 @@ async fn agent_register_list_inbox_and_token_rotation() {
     assert!(stderr(&registered_json).contains(SHOWN_ONCE));
 
     let taken = server
-        .cli(OWNER_TOKEN, &["agent", "register", "agent-a"])
+        .cli(
+            OWNER_TOKEN,
+            &["agent", "register", "agent-a", "--name", "A"],
+        )
         .await;
     assert_server_error(&taken, "agent_id_taken");
 
@@ -57,10 +65,13 @@ async fn agent_register_list_inbox_and_token_rotation() {
     assert!(owner_json["items"][0]["delivery"]["state"].is_string());
 
     let agent_list = ok(&server.cli(&key_a, &["agent", "list"]).await);
-    assert_eq!(
-        agent_list.lines().next().unwrap().trim_end(),
-        "AGENT_ID  JOINED_ALL"
-    );
+    let header: Vec<&str> = agent_list
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    assert_eq!(header, ["AGENT_ID", "NAME", "JOINED_ALL", "ROLE"]);
     assert!(!agent_list.contains("RECEIVER_URL"), "{agent_list}");
     assert_eq!(agent_list.lines().count(), 3, "{agent_list}");
 
@@ -550,7 +561,10 @@ async fn exit_codes_for_api_commands() {
     assert!(stdout(&unauthorized).is_empty());
 
     let invalid_id = server
-        .cli(OWNER_TOKEN, &["agent", "register", "Agent-A"])
+        .cli(
+            OWNER_TOKEN,
+            &["agent", "register", "Agent-A", "--name", "A"],
+        )
         .await;
     assert_eq!(invalid_id.status.code(), Some(2), "{}", stderr(&invalid_id));
     let unknown = server.cli(OWNER_TOKEN, &["agent", "frobnicate"]).await;

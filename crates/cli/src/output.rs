@@ -6,10 +6,10 @@ use std::fmt::Display;
 use std::io::Write;
 
 use platform_wire::{
-    AgentEntry, DeliveryRetryResponse, DeliveryState, DeliveryStatus, HealthStatus, HistoryCursor,
-    HistoryPage, IdentityTokenResponse, InboxItem, InboxPage, MembershipResponse, Message,
-    MessageResponse, OwnerAgentEntry, ReadMarkerResponse, ReceiverResponse, RegisterAgentResponse,
-    RotateTokensResponse, Seq,
+    AgentEntry, AgentProfile, DeliveryRetryResponse, DeliveryState, DeliveryStatus, HealthStatus,
+    HistoryCursor, HistoryPage, IdentityTokenResponse, InboxItem, InboxPage, MembershipResponse,
+    Message, MessageResponse, OwnerAgentEntry, ProfileResponse, ReadMarkerResponse,
+    ReceiverResponse, RegisterAgentResponse, RotateTokensResponse, Seq,
 };
 
 use crate::error::CliError;
@@ -160,6 +160,7 @@ pub fn identity_token(issued: &IdentityTokenResponse) -> String {
 pub fn registration(agent: &RegisterAgentResponse) -> String {
     key_values(&[
         ("agent_id", agent.agent_id.to_string()),
+        ("name", one_line(agent.name.as_deref())),
         ("joined_all", agent.joined_all.to_string()),
         ("receiver_url", or_none(agent.receiver_url.as_deref())),
         ("route_version", agent.route_version.to_string()),
@@ -181,37 +182,79 @@ pub fn rotation(rotated: &RotateTokensResponse) -> String {
     ])
 }
 
+/// A free-text profile value on one table or key-value line. Validation
+/// keeps control characters out of `name` and `role`; escaping is cheap
+/// insurance for the layout.
+fn one_line(value: Option<&str>) -> String {
+    value.map_or_else(|| NONE.to_owned(), escape_body)
+}
+
 pub fn owner_directory(agents: &[OwnerAgentEntry]) -> String {
     let mut table = Table::new(vec![
         "AGENT_ID",
+        "NAME",
         "JOINED_ALL",
         "DELIVERY",
         "ROUTE_VERSION",
         "CREATED_AT",
         "RECEIVER_URL",
+        "ROLE",
     ]);
     for agent in agents {
         table.push(vec![
             agent.agent_id.to_string(),
+            one_line(agent.name.as_deref()),
             agent.joined_all.to_string(),
             state_name(agent.delivery.state).to_owned(),
             agent.route_version.to_string(),
             agent.created_at.clone(),
             or_none(agent.receiver_url.as_deref()),
+            one_line(agent.profile.role.as_deref()),
         ]);
     }
     table.render()
 }
 
 pub fn agent_directory(agents: &[AgentEntry]) -> String {
-    let mut table = Table::new(vec!["AGENT_ID", "JOINED_ALL"]);
+    let mut table = Table::new(vec!["AGENT_ID", "NAME", "JOINED_ALL", "ROLE"]);
     for agent in agents {
         table.push(vec![
             agent.agent_id.to_string(),
+            one_line(agent.name.as_deref()),
             agent.joined_all.to_string(),
+            one_line(agent.profile.role.as_deref()),
         ]);
     }
     table.render()
+}
+
+/// `profile show|set|set-name`: key-value lines, then `intro` as written
+/// (it may span lines), or `intro  -` when undeclared.
+pub fn profile(entry: &ProfileResponse) -> String {
+    let AgentProfile {
+        gender_form,
+        age_band,
+        role,
+        intro,
+        updated_at,
+    } = &entry.profile;
+    let mut pairs = vec![
+        ("agent_id", entry.agent_id.to_string()),
+        ("name", one_line(entry.name.as_deref())),
+        ("gender_form", or_none(*gender_form)),
+        ("age_band", or_none(*age_band)),
+        ("role", one_line(role.as_deref())),
+        ("updated_at", or_none(updated_at.as_deref())),
+    ];
+    let Some(intro) = intro else {
+        pairs.push(("intro", NONE.to_owned()));
+        return key_values(&pairs);
+    };
+    let mut text = key_values(&pairs);
+    text.push_str("intro\n");
+    text.push_str(intro);
+    text.push('\n');
+    text
 }
 
 pub fn receiver(route: &ReceiverResponse) -> String {
@@ -413,6 +456,25 @@ mod tests {
             key_values(&[("a", "1".into()), ("longer", "-".into())]),
             "a       1\nlonger  -\n"
         );
+    }
+
+    #[test]
+    fn profile_puts_intro_last_and_dashes_for_null() {
+        let mut entry = ProfileResponse {
+            agent_id: "agent-a".parse().unwrap(),
+            name: None,
+            profile: AgentProfile {
+                gender_form: Some(platform_wire::GenderForm::None),
+                ..AgentProfile::default()
+            },
+        };
+        assert_eq!(
+            profile(&entry),
+            "agent_id     agent-a\nname         -\ngender_form  none\nage_band     -\n\
+             role         -\nupdated_at   -\nintro        -\n"
+        );
+        entry.profile.intro = Some("첫 줄\n둘째 줄".into());
+        assert!(profile(&entry).ends_with("updated_at   -\nintro\n첫 줄\n둘째 줄\n"));
     }
 
     #[test]

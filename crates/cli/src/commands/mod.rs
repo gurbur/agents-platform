@@ -10,8 +10,12 @@ pub mod history;
 pub mod identity;
 pub mod inbox;
 pub mod message;
+pub mod profile;
 pub mod receiver;
 pub mod send;
+
+use std::io::Read;
+use std::path::Path;
 
 use crate::args::Command;
 use crate::client::{ApiClient, Decoded};
@@ -49,6 +53,7 @@ pub async fn run(command: Command, context: &Context) -> Result<(), CliError> {
         Command::Message(command) => message::run(command, context).await,
         Command::Delivery(args) => delivery::run(args, context).await,
         Command::Identity(command) => identity::run(command, context).await,
+        Command::Profile(command) => profile::run(command, context).await,
         Command::Health => health::run(context).await,
     }
 }
@@ -57,4 +62,25 @@ pub async fn run(command: Command, context: &Context) -> Result<(), CliError> {
 /// characters, so it needs no percent-encoding.
 fn agent_path(agent_id: &platform_wire::AgentId, suffix: &str) -> String {
     format!("/v1/agents/{agent_id}{suffix}")
+}
+
+/// File argument value that means standard input.
+const STDIN_PATH: &str = "-";
+
+/// Reads `path` (or stdin for `-`) as UTF-8, byte for byte (not trimmed).
+/// `what` names the content in error messages, e.g. "body".
+fn read_text(path: &Path, what: &str) -> Result<String, CliError> {
+    let (bytes, source) = if path == Path::new(STDIN_PATH) {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut bytes)
+            .map_err(|err| CliError::io(format!("cannot read the {what} from stdin"), err))?;
+        (bytes, "stdin".to_owned())
+    } else {
+        let bytes = std::fs::read(path)
+            .map_err(|err| CliError::io(format!("cannot read {}", path.display()), err))?;
+        (bytes, path.display().to_string())
+    };
+    String::from_utf8(bytes)
+        .map_err(|_| CliError::Usage(format!("the {what} from {source} is not valid UTF-8")))
 }

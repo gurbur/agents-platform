@@ -5,7 +5,7 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{Api, Fixture, OWNER_TOKEN, RunningServer};
+use common::{Api, Fixture, OWNER_TOKEN, RunningServer, default_name};
 use platformd::api::{MAX_RECEIVER_URL_LEN, MAX_WIRE_BODY_BYTES};
 use platformd::auth::credential::hash_api_key;
 use platformd::store::Store;
@@ -13,6 +13,9 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 const STORE_JOIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The five keys every `profile` object carries (`IF-WIRE-001`).
+const PROFILE_KEYS: [&str; 5] = ["gender_form", "age_band", "role", "intro", "updated_at"];
 
 fn keys(value: &Value) -> BTreeSet<&str> {
     value
@@ -64,9 +67,11 @@ async fn registration_returns_one_time_credentials_and_joins_all() {
         keys(&agent.body),
         set(&[
             "agent_id",
+            "name",
             "joined_all",
             "receiver_url",
             "route_version",
+            "profile",
             "agent_api_key",
             "receiver_secret"
         ])
@@ -116,8 +121,12 @@ async fn directory_never_contains_credentials() {
     let agent_items = agent_view.body["items"].as_array().unwrap();
     assert_eq!(agent_items.len(), 2);
     for item in agent_items {
-        assert_eq!(keys(item), set(&["agent_id", "joined_all"]));
+        assert_eq!(
+            keys(item),
+            set(&["agent_id", "name", "joined_all", "profile"])
+        );
         assert_eq!(item["joined_all"], true);
+        assert_eq!(keys(&item["profile"]), set(&PROFILE_KEYS));
     }
 
     let owner_items = owner_view.body["items"].as_array().unwrap();
@@ -126,7 +135,9 @@ async fn directory_never_contains_credentials() {
             keys(item),
             set(&[
                 "agent_id",
+                "name",
                 "joined_all",
+                "profile",
                 "receiver_url",
                 "route_version",
                 "created_at",
@@ -134,6 +145,16 @@ async fn directory_never_contains_credentials() {
             ])
         );
         assert_eq!(keys(&item["delivery"]), set(&["state"]));
+        assert_eq!(keys(&item["profile"]), set(&PROFILE_KEYS));
+    }
+    for (reply, agent_id) in [(&owner_view, "agent-a"), (&agent_view, "agent-b")] {
+        let item = reply.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["agent_id"] == agent_id)
+            .unwrap();
+        assert_eq!(item["name"], default_name(agent_id).as_str());
     }
     assert_eq!(owner_items[0]["agent_id"], "agent-a");
     assert_eq!(owner_items[0]["receiver_url"], Value::Null);
@@ -236,7 +257,11 @@ async fn duplicate_agent_id_is_409() {
     api.register("agent-a", None).await;
 
     let reply = api
-        .post("/v1/agents", OWNER_TOKEN, json!({"agent_id": "agent-a"}))
+        .post(
+            "/v1/agents",
+            OWNER_TOKEN,
+            json!({"agent_id": "agent-a", "name": "A"}),
+        )
         .await;
 
     reply.assert_error(409, "agent_id_taken");
@@ -252,7 +277,11 @@ async fn malformed_and_reserved_agent_ids_are_422() {
         "owner", "all", "Agent-A", "1agent", "-a", "agent.a", "", &too_long,
     ] {
         let reply = api
-            .post("/v1/agents", OWNER_TOKEN, json!({"agent_id": agent_id}))
+            .post(
+                "/v1/agents",
+                OWNER_TOKEN,
+                json!({"agent_id": agent_id, "name": "A"}),
+            )
             .await;
         reply.assert_error(422, "invalid_agent_id");
         assert_eq!(reply.error_field(), Some("agent_id"));
@@ -288,7 +317,7 @@ async fn invalid_receiver_urls_are_422_on_register_and_patch() {
             .post(
                 "/v1/agents",
                 OWNER_TOKEN,
-                json!({"agent_id": "agent-b", "receiver_url": url}),
+                json!({"agent_id": "agent-b", "name": "B", "receiver_url": url}),
             )
             .await;
         register.assert_error(422, "invalid_receiver_url");
@@ -378,7 +407,7 @@ async fn malformed_json_is_400_and_other_media_types_are_415() {
         "{",
         "{\"agent_id\": }",
         "not json",
-        "{\"agent_id\":\"a\"} trailing",
+        "{\"agent_id\":\"a\",\"name\":\"A\"} trailing",
     ] {
         let reply = api
             .send_raw(

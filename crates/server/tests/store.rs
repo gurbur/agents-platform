@@ -72,7 +72,11 @@ async fn migrations_are_idempotent_across_reopen() {
         })
         .await
         .unwrap();
-    assert_eq!(rows, vec![1], "exactly one schema_migrations row for v1");
+    assert_eq!(
+        rows,
+        (1..=LATEST_SCHEMA_VERSION).collect::<Vec<u32>>(),
+        "exactly one schema_migrations row per version"
+    );
     close(store, thread).await;
 }
 
@@ -96,6 +100,41 @@ async fn v1_creates_all_tables() {
         .unwrap();
 
     assert_eq!(tables, V1_TABLES);
+    close(store, thread).await;
+}
+
+#[tokio::test]
+async fn v2_adds_nullable_profile_columns_to_agents() {
+    let fx = Fixture::new();
+    let (store, thread) = open_migrated(&fx).await;
+
+    let columns: Vec<(String, String, bool)> = store
+        .run(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT name, type, \"notnull\" FROM pragma_table_info('agents')")?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap();
+
+    let profile: Vec<&(String, String, bool)> = columns.iter().skip(7).collect();
+    let expected = [
+        "name",
+        "gender_form",
+        "age_band",
+        "role",
+        "intro",
+        "profile_updated_at",
+    ];
+    assert_eq!(profile.len(), expected.len(), "{columns:?}");
+    for ((name, kind, not_null), want) in profile.into_iter().zip(expected) {
+        assert_eq!(name, want);
+        assert_eq!(kind, "TEXT");
+        assert!(!not_null, "{name} is nullable");
+    }
     close(store, thread).await;
 }
 

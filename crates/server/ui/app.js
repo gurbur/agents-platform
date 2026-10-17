@@ -353,11 +353,13 @@ function deliveryStateCell(value) {
 function renderDirectory() {
   renderRows(byId('directory-rows'), state.agents, [
     (agent) => agent.agent_id,
+    (agent) => agent.name,
     (agent) => agent.joined_all,
     (agent) => agent.receiver_url,
     (agent) => agent.route_version,
     (agent) => agent.created_at,
     (agent) => deliveryStateCell(agent.delivery ? agent.delivery.state : null),
+    (agent) => (agent.profile ? agent.profile.role : null),
   ]);
   const ids = agentIds();
   replaceOptions(byId('history-room'), ['all', ...dmRooms(ids)], (room) => room);

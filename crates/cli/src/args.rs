@@ -14,6 +14,7 @@ use crate::commands::history::HistoryArgs;
 use crate::commands::identity::IdentityCommand;
 use crate::commands::inbox::InboxArgs;
 use crate::commands::message::MessageCommand;
+use crate::commands::profile::ProfileCommand;
 use crate::commands::receiver::ReceiverCommand;
 use crate::commands::send::SendArgs;
 use crate::error::CliError;
@@ -47,6 +48,9 @@ pub enum Command {
     /// Agent registration, directory, owner inbox view and token rotation
     #[command(subcommand)]
     Agent(AgentCommand),
+    /// Directory profile: display name and self-declared introduction
+    #[command(subcommand)]
+    Profile(ProfileCommand),
     /// Receiver route of an agent
     #[command(subcommand)]
     Receiver(ReceiverCommand),

@@ -201,6 +201,11 @@ impl Reply {
     }
 }
 
+/// The display name [`Api::register`] gives `agent_id`.
+pub fn default_name(agent_id: &str) -> String {
+    format!("Agent {agent_id}")
+}
+
 /// The two one-time credentials and the registration body.
 pub struct Registered {
     pub body: serde_json::Value,
@@ -306,13 +311,24 @@ impl Api {
         reply.body
     }
 
-    /// Registers as the owner and asserts 201.
+    /// Registers as the owner with the name [`default_name`] and asserts 201.
     pub async fn register(&self, agent_id: &str, receiver_url: Option<&str>) -> Registered {
+        self.register_named(agent_id, &default_name(agent_id), receiver_url)
+            .await
+    }
+
+    /// Registers as the owner with `name` and asserts 201.
+    pub async fn register_named(
+        &self,
+        agent_id: &str,
+        name: &str,
+        receiver_url: Option<&str>,
+    ) -> Registered {
         let reply = self
             .post(
                 "/v1/agents",
                 OWNER_TOKEN,
-                serde_json::json!({"agent_id": agent_id, "receiver_url": receiver_url}),
+                serde_json::json!({"agent_id": agent_id, "name": name, "receiver_url": receiver_url}),
             )
             .await;
         assert_eq!(reply.status.as_u16(), 201, "body: {}", reply.body);

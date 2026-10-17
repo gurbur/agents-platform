@@ -5,7 +5,7 @@
 use clap::Subcommand;
 use platform_wire::{
     AgentEntry, AgentId, AgentList, InboxPage, OwnerAgentEntry, RegisterAgentRequest,
-    RegisterAgentResponse, RotateTokensResponse,
+    RegisterAgentResponse, RotateTokensResponse, validate_name,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -22,6 +22,10 @@ pub enum AgentCommand {
     /// Register an agent (owner) — POST /v1/agents
     Register {
         agent_id: AgentId,
+        /// Display name shown in the directory (1-32 characters; the owner
+        /// changes it later with `profile set-name`)
+        #[arg(long, value_name = "NAME")]
+        name: String,
         /// Receiver URL for wake notifications; omitted means none
         #[arg(long, value_name = "URL")]
         receiver_url: Option<String>,
@@ -60,8 +64,9 @@ pub async fn run(command: AgentCommand, context: &Context) -> Result<(), CliErro
     match command {
         AgentCommand::Register {
             agent_id,
+            name,
             receiver_url,
-        } => register(agent_id, receiver_url, context).await,
+        } => register(agent_id, name, receiver_url, context).await,
         AgentCommand::List => list(context).await,
         AgentCommand::Inbox { agent_id, page } => {
             let path = agent_path(&agent_id, "/inbox");
@@ -86,11 +91,15 @@ pub async fn run(command: AgentCommand, context: &Context) -> Result<(), CliErro
 
 async fn register(
     agent_id: AgentId,
+    name: String,
     receiver_url: Option<String>,
     context: &Context,
 ) -> Result<(), CliError> {
+    // The server trims; checking here only turns a sure 422 into exit 2.
+    validate_name(&name).map_err(|err| CliError::Usage(err.to_string()))?;
     let request = RegisterAgentRequest {
         agent_id: agent_id.to_string(),
+        name,
         receiver_url,
     };
     let response = context

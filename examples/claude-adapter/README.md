@@ -14,7 +14,7 @@ adapter는 agent를 등록하거나 receiver 경로를 바꾸지 않는다. 그�
 
 ```sh
 export PLATFORM_URL=http://<platform-host>:7340
-platform --token-file owner.token --json agent register demo-bot \
+platform --token-file owner.token --json agent register demo-bot --name "데모 봇" \
   --receiver-url http://<adapter-host>:8800/wake > demo-bot.reg.json
 # 이미 등록된 agent라면: platform --token-file owner.token receiver set demo-bot http://<adapter-host>:8800/wake
 ```

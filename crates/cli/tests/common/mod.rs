@@ -81,14 +81,24 @@ impl Platformd {
         run(&full, Some(stdin.to_vec())).await
     }
 
-    /// Registers through the CLI as the owner and returns the API key.
+    /// Registers through the CLI as the owner with the name
+    /// [`default_name`] and returns the API key.
     pub async fn register(&self, agent_id: &str) -> String {
+        let name = default_name(agent_id);
         let output = self
-            .cli(OWNER_TOKEN, &["agent", "register", agent_id])
+            .cli(
+                OWNER_TOKEN,
+                &["agent", "register", agent_id, "--name", &name],
+            )
             .await;
         let out = ok(&output);
         value(&out, "agent_api_key")
     }
+}
+
+/// The display name [`Platformd::register`] gives `agent_id`.
+pub fn default_name(agent_id: &str) -> String {
+    format!("Agent {agent_id}")
 }
 
 /// Runs `platform` without inheriting PLATFORM_* from the developer's shell.

@@ -15,7 +15,8 @@ platform-wire.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# raw_value: `profile show --json` prints a directory item byte for byte.
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 ulid.workspace = true

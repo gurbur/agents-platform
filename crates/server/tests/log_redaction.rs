@@ -6,6 +6,8 @@
 //! S4 receiver callback. Message bodies, history search text and the
 //! receiver URL beyond its host must not be logged either. Identity tokens
 //! and the signing seed never reach the logs (IDENTITY_ATTESTATION §11).
+//! Directory profile `name`, `role` and `intro` values are free text other
+//! agents read and stay out of the logs like message bodies (`IF-WIRE-006`).
 //!
 //! The subscriber is installed once and shared by every test in this binary;
 //! each test asserts only on the secrets it created.
@@ -174,6 +176,78 @@ async fn credentials_do_not_appear_in_logs() {
     assert!(
         !logs.contains("prs_"),
         "a receiver secret prefix was logged"
+    );
+}
+
+#[tokio::test]
+async fn profile_values_do_not_appear_in_logs() {
+    let captured = install_capture();
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config()).await;
+    let api = server.api();
+
+    let agent = api
+        .register_named("agent-p", "PROFILE-NAME-MARKER", None)
+        .await;
+    let path = "/v1/agents/agent-p/profile";
+    let declared = api
+        .put(
+            path,
+            &agent.api_key,
+            json!({"gender_form": "none", "role": "PROFILE-ROLE-MARKER", "intro": "PROFILE-INTRO-MARKER\nline two"}),
+        )
+        .await;
+    assert_eq!(declared.status.as_u16(), 200, "{}", declared.body);
+    let renamed = api
+        .put(path, OWNER_TOKEN, json!({"name": "PROFILE-NAME-MARKER-2"}))
+        .await;
+    assert_eq!(renamed.status.as_u16(), 200, "{}", renamed.body);
+    api.put(
+        path,
+        &agent.api_key,
+        json!({"name": "PROFILE-NAME-MARKER-3"}),
+    )
+    .await
+    .assert_error(403, "forbidden");
+    api.put(
+        path,
+        &agent.api_key,
+        json!({"role": "PROFILE-ROLE-MARKER\tinvalid"}),
+    )
+    .await
+    .assert_error(422, "invalid_field");
+    api.post(
+        "/v1/agents",
+        OWNER_TOKEN,
+        json!({"agent_id": "agent-q", "name": "PROFILE-NAME-MARKER\n"}),
+    )
+    .await;
+    api.post(
+        "/v1/agents",
+        OWNER_TOKEN,
+        json!({"agent_id": "agent-q", "name": "PROFILE-NAME-MARKER", "intro": "PROFILE-INTRO-MARKER"}),
+    )
+    .await
+    .assert_error(422, "unexpected_field");
+    api.get("/v1/agents", &agent.api_key).await;
+    api.get("/v1/agents", OWNER_TOKEN).await;
+    server.shutdown().await.unwrap();
+
+    let logs = captured.text();
+    let updates: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("agent profile updated") && line.contains("agent-p"))
+        .collect();
+    assert_eq!(updates.len(), 2, "{logs}");
+    assert!(
+        updates[0].contains("fields=gender_form,role,intro"),
+        "{}",
+        updates[0]
+    );
+    assert!(updates[1].contains("fields=name"), "{}", updates[1]);
+    assert!(
+        !logs.contains("PROFILE-"),
+        "a profile name, role or intro was logged"
     );
 }
 

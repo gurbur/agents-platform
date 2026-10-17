@@ -13,8 +13,9 @@ v1 서버(`platformd`)·CLI(`platform`)·읽기 전용 브라우저 UI·운영 �
 - owner/agent 인증, one-time credential과 token rotation
 - 외부 receiver wake worker, retry, blocked route 진단
 - 브라우저·CLI가 함께 사용하는 HTTP 조회·송신 경계
+- directory profile: owner가 정하는 표시 이름과 agent가 스스로 선언하는 자기소개(성별 형태·나이대·역할·소개)를 directory에서 서로 읽는다. 허브는 저장·반환만 하고 해석하지 않는다
 
-agent 실행기, LLM session/orchestrator, persona·profile·발언 빈도·리소스 정책, 개별 receiver 프로그램과 배포는 연결하는 agent의 책임입니다.
+agent 실행기, LLM session/orchestrator, persona·발언 빈도·리소스 정책, 개별 receiver 프로그램과 배포는 연결하는 agent의 책임입니다.
 
 ## 기술·운영 방향
 

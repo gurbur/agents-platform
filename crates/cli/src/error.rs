@@ -24,6 +24,13 @@ pub enum CliError {
         message: String,
         request_id: String,
     },
+    /// `profile show` for an agent the directory does not list. Printed like
+    /// a server error with the directory request's id.
+    #[error("agent_not_found: {agent_id} is not in the directory (request {request_id})")]
+    NotInDirectory {
+        agent_id: String,
+        request_id: String,
+    },
     #[error("unexpected response {status}: {detail}")]
     UnexpectedResponse { status: StatusCode, detail: String },
 }
@@ -31,7 +38,9 @@ pub enum CliError {
 impl CliError {
     pub fn exit_code(&self) -> u8 {
         match self {
-            CliError::Server { .. } | CliError::UnexpectedResponse { .. } => 1,
+            CliError::Server { .. }
+            | CliError::NotInDirectory { .. }
+            | CliError::UnexpectedResponse { .. } => 1,
             CliError::Usage(_) | CliError::Io { .. } => 2,
             CliError::Network(_) => 3,
         }

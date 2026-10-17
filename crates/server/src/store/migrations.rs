@@ -9,7 +9,7 @@ use super::StoreError;
 use crate::clock;
 
 /// Latest schema version this binary knows. `/healthz` reports it.
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
@@ -17,7 +17,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 const SYNCHRONOUS_FULL: i64 = 2;
 
 /// Versions start at 1 and are contiguous; each is applied in one transaction.
-const MIGRATIONS: &[(u32, &str)] = &[(1, V1_SCHEMA)];
+const MIGRATIONS: &[(u32, &str)] = &[(1, V1_SCHEMA), (2, V2_SCHEMA)];
 
 const BOOTSTRAP: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -95,6 +95,18 @@ CREATE TABLE notification_pending (
 );
 ";
 
+/// v2 (S9): the directory profile. Nullable columns only, so every v1 row
+/// stays as it is with `NULL` in each new column; the owner fills `name` by
+/// hand. No CHECK constraints: `platform-wire` is the one validation point.
+const V2_SCHEMA: &str = "
+ALTER TABLE agents ADD COLUMN name TEXT;
+ALTER TABLE agents ADD COLUMN gender_form TEXT;
+ALTER TABLE agents ADD COLUMN age_band TEXT;
+ALTER TABLE agents ADD COLUMN role TEXT;
+ALTER TABLE agents ADD COLUMN intro TEXT;
+ALTER TABLE agents ADD COLUMN profile_updated_at TEXT;
+";
+
 /// Opens the database file and applies and verifies the connection PRAGMAs.
 /// Refuses to continue unless the journal mode is WAL.
 pub fn open_connection(path: &Path) -> Result<Connection, StoreError> {
@@ -132,6 +144,14 @@ fn expect_pragma(conn: &Connection, name: &'static str, expected: i64) -> Result
 /// Applies every pending migration and returns the resulting schema version.
 /// Idempotent: an up-to-date database is left unchanged.
 pub fn apply(conn: &mut Connection) -> Result<u32, StoreError> {
+    apply_through(conn, LATEST_SCHEMA_VERSION)
+}
+
+/// Applies pending migrations up to and including `max_version` and returns
+/// the resulting schema version. [`apply`] calls it with the latest version;
+/// a lower bound builds an older schema, e.g. a v1 database for migration
+/// tests. A database newer than this binary is refused either way.
+pub fn apply_through(conn: &mut Connection, max_version: u32) -> Result<u32, StoreError> {
     conn.execute_batch(BOOTSTRAP)?;
     let found = current_version(conn)?;
     if found > LATEST_SCHEMA_VERSION {
@@ -141,7 +161,10 @@ pub fn apply(conn: &mut Connection) -> Result<u32, StoreError> {
         });
     }
 
-    for &(version, sql) in MIGRATIONS {
+    for &(version, sql) in MIGRATIONS
+        .iter()
+        .filter(|(version, _)| *version <= max_version)
+    {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // Re-read inside the write lock so a concurrent opener cannot double-apply.
         if current_version(&tx)? >= version {

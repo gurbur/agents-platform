@@ -202,9 +202,15 @@ check_health() {
   expect_json "$json" '.status == "ok" and (.schema_version | type == "number")' "healthz body: $json"
 }
 
+# Display name of a smoke agent: "smoke <ulid>". "smoke $agent" would be
+# 38 characters, over the 32-character name limit.
+smoke_name() {
+  printf 'smoke %s\n' "${1#smoke-}"
+}
+
 register() {
   local agent="$1" receiver="${2:-}"
-  local args=(agent register "$agent")
+  local args=(agent register "$agent" --name "$(smoke_name "$agent")")
   [[ -z "$receiver" ]] || args+=(--receiver-url "$receiver")
   local json
   json="$(cli "$owner_token_file" "${args[@]}")" || {
@@ -239,6 +245,53 @@ check_directory_hides_credentials() {
       fi
     done
   done
+}
+
+# Scenario 13: A declares its profile, B reads it from the directory, A
+# cannot rename itself, the owner can, null clears a field and an unknown
+# enum spelling is 422. Names and intros are never put in the notes. The
+# smoke agents keep their profile (there is no delete).
+check_directory_profile() {
+  local key_a key_b json rc=0
+  key_a="$(token_file "$agent_a")"
+  key_b="$(token_file "$agent_b")"
+  json="$(printf 'smoke intro\nsecond line\n' |
+    cli "$key_a" profile set "$agent_a" --gender-form none --role "smoke role" --intro-file -)" || {
+    note="profile set failed: $(cli_error)"
+    return 1
+  }
+  json="$(cli "$key_b" agent list)" || {
+    note="agent list as $agent_b failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" "any(.items[]; .agent_id == \"$agent_a\" and .name == \"$(smoke_name "$agent_a")\"
+      and .profile.gender_form == \"none\" and .profile.age_band == null and .profile.role == \"smoke role\"
+      and .profile.intro == \"smoke intro\\nsecond line\" and (.profile.updated_at | type == \"string\"))" \
+    "$agent_b does not see the declared name and profile of $agent_a" || return 1
+
+  cli "$key_a" profile set-name "$agent_a" "smoke self-rename" >/dev/null || rc=$?
+  if [[ "$rc" != 1 ]] || ! grep -q 'forbidden' "$workdir/cli.stderr"; then
+    note="agent set-name: exit $rc, expected 1 forbidden"
+    return 1
+  fi
+  json="$(cli "$owner_token_file" profile set-name "$agent_a" "smoke renamed")" || {
+    note="owner set-name failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" '.name == "smoke renamed"' "owner set-name did not rename" || return 1
+
+  json="$(cli "$key_a" profile set "$agent_a" --clear role)" || {
+    note="profile set --clear role failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" '.profile.role == null and .profile.gender_form == "none"' \
+    "--clear role did not clear only role" || return 1
+
+  api PUT "/v1/agents/$agent_a/profile" "$key_a" '{"gender_form":"Female"}'
+  expect_status 422 "unknown enum spelling" || return 1
+  expect_json "$http_body" '.error.code == "invalid_field" and .error.details.field == "gender_form"' \
+    "unknown enum: not invalid_field on gender_form" || return 1
+  note="B sees A, agent set-name 403, owner rename, clear, enum 422"
 }
 
 inbox_has() {
@@ -531,6 +584,7 @@ main() {
     die "registration failed; later scenarios need the agents"
   fi
   scenario "directory hides credentials" check_directory_hides_credentials
+  scenario "directory profile (13)" check_directory_profile
   scenario "all fanout (1)" check_all_fanout
   scenario "DM recipient-only (2)" check_dm
   scenario "unknown 404 / self DM 422 (2)" check_dm_errors

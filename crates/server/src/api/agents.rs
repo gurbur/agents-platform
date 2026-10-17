@@ -1,6 +1,6 @@
-//! Agent registration and directory, receiver route, `all` membership and
-//! token rotation (`IF-API-AGENTS`, `IF-API-RECEIVER`, `IF-API-MEMBERSHIP`,
-//! `IF-API-ROTATE`).
+//! Agent registration and directory, directory profile, receiver route,
+//! `all` membership and token rotation (`IF-API-AGENTS`, `IF-API-PROFILE`,
+//! `IF-API-RECEIVER`, `IF-API-MEMBERSHIP`, `IF-API-ROTATE`).
 //!
 //! Authentication and permission run in `FromRequestParts` extractors, so a
 //! caller without permission gets 401/403 before the body is examined.
@@ -13,8 +13,9 @@ use axum::routing::{patch, post, put};
 use axum::{Json, Router};
 use platform_wire::{
     AgentEntry, AgentId, AgentList, DeliverySummary, MembershipRequest, MembershipResponse,
-    OwnerAgentEntry, ReceiverResponse, RegisterAgentRequest, RegisterAgentResponse,
-    RotateTokensResponse, Seq, UpdateReceiverRequest, codes,
+    OwnerAgentEntry, ProfileFieldError, ProfileResponse, ReceiverResponse, RegisterAgentRequest,
+    RegisterAgentResponse, RotateTokensResponse, Seq, UpdateProfileRequest, UpdateReceiverRequest,
+    codes, validate_name,
 };
 use tracing::info;
 
@@ -29,6 +30,7 @@ use crate::store::queries::agents::{self as agent_queries, AgentRecord, NewAgent
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/agents", post(register).get(list))
+        .route("/v1/agents/{agent_id}/profile", put(update_profile))
         .route("/v1/agents/{agent_id}/receiver", patch(update_receiver))
         .route(
             "/v1/agents/{agent_id}/membership/all",
@@ -60,11 +62,30 @@ impl FromRequestParts<AppState> for ManagedAgent {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        let ManagedBy { agent_id, .. } = ManagedBy::from_request_parts(parts, state).await?;
+        Ok(ManagedAgent(agent_id))
+    }
+}
+
+/// Extractor: like [`ManagedAgent`], keeping the caller for handlers whose
+/// body permissions depend on it (the profile `name`).
+struct ManagedBy {
+    principal: Principal,
+    agent_id: AgentId,
+}
+
+impl FromRequestParts<AppState> for ManagedBy {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         let principal = Principal::from_request_parts(parts, state).await?;
         let AgentPath(raw) = AgentPath::from_request_parts(parts, state).await?;
         principal.require_owner_or_self(&raw)?;
         let agent_id = raw.parse().map_err(|_| ApiError::agent_not_found())?;
-        Ok(ManagedAgent(agent_id))
+        Ok(ManagedBy {
+            principal,
+            agent_id,
+        })
     }
 }
 
@@ -92,6 +113,7 @@ async fn register(
         ApiError::unprocessable(codes::INVALID_AGENT_ID, err.to_string())
             .with_detail("field", "agent_id")
     })?;
+    let name = validate_name(&request.name).map_err(profile_field_error)?;
     let receiver_url = request
         .receiver_url
         .as_deref()
@@ -101,6 +123,7 @@ async fn register(
     let credentials = IssuedCredentials::generate();
     let new_agent = NewAgent {
         agent_id,
+        name,
         receiver_url,
         api_key_hash: credentials.api_key_hash.clone(),
         receiver_secret: credentials.receiver_secret.clone(),
@@ -120,17 +143,20 @@ async fn register(
     info!(agent_id = %agent.agent_id, "agent registered");
     let body = RegisterAgentResponse {
         agent_id: agent.agent_id,
+        name: Some(agent.name),
         joined_all: agent.joined_all,
         receiver_url: agent.receiver_url,
         route_version: agent.route_version,
+        profile: agent.profile,
         agent_api_key: credentials.agent_api_key,
         receiver_secret: credentials.receiver_secret,
     };
     Ok((StatusCode::CREATED, Json(body)))
 }
 
-/// `GET /v1/agents`: the agent view lists ids and membership only; the owner
-/// view adds route and delivery fields (`IF-WIRE-001`).
+/// `GET /v1/agents`: both views carry `name` and `profile` so agents can
+/// address each other; the owner view adds route and delivery fields
+/// (`IF-WIRE-001`).
 async fn list(principal: Principal, State(state): State<AppState>) -> Result<Response, ApiError> {
     let records = state.store.run(|conn| agent_queries::list(conn)).await?;
     let response = match principal {
@@ -149,7 +175,9 @@ async fn list(principal: Principal, State(state): State<AppState>) -> Result<Res
 fn owner_entry(record: AgentRecord) -> OwnerAgentEntry {
     OwnerAgentEntry {
         agent_id: record.agent_id,
+        name: record.name,
         joined_all: record.joined_all,
+        profile: record.profile,
         receiver_url: record.receiver_url,
         route_version: record.route_version,
         created_at: record.created_at,
@@ -162,8 +190,53 @@ fn owner_entry(record: AgentRecord) -> OwnerAgentEntry {
 fn agent_entry(record: AgentRecord) -> AgentEntry {
     AgentEntry {
         agent_id: record.agent_id,
+        name: record.name,
         joined_all: record.joined_all,
+        profile: record.profile,
     }
+}
+
+/// 422 `invalid_field` naming the profile field. The message never echoes
+/// the value.
+fn profile_field_error(err: ProfileFieldError) -> ApiError {
+    ApiError::invalid_field(err.field(), err.to_string())
+}
+
+/// `PUT /v1/agents/{agent_id}/profile`: owner or the agent itself; `name`
+/// is owner only. Checks run in `IF-WIRE-006` order: the extractors give
+/// 401, 403 (another agent's path) and 404 (not a slug), `StrictJson` the
+/// body format, then the `name` permission, the value rules and finally
+/// whether the agent exists.
+async fn update_profile(
+    target: ManagedBy,
+    State(state): State<AppState>,
+    StrictJson(request): StrictJson<UpdateProfileRequest>,
+) -> Result<Json<ProfileResponse>, ApiError> {
+    if request.has_name() {
+        target.principal.require_owner()?;
+    }
+    let update = request.validate().map_err(profile_field_error)?;
+
+    let agent_id = target.agent_id;
+    let target_id = agent_id.clone();
+    let change = state
+        .store
+        .transaction(move |tx| {
+            agent_queries::update_profile(tx, &target_id, &update, &clock::now_rfc3339_ms())
+        })
+        .await?
+        .ok_or_else(ApiError::agent_not_found)?;
+
+    if !change.changed.is_empty() {
+        // Field names only: the values are free text other agents read.
+        let fields: Vec<&str> = change.changed.iter().map(|field| field.as_str()).collect();
+        info!(agent_id = %agent_id, fields = %fields.join(","), "agent profile updated");
+    }
+    Ok(Json(ProfileResponse {
+        agent_id,
+        name: change.record.name,
+        profile: change.record.profile,
+    }))
 }
 
 /// `PATCH /v1/agents/{agent_id}/receiver`: owner or the agent itself.
