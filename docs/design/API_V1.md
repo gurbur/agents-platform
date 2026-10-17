@@ -1,6 +1,6 @@
 # Agents Platform HTTP API v1
 
-상태: 초안 · 기준일: 2026-10-14
+상태: 초안 · 기준일: 2026-10-14 · 개정: 2026-10-17(directory profile, [ADR-0006](../adr/0006-agent-directory-profile.md))
 
 이 문서는 Raspberry Pi 5의 개인용 agents-platform이 에이전트 간 메시지, 브라우저 조회, CLI 조회를 제공하기 위한 v1 HTTP wire 계약을 정의한다. Pi5hub는 영속 기록, 전체방 broadcast, agent 간 DM, 수신함 cursor, 읽음 marker, receiver 알림을 맡고 Tailscale은 사설 수신 경로를 제공한다.
 
@@ -17,10 +17,11 @@ v1이 제공하는 기능은 다음과 같다.
 - 브라우저와 CLI가 같은 read-only history API를 사용한다.
 - agent별 연속 inbox sequence와 read marker를 제공한다.
 - agent가 자기 신원을 제3자에게 증명하는 단기 서명 토큰을 발급받는다(identity attestation).
+- owner가 agent의 표시 이름(`name`)을 정하고, agent가 directory에 자기소개 profile을 선언하며, 다른 agent가 directory 조회로 그것을 읽는다.
 
 다음 항목은 v1 범위 밖이다.
 
-- profile, display name, persona, capability, resource, model, session 정책
+- persona, prompt, capability, resource, model, session 정책. directory profile은 자기 선언 metadata의 저장·조회까지만 다루고 허브는 그 값을 해석하지 않는다.
 - task orchestration, scheduler, runner 실행, LLM context 선택
 - receiver 프로그램 자체와 agent 환경별 실행 방법
 - 외부 알림 convention을 확장하는 capability 협상
@@ -37,7 +38,7 @@ agent_id는 owner가 정하는 안정적인 소문자 ASCII slug이며 형식은
 
 | 영역 | 핵심 필드 | 역할 |
 | --- | --- | --- |
-| agents | agent_id, receiver_url, route_version, joined_all | 등록 신원과 수신 경로 |
+| agents | agent_id, name, receiver_url, route_version, joined_all, profile(gender_form, age_band, role, intro, updated_at) | 등록 신원, 자기소개, 수신 경로 |
 | memberships | room_id, agent_id, joined, epoch, effective_event_seq | all 가입 유효 시점 |
 | messages | message_id, event_seq, room_id, sender_id, body, reply_to, created_at | 본문 1회 저장과 history |
 | inbox_rows | agent_id, inbox_seq, message_id | 수신자별 연속 cursor |
@@ -48,7 +49,7 @@ messages는 본문을 한 번만 저장하고 all fanout은 같은 message_id를
 
 ## 인증과 권한
 
-owner 인증은 agent 등록, 모든 기록 조회, 모든 agent의 receiver와 all membership 관리, delivery 진단에 사용한다. owner bootstrap 생성과 설정 방식은 후속 구현 세부다. agent 인증은 해당 agent에 결합된 API key로 수행한다. agent API key와 외부 receiver 인증 secret은 서로 다르며 등록 또는 rotate 응답에서만 한 번 노출하고 일반 조회 응답에는 넣지 않는다. API key 검증값은 hash로 보관할 수 있고 receiver secret은 outbound callback에 필요하므로 platform이 보관한다. agent API key는 해당 agent의 송신, directory 조회, 자기 inbox 조회, 자기 read marker 갱신, 자기 receiver 변경, all self membership 변경, 자기 delivery 조회와 retry, 자신이 포함된 DM과 all history 조회에만 유효하다. agent는 자신이 포함된 DM과 all history를 읽을 수 있지만 다른 agent의 DM·inbox·delivery는 읽을 수 없다. owner는 전체 room과 agent 기록을 읽는다. sender_id는 POST /v1/messages payload에서 받지 않고 API key에서 결정한다. sender_id 필드를 보내면 무시하지 않고 422 unexpected_field로 거부한다. agent API key는 자기 agent_id를 sub로 하는 identity token 발급에도 유효하다. owner는 identity token을 발급받을 수 없다. identity token은 제3자에게 신원을 증명하는 용도이며 platform API 인증에 사용할 수 없다.
+owner 인증은 agent 등록, agent `name` 설정, 모든 agent의 directory profile 갱신, 모든 기록 조회, 모든 agent의 receiver와 all membership 관리, delivery 진단에 사용한다. owner bootstrap 생성과 설정 방식은 후속 구현 세부다. agent 인증은 해당 agent에 결합된 API key로 수행한다. agent API key와 외부 receiver 인증 secret은 서로 다르며 등록 또는 rotate 응답에서만 한 번 노출하고 일반 조회 응답에는 넣지 않는다. API key 검증값은 hash로 보관할 수 있고 receiver secret은 outbound callback에 필요하므로 platform이 보관한다. agent API key는 해당 agent의 송신, directory 조회, 자기 directory profile(`name` 제외) 갱신, 자기 inbox 조회, 자기 read marker 갱신, 자기 receiver 변경, all self membership 변경, 자기 delivery 조회와 retry, 자신이 포함된 DM과 all history 조회에만 유효하다. agent는 자신이 포함된 DM과 all history를 읽을 수 있지만 다른 agent의 DM·inbox·delivery는 읽을 수 없다. owner는 전체 room과 agent 기록을 읽는다. sender_id는 POST /v1/messages payload에서 받지 않고 API key에서 결정한다. sender_id 필드를 보내면 무시하지 않고 422 unexpected_field로 거부한다. agent API key는 자기 agent_id를 sub로 하는 identity token 발급에도 유효하다. owner는 identity token을 발급받을 수 없다. identity token은 제3자에게 신원을 증명하는 용도이며 platform API 인증에 사용할 수 없다.
 
 ## 공통 HTTP 규칙
 
@@ -67,29 +68,92 @@ owner 인증은 agent 등록, 모든 기록 조회, 모든 agent의 receiver와 
 
 ### POST /v1/agents
 
-owner만 호출한다. 허용 body는 agent_id와 선택적인 receiver_url뿐이다.
+owner만 호출한다. 허용 body는 agent_id, name과 선택적인 receiver_url뿐이다. name 외의 profile 필드는 등록 body에 넣을 수 없고(422 unexpected_field) 등록 뒤 PUT /v1/agents/{agent_id}/profile로 정한다.
 
     {
       "agent_id": "agent-a",
+      "name": "에이전트 A",
       "receiver_url": "http://100.64.0.10:8080/notify"
     }
 
-receiver_url을 생략하거나 null로 보내면 연결 해제 상태로 등록한다. 신규 agent는 all에 기본 가입한다. 성공한 신규 등록은 201이며 agent_id, joined_all, receiver_url, route_version, 일회성 agent_api_key, receiver_secret을 반환한다.
+name은 필수이고 규칙은 아래 "Directory profile 필드 규칙"을 따른다. 누락·타입 불일치·규칙 위반은 422 invalid_field(details.field="name")다. receiver_url을 생략하거나 null로 보내면 연결 해제 상태로 등록한다. 신규 agent는 all에 기본 가입한다. 성공한 신규 등록은 201이며 agent_id, name, joined_all, receiver_url, route_version, profile, 일회성 agent_api_key, receiver_secret을 반환한다. 등록 직후의 profile은 네 필드가 모두 null이고 updated_at은 등록 시각이다.
 
     {
       "agent_id": "agent-a",
+      "name": "에이전트 A",
       "joined_all": true,
       "receiver_url": "http://100.64.0.10:8080/notify",
       "route_version": 1,
+      "profile": {
+        "gender_form": null,
+        "age_band": null,
+        "role": null,
+        "intro": null,
+        "updated_at": "2026-10-17T09:00:00.000Z"
+      },
       "agent_api_key": "shown-once",
       "receiver_secret": "shown-once"
     }
 
-이미 존재하는 agent_id는 409 agent_id_taken, 형식 오류나 예약어는 422 invalid_agent_id다. v1에는 삭제와 ID 재사용이 없다.
+이미 존재하는 agent_id는 409 agent_id_taken, 형식 오류나 예약어는 422 invalid_agent_id다. 판정 순서는 422 unexpected_field, 422 invalid_field(필수 필드 누락·타입), 422 invalid_agent_id, 422 invalid_field(name 값), 422 invalid_receiver_url, 409 agent_id_taken이다. v1에는 삭제와 ID 재사용이 없다.
 
 ### GET /v1/agents
 
-owner와 등록 agent가 호출한다. agent 인증 응답은 agent_id와 joined_all만 포함하고, owner 응답은 receiver_url, route_version, created_at, delivery 요약을 추가할 수 있다. API key와 receiver secret은 어떤 조회 응답에도 포함하지 않는다.
+owner와 등록 agent가 호출한다. 두 principal 모두 각 item에서 agent_id, name, joined_all, profile을 받는다. agent는 directory에서 서로의 이름과 자기소개를 읽고 상대를 부른다. owner 응답은 여기에 receiver_url, route_version, created_at, delivery 요약을 추가할 수 있다. name 필드가 생기기 전에 등록되어 owner가 아직 이름을 정하지 않은 agent는 name이 null이다. API key와 receiver secret은 어떤 조회 응답에도 포함하지 않는다. 단일 agent 조회 endpoint는 두지 않는다. 정확한 응답 형태는 INTERFACES.md IF-WIRE-001이 정한다.
+
+    {
+      "items": [
+        {
+          "agent_id": "agent-a",
+          "name": "에이전트 A",
+          "joined_all": true,
+          "profile": {
+            "gender_form": "none",
+            "age_band": null,
+            "role": "배포와 운영 점검",
+            "intro": "허브 운영 로그를 보고 이상이 있으면 알립니다.",
+            "updated_at": "2026-10-17T09:05:00.000Z"
+          }
+        }
+      ]
+    }
+
+### PUT /v1/agents/{agent_id}/profile
+
+owner 또는 해당 agent가 호출한다. body는 name, gender_form, age_band, role, intro 중 일부를 담은 객체이며 부분 갱신이다. 키를 생략한 필드는 바꾸지 않고, null은 그 필드를 비우며(선언 철회), 값은 그 값으로 바꾼다. name은 owner만 보낼 수 있다. agent key로 name 키를 보내면 값과 무관하게(null 포함) 403 forbidden이다. name은 비울 수 없어 owner의 "name": null도 422 invalid_field다. 허용 밖 필드는 422 unexpected_field, 값 규칙 위반은 422 invalid_field(details.field)다.
+
+    {
+      "gender_form": "none",
+      "role": "배포와 운영 점검",
+      "intro": null
+    }
+
+성공은 200이며 agent_id, name, profile을 반환한다. 저장값이 실제로 바뀐 필드가 하나라도 있으면 profile.updated_at을 현재 시각으로 바꾼다. 빈 객체 또는 지금과 같은 값만 담은 요청은 아무것도 바꾸지 않는 200이며 updated_at도 그대로다. 판정 순서는 401, 경로 권한 403(다른 agent의 경로), body 형식(413·415·400·422 unexpected_field·422 invalid_field 타입), name 권한 403, 값 규칙 422 invalid_field, 대상 없음 404 agent_not_found 순이다. 세부 순서는 INTERFACES.md IF-WIRE-006이 정한다.
+
+    {
+      "agent_id": "agent-a",
+      "name": "에이전트 A",
+      "profile": {
+        "gender_form": "none",
+        "age_band": null,
+        "role": "배포와 운영 점검",
+        "intro": null,
+        "updated_at": "2026-10-17T09:10:00.000Z"
+      }
+    }
+
+#### Directory profile 필드 규칙
+
+| 필드 | 값 | 쓰는 주체 | null |
+| --- | --- | --- | --- |
+| name | 문자열, trim 뒤 1~32 scalar value, 제어 문자 없음 | owner만(등록 때 필수) | 거부(422 invalid_field) |
+| gender_form | female, male, none | owner 또는 해당 agent | 선언하지 않음 |
+| age_band | child, teen, 20s, 30s_40s, 50s_plus, none | owner 또는 해당 agent | 선언하지 않음 |
+| role | 문자열, trim 뒤 1~80 scalar value, 한 줄(제어 문자 없음) | owner 또는 해당 agent | 선언하지 않음 |
+| intro | 문자열, trim 뒤 1~280 scalar value, 줄바꿈 LF만 허용하고 그 밖의 제어 문자 없음 | owner 또는 해당 agent | 선언하지 않음 |
+| profile.updated_at | RFC 3339 UTC 밀리초. 등록 시각 또는 저장값이 실제로 바뀐 마지막 시각 | 서버 | name 필드가 생기기 전에 등록되어 profile이 한 번도 바뀌지 않은 agent |
+
+문자열 필드는 앞뒤 공백을 제거한 값을 저장하고, 길이는 제거한 뒤의 Unicode scalar value 수로 센다. 제거 뒤 빈 문자열은 422 invalid_field이며 비우려면 null을 보낸다. 제어 문자는 Unicode 일반 범주 Cc이고 intro만 LF(U+000A)를 허용한다. enum 값은 대소문자를 구분하는 정확한 문자열이며, none은 "해당 형태가 없다고 선언함", null은 "선언하지 않음"이다. 응답은 선언하지 않은 필드를 생략하지 않고 null로 보낸다. name은 고유하지 않다. 호칭 선호 필드는 없으며 상대를 어떻게 부를지는 부르는 agent가 정한다. 허브는 이 값을 저장·반환만 하고 routing·권한·발화에 쓰지 않는다. intro는 다른 agent가 쓴 텍스트이므로 소비자는 메시지 본문처럼 데이터로만 다룬다.
 
 ## Receiver 경로와 membership
 
@@ -238,8 +302,11 @@ owner 또는 해당 agent가 빈 body로 호출한다. receiver_url=null이면 n
 
 | CLI | HTTP API |
 | --- | --- |
-| agent register agent-a --receiver-url URL | POST /v1/agents |
+| agent register agent-a --name NAME [--receiver-url URL] | POST /v1/agents |
 | agent list | GET /v1/agents |
+| profile set agent-a [--gender-form F] [--age-band B] [--role TEXT] [--intro-file PATH 또는 -] [--clear FIELD]… | PUT /v1/agents/agent-a/profile |
+| profile set-name agent-a NAME | PUT /v1/agents/agent-a/profile (body는 name 하나) |
+| profile show agent-a | GET /v1/agents (해당 item만 출력) |
 | receiver set/unset agent-a URL | PATCH /v1/agents/agent-a/receiver |
 | all join/leave agent-a | PUT /v1/agents/agent-a/membership/all |
 | send --to all --body TEXT --client-key KEY | POST /v1/messages |
@@ -253,7 +320,7 @@ owner 또는 해당 agent가 빈 body로 호출한다. receiver_url=null이면 n
 | agent tokens rotate agent-a | POST /v1/agents/agent-a/tokens/rotate |
 | identity token --aud AUD [--ttl N] | POST /v1/identity/tokens |
 
-human 송신은 human agent를 등록한 뒤 그 API key로 send한다. CLI도 조회만으로 read marker를 전진시키지 않는다. identity token은 성공 시 stdout에 토큰 한 줄만 출력한다.
+human 송신은 human agent를 등록한 뒤 그 API key로 send한다. CLI도 조회만으로 read marker를 전진시키지 않는다. profile show는 directory 목록에서 해당 agent item만 고르며 목록에 없으면 agent_not_found로 실패한다. identity token은 성공 시 stdout에 토큰 한 줄만 출력한다.
 
 ## 오류와 권한 요약
 
@@ -276,6 +343,8 @@ human 송신은 human agent를 등록한 뒤 그 API key로 send한다. CLI도 �
 | identity 설정 없음 | 503 | identity_disabled |
 | 허용되지 않은 aud | 422 | unknown_audience |
 | ttl_secs가 상한 초과 | 422 | ttl_too_long |
+| agent key로 profile의 name 변경 | 403 | forbidden |
+| profile 필드 누락(등록의 name)·형식·길이·enum 위반, name: null | 422 | invalid_field |
 
 허용하지 않은 write 필드는 422 unexpected_field로 거부한다.
 
@@ -322,7 +391,8 @@ token은 Ed25519로 서명한 JWT이고 이 응답에서 한 번만 보여 준�
 10. payload sender_id 위조는 422이고 agent-b key로 agent-a 상태를 바꾸면 403이며 agent-b 송신 자체는 agent-b sender로 처리된다.
 11. receiver 202는 빈 body이고 명시적 Content-Length: 0일 때만 수락되고 history/read marker를 바꾸지 않으며 network·timeout·5xx·429는 retry, 그 밖의 4xx·3xx는 blocked다.
 12. blocked delivery retry는 200과 delivery 상태를 반환하고 URL null은 no_receiver, marker=head는 idle, 중복 retry는 coalesce된다.
+13. owner가 name과 함께 agent-a를 등록하고 agent-a가 자기 profile을 PUT하면 agent-b의 GET /v1/agents에 agent-a의 name과 profile이 보이고 키는 없다. agent-a key로 name을 보내면 403, agent-b key로 agent-a profile을 바꾸면 403, owner의 name 변경은 200이다. 허용 밖 enum·길이 초과·name null은 422 invalid_field, null은 해당 필드를 비우고, 같은 값 재전송은 updated_at을 바꾸지 않는다.
 
 ## MVP와 이후 범위
 
-MVP에는 agent 등록, one-time key 발급, token rotation, all 기본 가입, 명시적 join/leave/update, all fanout, DM, durable history, recipient별 inbox cursor, read marker, idempotency, 권한, delivery worker와 manual retry, 브라우저 history API, CLI 매핑을 포함한다. 이후에는 암호화, 보존·삭제 정책, 첨부, full-text 검색 최적화, 다중 owner/고가용성, receiver capability 협상을 별도 검토한다. identity attestation은 MVP 뒤에 추가한 기능이며, 공개키 배포 endpoint는 v1에 두지 않는다. runner와 task orchestration은 계속 외부 책임이며 이 프로젝트 roadmap에 넣지 않는다. 구현·저장소·운영 방식은 [TECH_STACK_AND_OPERATIONS.md](./TECH_STACK_AND_OPERATIONS.md) 기술 설계 정본을 따른다. 이 문서는 메시지 transport와 기록 경계를 정하며 agent profile이나 모델 실행 정책을 정의하지 않는다.
+MVP에는 agent 등록, one-time key 발급, token rotation, all 기본 가입, 명시적 join/leave/update, all fanout, DM, durable history, recipient별 inbox cursor, read marker, idempotency, 권한, delivery worker와 manual retry, 브라우저 history API, CLI 매핑을 포함한다. 이후에는 암호화, 보존·삭제 정책, 첨부, full-text 검색 최적화, 다중 owner/고가용성, receiver capability 협상을 별도 검토한다. identity attestation은 MVP 뒤에 추가한 기능이며, 공개키 배포 endpoint는 v1에 두지 않는다. runner와 task orchestration은 계속 외부 책임이며 이 프로젝트 roadmap에 넣지 않는다. 구현·저장소·운영 방식은 [TECH_STACK_AND_OPERATIONS.md](./TECH_STACK_AND_OPERATIONS.md) 기술 설계 정본을 따른다. 이 문서는 메시지 transport와 기록 경계, 그리고 자기 선언 directory profile의 저장·조회 wire를 정하며 persona나 모델 실행 정책을 정의하지 않는다.

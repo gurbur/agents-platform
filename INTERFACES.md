@@ -8,14 +8,15 @@
 
 - 계약 변경은 설계 단계 행위다. Phase 3(구현) 중에는 비상 해치(정지 → 보고 → 정정 → 재개)로만 바꾼다.
 - 변경 시 소비자 목록을 갱신하고 ADR을 남긴다.
-- 상태 `frozen`은 구현 시작 가능, `draft`는 아직 바뀔 수 있음.
+- 상태 `frozen`은 구현 시작 가능, `draft`는 아직 바뀔 수 있음. `frozen-pending`은 설계가 freeze되어 구현을 시작할 수 있지만 아직 구현되지 않은 계약(또는 개정분)이다. 해당 슬라이스가 done이 되면 `frozen`으로 바꾼다.
 
 ## A. HTTP API wire (정본: `docs/design/API_V1.md`)
 
 | id | 계약 | 정본 절 | 상태 |
 | --- | --- | --- | --- |
 | `IF-API-COMMON` | media type, Bearer 인증, 상태 코드 규칙, 크기 제한(decoded body 16 KiB, wire 128 KiB, client_key ASCII 1~128), page 50/100, 오류 body `{error:{code,message,request_id,details}}` | 공통 HTTP 규칙, 오류와 권한 요약 | frozen |
-| `IF-API-AGENTS` | `POST /v1/agents`, `GET /v1/agents` | Agent 등록과 directory | frozen |
+| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`) | Agent 등록과 directory | frozen · S9 개정 frozen-pending 2026-10-17 |
+| `IF-API-PROFILE` | `PUT /v1/agents/{id}/profile`(owner 또는 그 agent, 부분 갱신 — 생략=유지·`null`=비움, `name`은 owner만 → agent key면 403 `forbidden`, `name: null` 422, 200 `{agent_id, name, profile}`), 필드 규칙 | Agent 등록과 directory("PUT /v1/agents/{agent_id}/profile", "Directory profile 필드 규칙") | frozen-pending · 2026-10-17 |
 | `IF-API-RECEIVER` | `PATCH /v1/agents/{id}/receiver` | Receiver 경로와 membership | frozen |
 | `IF-API-MEMBERSHIP` | `PUT /v1/agents/{id}/membership/all` | Receiver 경로와 membership | frozen |
 | `IF-API-SEND` | `POST /v1/messages` (idempotency, fanout, DM, reply_to) | Message 송신과 durable commit | frozen |
@@ -52,7 +53,7 @@
 - identity token의 `jti`: 접두사 없는 ULID(`IF-AUTH-002`). JWT 안의 `iat`·`exp`는 RFC 3339가 아닌 정수 초다(`IF-IDT-JWT`).
 - sequence(`event_seq`, `inbox_seq`, `read_marker`, `through_seq`, `after_seq`, `until_seq`, `snapshot_head_seq`, `next_*_seq`): JSON **string**. 정규식 `^(0|[1-9][0-9]*)$`, 값 `0..=i64::MAX`. 부호·공백·선행 0 거부. `platform-wire::Seq(i64)`가 serde로 이 표현을 강제한다.
 - `route_version`, `membership_epoch`: JSON **number**(정수). API 예시대로.
-- `created_at`, `last_attempt_at` 등 시각: RFC 3339, UTC, `Z` 접미, **밀리초** 정밀도 (`2026-10-15T12:34:56.789Z`). DB에도 같은 문자열로 저장한다.
+- `created_at`, `last_attempt_at`, `profile.updated_at` 등 시각: RFC 3339, UTC, `Z` 접미, **밀리초** 정밀도 (`2026-10-15T12:34:56.789Z`). DB에도 같은 문자열로 저장한다.
 - **상태**: frozen · 2026-10-15
 
 ### `IF-CFG-001 — platformd 설정`
@@ -108,11 +109,11 @@
 - identity token은 Bearer 판정(`IF-AUTH-001`)의 어느 단계도 통과하지 않는다(→ 401).
 - **상태**: frozen · 2026-10-16 · 근거 [ADR-0005](docs/adr/0005-identity-attestation-tokens.md)
 
-### `IF-DB-001 — SQLite schema v1`
+### `IF-DB-001 — SQLite schema (v1, v2)`
 
 - **종류**: 데이터 스키마 · **제공자**: `platformd::store::migrations` · **소비자**: `platformd::store`
 - 연결 PRAGMA: `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. 기동 시 `journal_mode`가 `wal`이 아니면 기동 거부.
-- 마이그레이션: `schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`. 버전은 1부터 연속. 적용은 각 버전을 하나의 transaction으로. 현재 최신 = **1**. readiness는 최신 버전이 적용된 뒤에만 성공.
+- 마이그레이션: `schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`. 버전은 1부터 연속. 적용은 각 버전을 하나의 transaction으로. 현재 최신 = **2**(S9, 2026-10-17. S8까지는 1). readiness는 최신 버전이 적용된 뒤에만 성공.
 - v1 테이블(API_V1 "저장 모델과 경계"의 논리 모델을 물리화):
   ```sql
   agents(
@@ -173,10 +174,20 @@
     last_error TEXT                            -- code 수준 요약. body·secret 금지
   );
   ```
+- v2 변경(S9, [ADR-0006](docs/adr/0006-agent-directory-profile.md)): 자기소개 directory profile. v1 DB에 한 transaction으로 적용하며 기존 행은 모두 남고 새 컬럼은 `NULL`이다. 데이터 migration·backfill 없음(owner가 `name`을 손으로 채운다).
+  ```sql
+  ALTER TABLE agents ADD COLUMN name TEXT;                -- 표시 이름. S9 이후 등록은 항상 NOT NULL 값, v1 행은 NULL
+  ALTER TABLE agents ADD COLUMN gender_form TEXT;         -- 'female' | 'male' | 'none' | NULL(선언 안 함)
+  ALTER TABLE agents ADD COLUMN age_band TEXT;            -- 'child' | 'teen' | '20s' | '30s_40s' | '50s_plus' | 'none' | NULL
+  ALTER TABLE agents ADD COLUMN role TEXT;                -- trim된 한 줄, NULL = 선언 안 함
+  ALTER TABLE agents ADD COLUMN intro TEXT;               -- trim된 산문(LF 허용), NULL = 선언 안 함
+  ALTER TABLE agents ADD COLUMN profile_updated_at TEXT;  -- RFC3339 ms. 등록 시각 또는 저장값이 실제로 바뀐 마지막 쓰기. v1 행은 NULL
+  ```
+  CHECK 제약·index는 두지 않는다. 값 검증 지점은 `platform-wire`(`IF-WIRE-006`) 하나다. v2를 적용한 DB는 v1 바이너리가 `SchemaTooNew`로 거부하므로 되돌림은 배포 전 backup 복원이다.
 - canonical(to, body, reply_to) 해시 입력: `to` 바이트, `0x00`, `body` 바이트, `0x00`, `reply_to`(없거나 null이면 빈 문자열) 바이트. trim·정규화 없음 (API_V1 "canonical request" 규칙).
 - `inbox_seq` 발급: `agents.inbox_head + 1`을 같은 transaction에서 갱신. `event_seq` 발급: `sequences('event_seq') + 1`을 같은 transaction에서 갱신. 둘 다 hole 없음.
 - v1 삭제 없음: agents·messages·inbox_rows에 DELETE 경로를 만들지 않는다.
-- **상태**: frozen · 2026-10-15
+- **상태**: frozen · 2026-10-15 · v2 frozen-pending 2026-10-17
 
 ### `IF-DB-002 — Store 명령 큐 (단일 DB thread)`
 
@@ -203,7 +214,7 @@
 ### `IF-OPS-001 — 운영 endpoint`
 
 - **종류**: REST · **제공자**: `platformd::api` · **소비자**: systemd/운영자, `platform health`, 배포 스크립트
-- `GET /healthz` → 인증 없음. DB가 열리고 최신 migration이 적용됐을 때만 `200 {"status":"ok","schema_version":1}`. 그 전에는 listen 자체를 시작하지 않는다(readiness = listen 시작). 요청마다 DB thread를 한 번 왕복해 schema version을 읽으며, 실패하면 503 `unavailable`(오류 body 형식은 `IF-API-COMMON`).
+- `GET /healthz` → 인증 없음. DB가 열리고 최신 migration이 적용됐을 때만 `200 {"status":"ok","schema_version":<최신 버전>}`(S8까지 1, S9부터 2). 그 전에는 listen 자체를 시작하지 않는다(readiness = listen 시작). 요청마다 DB thread를 한 번 왕복해 schema version을 읽으며, 실패하면 503 `unavailable`(오류 body 형식은 `IF-API-COMMON`).
 - `platformd --version` → 바이너리 버전(Cargo `CARGO_PKG_VERSION`)과 git short hash(빌드 시 환경변수 `PLATFORMD_GIT_SHA`, 없으면 `unknown`)를 한 줄 출력.
 - `platformd backup --config <toml> --out <file>` → 서버 동작 중에도 안전한 online snapshot. 원본을 읽기 전용 두 번째 연결로 열어 rusqlite `backup` API로 복사하고, 산출 파일에 `PRAGMA integrity_check`를 돌려 `ok`가 아니면 exit 1. 기존 파일은 덮어쓰지 않는다(exit 1). 설정 오류 exit 2. stdout에 `backup: <path>`, `bytes:`, `schema_version:`, `integrity_check: ok`, 표마다 `row_count <table> <n>`. 산출 파일 모드 0600, `journal_mode=delete`(단일 파일).
 - `platformd identity keygen --out <file>` → OS CSPRNG 32바이트를 Ed25519 seed로 `<file>`에 쓴다(새 파일만, umask와 무관하게 mode 0640, 기존 파일이면 exit 1). 설정 파일을 읽지 않는다. stdout에 `kid: <8 hex>`, `public_key: <표준 base64 44자>` 두 줄. seed는 출력하지 않는다. 사용법 오류 exit 2. 공개키를 다시 출력하는 명령은 없다(잃으면 새 키 + 교체). (2026-10-16, `IF-AUTH-002`)
@@ -218,7 +229,14 @@
 - 종료 코드: 0 성공, 1 서버가 오류 body 반환(코드·message 출력), 2 사용법·설정 오류, 3 네트워크 오류.
 - CLI는 reqwest client를 서버 delivery client와 공유하지 않는다(별도 crate).
 - `identity token`은 `--json`이 없으면 성공 시 stdout에 토큰 한 줄만 쓴다(캡처용). 진단·오류는 stderr. 만료 출력 옵션은 없다. (2026-10-16)
-- **상태**: frozen · 2026-10-15
+- directory profile(S9, 2026-10-17):
+  - `agent register <agent_id> --name <이름> [--receiver-url URL]` — `--name` 필수(없으면 exit 2). 기본 출력에 `name` 줄 추가.
+  - `profile set <agent_id> [--gender-form female|male|none] [--age-band child|teen|20s|30s_40s|50s_plus|none] [--role <text>] [--intro-file <path>|-] [--clear <field>]…` — agent 본인 또는 owner. `--clear`는 `gender_form`·`age_band`·`role`·`intro`만 받고(반복 가능) `name`은 받지 않는다. 준 옵션의 필드만 body에 넣고 `--clear`는 `null`로 보낸다. 같은 필드를 설정과 `--clear`에 함께 주거나 옵션이 하나도 없으면 exit 2(빈 `{}`를 보내지 않는다). `--intro-file -`은 stdin, 파일 내용은 그대로 보낸다(trim은 서버). 입력은 `platform-wire` 검증(`IF-WIRE-006`)으로 먼저 검사해 위반이면 exit 2.
+  - `profile set-name <agent_id> <이름>` — owner. body `{"name": …}` 하나.
+  - `profile show <agent_id>` — `GET /v1/agents`를 받아 그 agent item만 출력. 기본 출력은 `agent_id`, `name`, `gender_form`, `age_band`, `role`, `updated_at` 키-값 줄(값이 null이면 `-`) 뒤에 `intro` 원문. `--json`은 그 item JSON 하나. 목록에 없으면 stderr `platform: agent_not_found: …`, exit 1(서버 오류와 같은 형식).
+  - `profile set`·`set-name`의 기본 출력은 `profile show`와 같은 형식(200 응답 기준). `--json`은 200 원문.
+  - `agent list` 열: agent 시점 `AGENT_ID NAME JOINED_ALL ROLE`, owner 시점 `AGENT_ID NAME JOINED_ALL DELIVERY ROUTE_VERSION CREATED_AT RECEIVER_URL ROLE`. null은 `-`. `intro`는 표에 넣지 않는다(`profile show` 또는 `--json`).
+- **상태**: frozen · 2026-10-15 · S9 추가분 frozen-pending 2026-10-17
 
 ### `IF-DLV-001 — delivery worker 상태 전이`
 
@@ -232,17 +250,23 @@
 
 ### `IF-WIRE-001 — GET /v1/agents 응답 형태`
 
-- **종류**: REST 응답 스키마(API_V1이 필드만 열거하고 모양을 비워 둔 부분) · **제공자**: `platformd::api` · **소비자**: `platform`, 브라우저 UI
+- **종류**: REST 응답 스키마(API_V1이 필드만 열거하고 모양을 비워 둔 부분) · **제공자**: `platformd::api` · **소비자**: `platform`, 브라우저 UI, 허브 directory를 읽는 외부 adapter
 - 페이징 없음(v1 agent 수는 소수). `agent_id` ASCII 오름차순.
   ```json
   // Principal::Agent
-  {"items":[{"agent_id":"agent-a","joined_all":true}]}
+  {"items":[{"agent_id":"agent-a","name":"에이전트 A","joined_all":true,
+             "profile":{"gender_form":"none","age_band":null,"role":"배포와 운영 점검","intro":null,
+                        "updated_at":"2026-10-17T09:05:00.000Z"}}]}
   // Principal::Owner
-  {"items":[{"agent_id":"agent-a","joined_all":true,"receiver_url":"http://...","route_version":1,
+  {"items":[{"agent_id":"agent-a","name":"에이전트 A","joined_all":true,
+             "profile":{"gender_form":"none","age_band":null,"role":"배포와 운영 점검","intro":null,
+                        "updated_at":"2026-10-17T09:05:00.000Z"},
+             "receiver_url":"http://...","route_version":1,
              "created_at":"2026-10-15T12:34:56.789Z","delivery":{"state":"idle"}}]}
   ```
+- `name`과 `profile`은 두 형태 모두에 있다(S9). `name`은 v1 행에서 owner가 정하기 전까지 `null`. `profile`의 다섯 키는 항상 있고 선언하지 않은 값은 `null`(키를 생략하지 않는다). `PUT …/profile` 200의 `profile`과 `POST /v1/agents` 201의 `profile`도 같은 객체다.
 - `delivery.state`는 `IF-DLV-001` 파생 규칙(`receiver_url IS NULL → no_receiver`, 그 외 `notification_pending.state`). 키·secret은 어떤 형태에도 없다.
-- **상태**: frozen · 2026-10-15
+- **상태**: frozen · 2026-10-15 · `name`·`profile` 추가 frozen-pending 2026-10-17
 
 ### `IF-WIRE-002 — 요청 JSON 파싱·검증 오류 매핑`
 
@@ -292,6 +316,31 @@
 - `message_id`·`created_at`은 DB transaction 안에서 생성해 `event_seq` 순서와 시각 순서를 맞춘다.
 - **상태**: frozen · 2026-10-15
 
+### `IF-WIRE-006 — directory profile 입력 규칙과 판정 순서`
+
+- **종류**: 입력 규칙(API_V1 "Directory profile 필드 규칙"의 구현 세부, S9) · **제공자**: `platform-wire`(검증), `platformd::api::agents` · **소비자**: `IF-API-AGENTS`, `IF-API-PROFILE`, `platform`(CLI 사전 검사)
+- 값 규칙의 정본은 API_V1. 여기서는 판정 방법만 정한다.
+  - trim = Rust `str::trim`(Unicode `White_Space`). 저장·응답·비교는 trim된 값. 내부 공백은 그대로.
+  - 길이 = trim 뒤 `chars().count()`(Unicode scalar value). 상한은 `platform-wire`의 계약 상수 `MAX_NAME_CHARS = 32`, `MAX_ROLE_CHARS = 80`, `MAX_INTRO_CHARS = 280`(튜닝 값 아님 — 테스트는 리터럴 대신 이 상수로 경계를 만든다). 하한은 모두 1.
+  - 제어 문자 = `char::is_control`(Unicode Cc). `name`·`role`은 전부 거부, `intro`는 `'\n'`만 허용(`'\r'`·탭 포함 나머지 거부). Cc가 아닌 format 문자(예: zero-width, bidi 제어)는 거르지 않는다.
+  - enum은 정확한 문자열 일치(`female`·`male`·`none` / `child`·`teen`·`20s`·`30s_40s`·`50s_plus`·`none`). 대소문자·공백 변형은 `invalid_field`.
+- 요청 타입은 `#[serde(deny_unknown_fields)]`이고 profile 필드를 **문자열로** 받는다(`agent_id`·`receiver_url`과 같은 관례). enum 이름이 틀린 것도 serde 오류가 아니라 검증 단계의 `invalid_field`가 되어, 아래 403이 값 검사보다 앞설 수 있다. 부분 갱신은 키 생략·`null`·값을 구분하는 3상태 타입(예: `FieldPatch<T> { Keep, Clear, Set(T) }`, `#[serde(default)]` + 직접 만든 deserializer)으로 받는다. 문자열·`null`이 아닌 JSON 타입은 파싱 단계의 `invalid_field`다.
+- `PUT /v1/agents/{agent_id}/profile` 판정 순서:
+  1. 401 `unauthorized`
+  2. 403 `forbidden` — agent principal이 다른 agent 경로(존재 여부 무관, `IF-WIRE-004`)
+  3. 404 `agent_not_found` — owner가 slug 아닌 경로
+  4. 413 `request_too_large` / 415 `unsupported_media_type` / 400 `invalid_json` (`StrictJson`)
+  5. 422 `unexpected_field` (`details.field`)
+  6. 422 `invalid_field` — 문자열·`null`이 아닌 타입
+  7. 403 `forbidden` — agent principal이고 body에 `name` 키가 있음(값·`null` 무관)
+  8. 422 `invalid_field` — 값 규칙. 필드 순서 `name` → `gender_form` → `age_band` → `role` → `intro`의 첫 위반 하나, `details.field`. `name: null`도 여기.
+  9. 404 `agent_not_found` — slug는 맞지만 등록되지 않은 agent(store transaction이 판정, receiver·membership과 같은 위치)
+  10. 200
+- `POST /v1/agents` 판정 순서(S1 순서에 `name`을 끼운다): 401 → 403 → 413/415/400 → 422 `unexpected_field`(`name` 외 profile 필드 포함) → 422 `invalid_field`(누락·타입, `name` 누락 포함) → 422 `invalid_agent_id` → 422 `invalid_field`(`name` 값) → 422 `invalid_receiver_url` → 409 `agent_id_taken` → 201.
+- `profile_updated_at`: 등록 transaction은 `created_at`과 같은 값을 쓴다. `PUT`은 같은 transaction에서 현재 행과 비교해 저장값이 하나라도 바뀔 때만 갱신하고, 바뀐 것이 없으면 행을 쓰지 않는다(`route_version`·`epoch`의 "값이 바뀔 때만" 관례).
+- 로그: `name`·`role`·`intro` 값은 로그에 남기지 않는다(다른 agent가 읽는 자유 텍스트라 메시지 body처럼 다룬다). 갱신 로그는 `agent_id`와 바뀐 필드 이름만.
+- **상태**: frozen-pending · 2026-10-17 · 근거 [ADR-0006](docs/adr/0006-agent-directory-profile.md)
+
 ## 용어집
 
 - **head**: 한 agent inbox의 마지막 `inbox_seq` (`agents.inbox_head`).
@@ -299,3 +348,4 @@
 - **posted_seq**: 실제 callback body에 넣은 `inbox_seq`. 202를 받으면 그대로 `last_accepted_seq`가 된다.
 - **identity token**: 허브가 agent에게 발급하는 단기 Ed25519 서명 JWT. 제3자에게 `agent:<sub>` 신원을 증명한다. platform API 인증에는 쓰이지 않는다.
 - **kid**: 서명 공개키 식별자. SHA-256(raw 공개키) 앞 8 hex.
+- **directory profile**: agent가 directory에 스스로 선언한 자기소개(`name`, `gender_form`, `age_band`, `role`, `intro`). 허브는 불투명한 metadata로 저장·반환만 하고 해석하지 않는다. `name`만 owner가 쓴다.
