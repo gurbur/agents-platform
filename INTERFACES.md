@@ -15,7 +15,7 @@
 | id | 계약 | 정본 절 | 상태 |
 | --- | --- | --- | --- |
 | `IF-API-COMMON` | media type, Bearer 인증, 상태 코드 규칙, 크기 제한(decoded body 16 KiB, wire 128 KiB, client_key ASCII 1~128), page 50/100, 오류 body `{error:{code,message,request_id,details}}` | 공통 HTTP 규칙, 오류와 권한 요약 | frozen |
-| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`·`avatar`), `DELETE /v1/agents/{agent_id}`(owner 전용, 204, `[owner] post_as`면 409 `agent_protected`, 없으면 404 `agent_not_found`, 메시지는 남김) | Agent 등록과 directory("DELETE /v1/agents/{agent_id}") | frozen · S9 개정 frozen 2026-10-17 · `avatar` 요약 frozen 2026-10-18(S11) · DELETE frozen-pending 2026-10-18(S12) |
+| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`·`avatar`), `DELETE /v1/agents/{agent_id}`(owner 전용, 204, `[owner] post_as`면 409 `agent_protected`, 없으면 404 `agent_not_found`, 메시지는 남김) | Agent 등록과 directory("DELETE /v1/agents/{agent_id}") | frozen · S9 개정 frozen 2026-10-17 · `avatar` 요약 frozen 2026-10-18(S11) · DELETE frozen 2026-10-18(S12) |
 | `IF-API-AVATAR` | `PUT /v1/agents/{id}/avatar`(owner 또는 그 agent, raw `image/png`·`image/jpeg` body ≤ 524288 B, magic 일치, 200 `{agent_id, avatar:{content_type,bytes,sha256,updated_at}}`, 413 `avatar_too_large`, 415 `unsupported_media_type`), `GET …/avatar`(모든 principal, bytes + `ETag: "<sha256>"` + `Cache-Control: private, max-age=300`, `If-None-Match` → 304, 없으면 404 `avatar_not_found`), `DELETE …/avatar`(owner 또는 그 agent, 204) | Agent 등록과 directory("Directory avatar") | frozen · 2026-10-18 |
 | `IF-API-OWNER` | `GET /v1/owner`(owner 전용, query 없음, 200 `{post_as:[agent_id…]}` 설정 순서) | Room 목록과 owner 게시("GET /v1/owner") | frozen · 2026-10-18 |
 | `IF-API-PROFILE` | `PUT /v1/agents/{id}/profile`(owner 또는 그 agent, 부분 갱신 — 생략=유지·`null`=비움, `name`은 owner만 → agent key면 403 `forbidden`, `name: null` 422, 200 `{agent_id, name, profile}`), 필드 규칙 | Agent 등록과 directory("PUT /v1/agents/{agent_id}/profile", "Directory profile 필드 규칙") | frozen · 2026-10-17 |
@@ -229,7 +229,7 @@
 - `inbox_seq` 발급: `agents.inbox_head + 1`을 같은 transaction에서 갱신. `event_seq` 발급: `sequences('event_seq') + 1`을 같은 transaction에서 갱신. 둘 다 hole 없음.
 - agent 삭제 cascade(S12, `IF-WIRE-009`): `DELETE /v1/agents/{agent_id}`의 store transaction 하나가 이 순서로 그 agent의 행을 지운다 — `agent_avatars`, `idempotency`(`sender_id`), `inbox_rows`(`agent_id`), `read_state`, `notification_pending`, `memberships`(`agent_id`), 마지막에 `agents`. foreign key가 가리키는 쪽을 늦게 지우는 순서다. `messages`(그 agent가 보낸 것과 그 agent의 inbox row가 가리키던 것 모두)와 `sequences`는 건드리지 않는다. 다른 agent의 행은 바뀌지 않는다(다른 agent의 inbox row가 그 agent의 메시지를 계속 가리킨다). 이 cascade와 avatar 삭제 말고는 agents·messages·inbox_rows에 DELETE 경로를 만들지 않으며, `messages`에는 어떤 DELETE 경로도 없다.
 - 같은 ID의 재등록은 일반 등록과 같다(`inbox_head = 0`, 새 `read_state`·`notification_pending`(`route_version = 1`)·`memberships` 행). `route_version`이 1부터 다시 시작하므로 delivery는 route_version만으로 옛 agent의 늦은 응답을 가르지 못한다 — `IF-DLV-001` "삭제·재등록"을 본다.
-- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17 · v3 frozen 2026-10-18(S11) · v4·삭제 cascade frozen-pending 2026-10-18(S12)
+- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17 · v3 frozen 2026-10-18(S11) · v4·삭제 cascade frozen 2026-10-18(S12)
 
 ### `IF-DB-002 — Store 명령 큐 (단일 DB thread)`
 
@@ -263,7 +263,7 @@
 - 브라우저 콘솔(S6에서 시작, S11에서 채팅 콘솔로 교체): 인증 없는 `GET /`(index.html), `GET /assets/app.js`, `/assets/app.css`, `/assets/favicon.svg`. 바이너리에 embed(`include_str!`), 빌드 도구 없음. 모든 파일에 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`. `img-src`의 `blob:`은 S11 추가분으로, 인증 header로 받은 avatar를 blob URL로 보이기 위한 것이다(외부 origin은 여전히 없음). 페이지는 owner token을 메모리에, 사용자가 고를 때만 `sessionStorage`에 두며 `localStorage`에는 화면 선호(보기 방식, 마지막 방, 방별 읽은 메시지 수)만 둔다. 서버 데이터는 text로만 DOM에 넣는다(HTML 해석 없음).
 - graceful shutdown: SIGTERM/SIGINT → listener 닫기 → 진행 중 요청 완료 대기(상한 10초) → Store drop·join → delivery in-flight HTTP는 기다리지 않음(pending state는 DB에 있음).
 - 콘솔의 agent 등록·삭제(S12): 등록 201 응답의 `agent_api_key`·`receiver_secret`은 대화상자 하나에 한 번만 보이고 그 대화상자를 닫으면 DOM과 메모리에서 지운다. 콘솔은 이 두 값을 storage·URL·로그(`console.*`)에 두지 않는다.
-- **상태**: frozen · 2026-10-15 · 콘솔·`img-src blob:`·`schema_version` 3 frozen 2026-10-18(S11) · `schema_version` 4·콘솔 등록·삭제 frozen-pending 2026-10-18(S12)
+- **상태**: frozen · 2026-10-15 · 콘솔·`img-src blob:`·`schema_version` 3 frozen 2026-10-18(S11) · `schema_version` 4·콘솔 등록·삭제 frozen 2026-10-18(S12)
 
 ### `IF-CLI-001 — platform CLI 공통 옵션`
 
@@ -289,7 +289,7 @@
   - `profile avatar clear <agent_id>` — owner 또는 그 agent. 204면 `avatar cleared: <agent_id>` 한 줄, `--json`은 `{"agent_id": …, "avatar": null}`.
 - agent 삭제(S12, 2026-10-18):
   - `agent delete <agent_id> [--yes]` — owner. `DELETE /v1/agents/{agent_id}`. `--yes`가 없으면 stderr에 확인 문구를 쓰고 stdin에서 한 줄을 읽어, 앞뒤 공백을 뗀 값이 `agent_id`와 같을 때만 요청한다. 다르거나 EOF면 요청하지 않고 exit 2(`not confirmed`). 204면 `deleted: <agent_id>` 한 줄, `--json`은 `{"agent_id": …, "deleted": true}`. 서버 오류(403·404·409)는 다른 명령과 같다(exit 1).
-- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18 · S11 추가분 frozen 2026-10-18 · S12 추가분 frozen-pending 2026-10-18
+- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18 · S11 추가분 frozen 2026-10-18 · S12 추가분 frozen 2026-10-18
 
 ### `IF-DLV-001 — delivery worker 상태 전이`
 
@@ -300,7 +300,7 @@
 - `last_error` 코드: `connect`, `timeout`, `network`, `http_NNN`(모든 상태를 그대로), `protocol_mismatch`, `internal`.
 - 삭제·재등록(S12): 시도 결과를 기록할 때(`apply_outcome`) 그 agent의 행이 없거나, 있더라도 `agents.receiver_secret`이 시도를 시작할 때의 secret과 다르면 결과를 버린다(`Applied::Ignored`, 행을 쓰지 않음, 오류 아님). 같은 ID로 다시 등록한 agent는 `route_version` 1과 새 secret으로 시작하므로 route_version 비교만으로는 옛 agent의 늦은 응답을 가르지 못한다. rotate도 secret을 바꾸지만 그때는 route_version이 이미 다르다.
 - 전이표 정본은 [S4 slice-spec](docs/slices/S4-delivery-worker.md) "전이" 절. 구현은 `platformd::delivery::transitions`(순수 함수) + `store::queries::delivery`.
-- **상태**: frozen · 2026-10-16 · 삭제·재등록 frozen-pending 2026-10-18(S12)
+- **상태**: frozen · 2026-10-16 · 삭제·재등록 frozen 2026-10-18(S12)
 
 ### `IF-WIRE-001 — GET /v1/agents 응답 형태`
 
@@ -474,7 +474,7 @@
 - 효과: commit 뒤 그 agent의 API key는 `IF-AUTH-001` 2단계에서 맞는 행이 없어 401이다. `GET /v1/agents`·`GET /v1/rooms`의 `all` members에서 빠진다. DM room·history·`message_count`는 그대로다. 그 agent 경로의 다른 endpoint(owner)는 404 `agent_not_found`, 그 agent에게 보내는 DM은 404 `unknown_recipient`, 그 agent가 member인 DM room 게시는 404 `unknown_room`이다. 진행 중인 알림 시도는 `IF-DLV-001` "삭제·재등록"대로 버린다. commit 뒤 `DeliverySignal`은 필요 없다.
 - 로그: `agent_id`와 지운 inbox row 수만(`agent deleted`). credential·body·profile 값 금지.
 - 재등록: `POST /v1/agents`는 지운 ID를 새 agent로 받는다(409 `agent_id_taken` 아님). 새 inbox의 첫 `inbox_seq`는 1이다.
-- **상태**: frozen-pending · 2026-10-18 · 근거 [ADR-0009](docs/adr/0009-agent-deletion.md)
+- **상태**: frozen · 2026-10-18(S12) · 근거 [ADR-0009](docs/adr/0009-agent-deletion.md)
 
 ## 용어집
 
