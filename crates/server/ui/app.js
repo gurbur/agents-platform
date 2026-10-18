@@ -32,6 +32,14 @@ const BOTTOM_SLACK_PX = 48;
 const MAX_POLL_PAGES = 5;
 const MAX_JUMP_PAGES = 10;
 const SNIPPET_CONCURRENCY = 4;
+// Swipe-left-to-reply on touch: the drag claims the gesture past SWIPE_CLAIM_PX
+// (horizontal over vertical), follows the finger up to SWIPE_MAX_PX, then
+// resists; releasing past SWIPE_REPLY_PX starts the reply.
+const SWIPE_CLAIM_PX = 10;
+const SWIPE_REPLY_PX = 60;
+const SWIPE_MAX_PX = 80;
+const SWIPE_RESIST = 0.3;
+const SWIPE_HAPTIC_MS = 10;
 // platform-wire AVATAR_MAX_BYTES; the hub has the final word.
 const AVATAR_MAX_BYTES = 512 * 1024;
 // A body this long or with this many lines starts folded.
@@ -825,6 +833,100 @@ async function jumpTo(id) {
   target.classList.remove('flash');
   void target.offsetWidth;
   target.classList.add('flash');
+}
+
+// ---------------------------------------------------------------- swipe to reply
+
+function startReply(id) {
+  S.replyTo = id;
+  renderComposer();
+  $('input').focus();
+}
+
+let swipe = null;
+
+function swipeOffset(dx) {
+  const pull = Math.max(0, -dx);
+  const travel = pull <= SWIPE_MAX_PX ? pull : SWIPE_MAX_PX + (pull - SWIPE_MAX_PX) * SWIPE_RESIST;
+  return -travel;
+}
+
+function onSwipeDown(event) {
+  if (event.pointerType !== 'touch' || !event.isPrimary || !S.me) return;
+  const row = event.target.closest('.msg, .b-row');
+  if (!row || !row.id.startsWith('m-')) return;
+  swipe = { row, id: row.id.slice(2), x: event.clientX, y: event.clientY, claimed: false, offset: 0, icon: null };
+}
+
+function claimSwipe(state) {
+  state.claimed = true;
+  state.row.classList.remove('swipe-back');
+  state.row.classList.add('swiping');
+  state.icon = h('span', { class: 'swipe-ico', 'aria-hidden': 'true' }, icon('reply'));
+  state.row.append(state.icon);
+}
+
+function onSwipeMove(event) {
+  if (!swipe || event.pointerType !== 'touch' || !event.isPrimary) return;
+  if (!swipe.row.isConnected) {
+    swipe = null;
+    return;
+  }
+  const dx = event.clientX - swipe.x;
+  const dy = event.clientY - swipe.y;
+  if (!swipe.claimed) {
+    // Until the move is clearly a leftward horizontal drag the browser keeps
+    // the gesture (scroll, long-press selection).
+    if (Math.abs(dy) > SWIPE_CLAIM_PX && Math.abs(dy) >= Math.abs(dx)) {
+      swipe = null;
+      return;
+    }
+    if (dx >= -SWIPE_CLAIM_PX || Math.abs(dx) <= Math.abs(dy)) return;
+    claimSwipe(swipe);
+  }
+  swipe.offset = swipeOffset(dx);
+  swipe.row.style.transform = `translateX(${swipe.offset}px)`;
+  // The icon stays put at the right edge while the row slides over it.
+  swipe.icon.style.transform = `translateX(${-swipe.offset}px)`;
+  swipe.icon.style.opacity = String(Math.min(1, -swipe.offset / SWIPE_REPLY_PX));
+}
+
+function settleSwipe(state) {
+  const { row } = state;
+  row.classList.remove('swiping');
+  row.classList.add('swipe-back');
+  row.style.transform = '';
+  if (state.icon) state.icon.remove();
+  row.addEventListener('transitionend', () => row.classList.remove('swipe-back'), { once: true });
+}
+
+// The finger lifting off a swiped quote or "더 보기" must not also click it.
+function swallowNextClick() {
+  const swallow = (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+  };
+  document.addEventListener('click', swallow, { capture: true, once: true });
+  window.setTimeout(() => document.removeEventListener('click', swallow, { capture: true }), 400);
+}
+
+function onSwipeEnd(event) {
+  if (!swipe || event.pointerType !== 'touch' || !event.isPrimary) return;
+  const state = swipe;
+  swipe = null;
+  if (!state.claimed) return;
+  settleSwipe(state);
+  swallowNextClick();
+  if (event.type !== 'pointerup' || -state.offset < SWIPE_REPLY_PX) return;
+  if (navigator.vibrate) navigator.vibrate(SWIPE_HAPTIC_MS);
+  startReply(state.id);
+}
+
+function bindSwipe() {
+  feed.addEventListener('pointerdown', onSwipeDown, { passive: true });
+  feed.addEventListener('pointermove', onSwipeMove, { passive: true });
+  feed.addEventListener('pointerup', onSwipeEnd, { passive: true });
+  feed.addEventListener('pointercancel', onSwipeEnd, { passive: true });
 }
 
 // ---------------------------------------------------------------- composer
@@ -1670,9 +1772,7 @@ function onClick(event) {
       jumpTo(target.dataset.k);
       break;
     case 'reply':
-      S.replyTo = target.dataset.k;
-      renderComposer();
-      $('input').focus();
+      startReply(target.dataset.k);
       break;
     case 'unreply':
       S.replyTo = null;
@@ -1807,6 +1907,7 @@ function init() {
       send();
     }
   });
+  bindSwipe();
   feed.addEventListener('scroll', () => {
     if (feed.scrollTop < OLDER_TRIGGER_PX) loadOlder();
   });

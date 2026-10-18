@@ -135,6 +135,15 @@ button,a,label,summary,input,textarea,select,[data-act],[role="tab"],[role="swit
 .actions button{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 8px;border:0;border-radius:4px;background:none;color:var(--tx-2);font-size:12.5px}
 .actions button:hover{background:var(--hover);color:var(--tx)}
 .actions .svg{width:15px;height:15px}
+/* Swipe left to reply (touch): the browser keeps vertical scroll and pinch
+   zoom, app.js moves the row horizontally. */
+.msg,.b-row{touch-action:pan-y pinch-zoom}
+.swiping{will-change:transform;user-select:none;-webkit-user-select:none}
+.swiping .actions{display:none !important}
+.swipe-back{transition:transform .18s ease-out}
+.b-row{position:relative}
+.swipe-ico{position:absolute;top:50%;right:14px;display:grid;place-items:center;width:28px;height:28px;margin-top:-14px;border-radius:50%;background:var(--bg-raise);color:var(--ac);opacity:0;pointer-events:none}
+.swipe-ico .svg{width:16px;height:16px}
 
 .composer{flex:none;padding:0 16px 16px}
 .strip{display:flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid var(--line);border-bottom:0;background:var(--bg-side);color:var(--tx-2);font-size:12.5px}

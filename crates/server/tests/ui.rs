@@ -148,6 +148,19 @@ fn phone_layout_keeps_text_controls_at_16px_without_disabling_zoom() {
 }
 
 #[test]
+fn swipe_to_reply_leaves_vertical_scroll_and_zoom_to_the_browser() {
+    assert!(APP_CSS.contains(".msg,.b-row{touch-action:pan-y pinch-zoom}"));
+    assert!(APP_JS.contains("event.pointerType !== 'touch'"));
+    for kind in ["pointerdown", "pointermove", "pointerup", "pointercancel"] {
+        let line = APP_JS
+            .lines()
+            .find(|line| line.contains(&format!("feed.addEventListener('{kind}'")))
+            .unwrap_or_else(|| panic!("no {kind} listener on the feed"));
+        assert!(line.contains("{ passive: true }"), "{line}");
+    }
+}
+
+#[test]
 fn no_file_loads_anything_from_another_origin() {
     let script = APP_JS.replace(SVG_NAMESPACE, "");
     for (name, source) in [
