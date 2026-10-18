@@ -81,7 +81,7 @@ async fn migrations_are_idempotent_across_reopen() {
 }
 
 #[tokio::test]
-async fn v1_creates_all_tables() {
+async fn migrations_create_all_tables() {
     let fx = Fixture::new();
     let (store, thread) = open_migrated(&fx).await;
 
@@ -99,7 +99,11 @@ async fn v1_creates_all_tables() {
         .await
         .unwrap();
 
-    assert_eq!(tables, V1_TABLES);
+    // v2 adds columns only; v3 adds `agent_avatars` (S11).
+    let mut expected: Vec<&str> = V1_TABLES.to_vec();
+    expected.push("agent_avatars");
+    expected.sort_unstable();
+    assert_eq!(tables, expected);
     close(store, thread).await;
 }
 

@@ -17,6 +17,7 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
+use super::avatar::{self, AvatarCommand};
 use super::{Context, agent_path, read_text};
 use crate::error::CliError;
 use crate::output;
@@ -34,6 +35,9 @@ pub enum ProfileCommand {
     },
     /// Show one agent's name and profile from the directory — GET /v1/agents
     Show { agent_id: AgentId },
+    /// Directory avatar: one PNG or JPEG per agent
+    #[command(subcommand)]
+    Avatar(AvatarCommand),
 }
 
 #[derive(Debug, Args)]
@@ -88,6 +92,7 @@ pub async fn run(command: ProfileCommand, context: &Context) -> Result<(), CliEr
             update(&agent_id, set_name_request(name), context).await
         }
         ProfileCommand::Show { agent_id } => show(&agent_id, context).await,
+        ProfileCommand::Avatar(command) => avatar::run(command, context).await,
     }
 }
 

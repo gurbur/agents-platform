@@ -100,6 +100,34 @@ impl ApiClient {
         execute(self.authorized(self.http.post(url))).await
     }
 
+    /// Authenticated `PUT` with a raw (non-JSON) body, e.g. an avatar image.
+    pub async fn put_bytes<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<Decoded<T>, CliError> {
+        let url = self.url(path, &Query::new())?;
+        let request = self
+            .authorized(self.http.put(url))
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body);
+        execute(request).await
+    }
+
+    /// Authenticated `GET` of a non-JSON body, kept as bytes with the
+    /// response headers.
+    pub async fn get_bytes(&self, path: &str) -> Result<RawResponse, CliError> {
+        let url = self.url(path, &Query::new())?;
+        execute_raw(self.authorized(self.http.get(url))).await
+    }
+
+    /// Authenticated `DELETE` without a body; a success has no body either.
+    pub async fn delete(&self, path: &str) -> Result<RawResponse, CliError> {
+        let url = self.url(path, &Query::new())?;
+        execute_raw(self.authorized(self.http.delete(url))).await
+    }
+
     /// Attaches the bearer credential to an authenticated `/v1` request.
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         request.bearer_auth(&self.token.0)
@@ -133,21 +161,36 @@ fn normalize_base(base_url: &str) -> Result<String, CliError> {
     Ok(trimmed.to_owned())
 }
 
+/// A successful response whose body is not JSON.
+pub struct RawResponse {
+    pub status: StatusCode,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: Vec<u8>,
+}
+
+impl RawResponse {
+    /// A header as text, empty when absent or not visible ASCII.
+    pub fn header(&self, name: &str) -> &str {
+        self.headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+    }
+}
+
 async fn execute<T: DeserializeOwned>(
     request: reqwest::RequestBuilder,
 ) -> Result<Decoded<T>, CliError> {
-    let response = request.send().await.map_err(CliError::Network)?;
-    let status = response.status();
-    let request_id = response
-        .headers()
+    let RawResponse {
+        status,
+        headers,
+        body: raw,
+    } = execute_raw(request).await?;
+    let request_id = headers
         .get(REQUEST_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_owned();
-    let raw = response.bytes().await.map_err(CliError::Network)?.to_vec();
-    if !status.is_success() {
-        return Err(server_error(status, &raw));
-    }
     let value = serde_json::from_slice(&raw).map_err(|err| CliError::UnexpectedResponse {
         status,
         detail: format!("cannot decode body: {err}"),
@@ -156,6 +199,22 @@ async fn execute<T: DeserializeOwned>(
         value,
         raw,
         request_id,
+    })
+}
+
+/// Sends `request`; a non-2xx status becomes the server's error.
+async fn execute_raw(request: reqwest::RequestBuilder) -> Result<RawResponse, CliError> {
+    let response = request.send().await.map_err(CliError::Network)?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.bytes().await.map_err(CliError::Network)?.to_vec();
+    if !status.is_success() {
+        return Err(server_error(status, &body));
+    }
+    Ok(RawResponse {
+        status,
+        headers,
+        body,
     })
 }
 

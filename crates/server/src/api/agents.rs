@@ -184,6 +184,7 @@ fn owner_entry(record: AgentRecord) -> OwnerAgentEntry {
         delivery: DeliverySummary {
             state: record.delivery_state,
         },
+        avatar: record.avatar,
     }
 }
 
@@ -193,6 +194,7 @@ fn agent_entry(record: AgentRecord) -> AgentEntry {
         name: record.name,
         joined_all: record.joined_all,
         profile: record.profile,
+        avatar: record.avatar,
     }
 }
 

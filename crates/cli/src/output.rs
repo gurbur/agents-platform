@@ -6,10 +6,11 @@ use std::fmt::Display;
 use std::io::Write;
 
 use platform_wire::{
-    AgentEntry, AgentProfile, DeliveryRetryResponse, DeliveryState, DeliveryStatus, HealthStatus,
-    HistoryCursor, HistoryPage, IdentityTokenResponse, InboxItem, InboxPage, MembershipResponse,
-    Message, MessageResponse, OwnerAgentEntry, ProfileResponse, ReadMarkerResponse,
-    ReceiverResponse, RegisterAgentResponse, RoomSummary, RotateTokensResponse, Seq,
+    AgentEntry, AgentProfile, AvatarResponse, DeliveryRetryResponse, DeliveryState, DeliveryStatus,
+    HealthStatus, HistoryCursor, HistoryPage, IdentityTokenResponse, InboxItem, InboxPage,
+    MembershipResponse, Message, MessageResponse, OwnerAgentEntry, ProfileResponse,
+    ReadMarkerResponse, ReceiverResponse, RegisterAgentResponse, RoomSummary, RotateTokensResponse,
+    Seq,
 };
 
 use crate::error::CliError;
@@ -255,6 +256,37 @@ pub fn profile(entry: &ProfileResponse) -> String {
     text.push_str(intro);
     text.push('\n');
     text
+}
+
+pub fn avatar(stored: &AvatarResponse) -> String {
+    key_values(&[
+        ("agent_id", stored.agent_id.to_string()),
+        ("content_type", stored.avatar.content_type.to_string()),
+        ("bytes", stored.avatar.bytes.to_string()),
+        ("sha256", stored.avatar.sha256.clone()),
+        ("updated_at", stored.avatar.updated_at.clone()),
+    ])
+}
+
+/// `profile avatar get`: what was saved and where.
+pub fn avatar_saved(saved: &SavedAvatar) -> String {
+    key_values(&[
+        ("agent_id", saved.agent_id.clone()),
+        ("content_type", saved.content_type.clone()),
+        ("bytes", saved.bytes.to_string()),
+        ("sha256", saved.sha256.clone()),
+        ("out", saved.out.clone()),
+    ])
+}
+
+/// The result of `profile avatar get`, also printed as JSON under `--json`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SavedAvatar {
+    pub agent_id: String,
+    pub content_type: String,
+    pub bytes: usize,
+    pub sha256: String,
+    pub out: String,
 }
 
 pub fn receiver(route: &ReceiverResponse) -> String {

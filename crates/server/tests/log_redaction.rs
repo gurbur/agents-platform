@@ -377,3 +377,50 @@ async fn room_post_bodies_do_not_appear_in_logs() {
         "startup logs the allowlist: {logs}"
     );
 }
+
+#[tokio::test]
+async fn avatar_bytes_do_not_appear_in_logs() {
+    let captured = install_capture();
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config()).await;
+    let api = server.api();
+    let agent = api.register("agent-a", None).await;
+
+    let marker = "AVATAR-BYTES-MARKER-do-not-log";
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(marker.as_bytes());
+    let path = "/v1/agents/agent-a/avatar";
+    for token in [agent.api_key.as_str(), OWNER_TOKEN] {
+        let reply = api
+            .send_bytes(
+                Method::PUT,
+                path,
+                Some(token),
+                &[("content-type", "image/png")],
+                Some(bytes.clone()),
+            )
+            .await;
+        assert_eq!(reply.status.as_u16(), 200);
+    }
+    api.send_bytes(Method::GET, path, Some(OWNER_TOKEN), &[], None)
+        .await;
+    // A rejected upload (magic mismatch) logs nothing of the body either.
+    api.send_bytes(
+        Method::PUT,
+        path,
+        Some(&agent.api_key),
+        &[("content-type", "image/jpeg")],
+        Some(bytes.clone()),
+    )
+    .await;
+    api.send_bytes(Method::DELETE, path, Some(&agent.api_key), &[], None)
+        .await;
+    server.shutdown().await.unwrap();
+
+    let logs = captured.text();
+    assert!(
+        !logs.contains("AVATAR-BYTES-MARKER"),
+        "avatar bytes were logged"
+    );
+    assert!(!logs.contains(&agent.api_key), "an API key was logged");
+}

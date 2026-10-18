@@ -219,6 +219,32 @@ impl Reply {
     }
 }
 
+/// Status, headers and the body bytes as received.
+pub struct RawReply {
+    pub status: reqwest::StatusCode,
+    pub headers: reqwest::header::HeaderMap,
+    pub bytes: Vec<u8>,
+}
+
+impl RawReply {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).and_then(|value| value.to_str().ok())
+    }
+
+    /// The body parsed as JSON; panics with the status when it is not.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::from_slice(&self.bytes)
+            .unwrap_or_else(|_| panic!("status {} without a JSON body", self.status))
+    }
+
+    /// Asserts an `IF-API-COMMON` error body with `status` and `code`.
+    pub fn assert_error(&self, status: u16, code: &str) {
+        let body = self.json();
+        assert_eq!(self.status.as_u16(), status, "body: {body}");
+        assert_eq!(body["error"]["code"], code, "body: {body}");
+    }
+}
+
 /// The display name [`Api::register`] gives `agent_id`.
 pub fn default_name(agent_id: &str) -> String {
     format!("Agent {agent_id}")
@@ -276,6 +302,37 @@ impl Api {
             status,
             headers,
             body,
+        }
+    }
+
+    /// Like [`Api::send_raw`] with extra request headers, keeping the
+    /// response body as bytes (for non-JSON bodies such as an avatar).
+    pub async fn send_bytes(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        token: Option<&str>,
+        headers: &[(&str, &str)],
+        body: Option<Vec<u8>>,
+    ) -> RawReply {
+        let mut request = self.client.request(method, format!("{}{path}", self.base));
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        if let Some(body) = body {
+            request = request.body(body);
+        }
+        let response = request.send().await.expect("request sent");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.bytes().await.expect("response body").to_vec();
+        RawReply {
+            status,
+            headers,
+            bytes,
         }
     }
 

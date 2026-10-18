@@ -69,6 +69,9 @@ pub mod codes {
     /// `POST /v1/rooms/{room_id}/messages` into a DM whose member is not
     /// registered (API_V1 "Room 목록과 owner 게시", `IF-WIRE-007`).
     pub const UNKNOWN_ROOM: &str = "unknown_room";
+    /// Directory avatar codes (API_V1 "Directory avatar", `IF-WIRE-008`).
+    pub const AVATAR_TOO_LARGE: &str = "avatar_too_large";
+    pub const AVATAR_NOT_FOUND: &str = "avatar_not_found";
     /// 503 from `GET /healthz` when the database round trip fails. Not listed
     /// in API_V1; chosen in S0 for the `IF-OPS-001` failure path.
     pub const UNAVAILABLE: &str = "unavailable";
