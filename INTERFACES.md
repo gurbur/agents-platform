@@ -15,9 +15,9 @@
 | id | 계약 | 정본 절 | 상태 |
 | --- | --- | --- | --- |
 | `IF-API-COMMON` | media type, Bearer 인증, 상태 코드 규칙, 크기 제한(decoded body 16 KiB, wire 128 KiB, client_key ASCII 1~128), page 50/100, 오류 body `{error:{code,message,request_id,details}}` | 공통 HTTP 규칙, 오류와 권한 요약 | frozen |
-| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`·`avatar`) | Agent 등록과 directory | frozen · S9 개정 frozen 2026-10-17 · `avatar` 요약 frozen-pending 2026-10-18(S11) |
-| `IF-API-AVATAR` | `PUT /v1/agents/{id}/avatar`(owner 또는 그 agent, raw `image/png`·`image/jpeg` body ≤ 524288 B, magic 일치, 200 `{agent_id, avatar:{content_type,bytes,sha256,updated_at}}`, 413 `avatar_too_large`, 415 `unsupported_media_type`), `GET …/avatar`(모든 principal, bytes + `ETag: "<sha256>"` + `Cache-Control: private, max-age=300`, `If-None-Match` → 304, 없으면 404 `avatar_not_found`), `DELETE …/avatar`(owner 또는 그 agent, 204) | Agent 등록과 directory("Directory avatar") | frozen-pending · 2026-10-18 |
-| `IF-API-OWNER` | `GET /v1/owner`(owner 전용, query 없음, 200 `{post_as:[agent_id…]}` 설정 순서) | Room 목록과 owner 게시("GET /v1/owner") | frozen-pending · 2026-10-18 |
+| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`·`avatar`) | Agent 등록과 directory | frozen · S9 개정 frozen 2026-10-17 · `avatar` 요약 frozen 2026-10-18(S11) |
+| `IF-API-AVATAR` | `PUT /v1/agents/{id}/avatar`(owner 또는 그 agent, raw `image/png`·`image/jpeg` body ≤ 524288 B, magic 일치, 200 `{agent_id, avatar:{content_type,bytes,sha256,updated_at}}`, 413 `avatar_too_large`, 415 `unsupported_media_type`), `GET …/avatar`(모든 principal, bytes + `ETag: "<sha256>"` + `Cache-Control: private, max-age=300`, `If-None-Match` → 304, 없으면 404 `avatar_not_found`), `DELETE …/avatar`(owner 또는 그 agent, 204) | Agent 등록과 directory("Directory avatar") | frozen · 2026-10-18 |
+| `IF-API-OWNER` | `GET /v1/owner`(owner 전용, query 없음, 200 `{post_as:[agent_id…]}` 설정 순서) | Room 목록과 owner 게시("GET /v1/owner") | frozen · 2026-10-18 |
 | `IF-API-PROFILE` | `PUT /v1/agents/{id}/profile`(owner 또는 그 agent, 부분 갱신 — 생략=유지·`null`=비움, `name`은 owner만 → agent key면 403 `forbidden`, `name: null` 422, 200 `{agent_id, name, profile}`), 필드 규칙 | Agent 등록과 directory("PUT /v1/agents/{agent_id}/profile", "Directory profile 필드 규칙") | frozen · 2026-10-17 |
 | `IF-API-RECEIVER` | `PATCH /v1/agents/{id}/receiver` | Receiver 경로와 membership | frozen |
 | `IF-API-MEMBERSHIP` | `PUT /v1/agents/{id}/membership/all` | Receiver 경로와 membership | frozen |
@@ -207,7 +207,7 @@
 - canonical(to, body, reply_to) 해시 입력: `to` 바이트, `0x00`, `body` 바이트, `0x00`, `reply_to`(없거나 null이면 빈 문자열) 바이트. trim·정규화 없음 (API_V1 "canonical request" 규칙).
 - `inbox_seq` 발급: `agents.inbox_head + 1`을 같은 transaction에서 갱신. `event_seq` 발급: `sequences('event_seq') + 1`을 같은 transaction에서 갱신. 둘 다 hole 없음.
 - v1 삭제 없음: agents·messages·inbox_rows에 DELETE 경로를 만들지 않는다.
-- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17 · v3 frozen-pending 2026-10-18(S11)
+- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17 · v3 frozen 2026-10-18(S11)
 
 ### `IF-DB-002 — Store 명령 큐 (단일 DB thread)`
 
@@ -240,7 +240,7 @@
 - `platformd identity keygen --out <file>` → OS CSPRNG 32바이트를 Ed25519 seed로 `<file>`에 쓴다(새 파일만, umask와 무관하게 mode 0640, 기존 파일이면 exit 1). 설정 파일을 읽지 않는다. stdout에 `kid: <8 hex>`, `public_key: <표준 base64 44자>` 두 줄. seed는 출력하지 않는다. 사용법 오류 exit 2. 공개키를 다시 출력하는 명령은 없다(잃으면 새 키 + 교체). (2026-10-16, `IF-AUTH-002`)
 - 브라우저 콘솔(S6에서 시작, S11에서 채팅 콘솔로 교체): 인증 없는 `GET /`(index.html), `GET /assets/app.js`, `/assets/app.css`, `/assets/favicon.svg`. 바이너리에 embed(`include_str!`), 빌드 도구 없음. 모든 파일에 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`. `img-src`의 `blob:`은 S11 추가분으로, 인증 header로 받은 avatar를 blob URL로 보이기 위한 것이다(외부 origin은 여전히 없음). 페이지는 owner token을 메모리에, 사용자가 고를 때만 `sessionStorage`에 두며 `localStorage`에는 화면 선호(보기 방식, 마지막 방, 방별 읽은 메시지 수)만 둔다. 서버 데이터는 text로만 DOM에 넣는다(HTML 해석 없음).
 - graceful shutdown: SIGTERM/SIGINT → listener 닫기 → 진행 중 요청 완료 대기(상한 10초) → Store drop·join → delivery in-flight HTTP는 기다리지 않음(pending state는 DB에 있음).
-- **상태**: frozen · 2026-10-15 · 콘솔·`img-src blob:`·`schema_version` 3 frozen-pending 2026-10-18(S11)
+- **상태**: frozen · 2026-10-15 · 콘솔·`img-src blob:`·`schema_version` 3 frozen 2026-10-18(S11)
 
 ### `IF-CLI-001 — platform CLI 공통 옵션`
 
@@ -264,7 +264,7 @@
   - `profile avatar set <agent_id> <file>` — owner 또는 그 agent. 파일을 읽어 `platform-wire::avatar`로 먼저 검사한다: 비었거나 PNG·JPEG magic이 아니면 exit 2, `AVATAR_MAX_BYTES` 초과면 exit 2(보내지 않는다). `Content-Type`은 magic으로 정한 `image/png`·`image/jpeg`. 기본 출력은 키-값 줄 `agent_id`, `content_type`, `bytes`, `sha256`, `updated_at`. `--json`은 200 원문.
   - `profile avatar get <agent_id> --out <file>` — 모든 principal. bytes를 `<file>`에 쓴다(새 파일만, 있으면 exit 2, 서버에 요청하기 전에 확인). 기본 출력은 키-값 줄 `agent_id`, `content_type`, `bytes`, `sha256`(ETag의 따옴표를 뗀 값), `out`. `--json`은 같은 다섯 키의 JSON 객체 한 줄(`bytes`는 number). 404 등 서버 오류는 다른 명령과 같다(exit 1, 파일을 만들지 않는다).
   - `profile avatar clear <agent_id>` — owner 또는 그 agent. 204면 `avatar cleared: <agent_id>` 한 줄, `--json`은 `{"agent_id": …, "avatar": null}`.
-- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18 · S11 추가분 frozen-pending 2026-10-18
+- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18 · S11 추가분 frozen 2026-10-18
 
 ### `IF-DLV-001 — delivery worker 상태 전이`
 
@@ -295,7 +295,7 @@
 - `name`과 `profile`은 두 형태 모두에 있다(S9). `name`은 v1 행에서 owner가 정하기 전까지 `null`. `profile`의 다섯 키는 항상 있고 선언하지 않은 값은 `null`(키를 생략하지 않는다). `PUT …/profile` 200의 `profile`과 `POST /v1/agents` 201의 `profile`도 같은 객체다.
 - `delivery.state`는 `IF-DLV-001` 파생 규칙(`receiver_url IS NULL → no_receiver`, 그 외 `notification_pending.state`). 키·secret은 어떤 형태에도 없다.
 - `avatar`(S11)는 두 형태 모두의 마지막 키다: 이미지가 있으면 `{"sha256":"<64 hex>","updated_at":"<RFC3339 ms>"}`, 없으면 `null`(키를 생략하지 않는다). `content_type`·크기는 넣지 않는다(`GET …/avatar`와 `PUT` 200이 준다). 예: `…,"delivery":{"state":"idle"},"avatar":null}`.
-- **상태**: frozen · 2026-10-15 · `name`·`profile` 추가 frozen 2026-10-17 · `avatar` 추가 frozen-pending 2026-10-18
+- **상태**: frozen · 2026-10-15 · `name`·`profile` 추가 frozen 2026-10-17 · `avatar` 추가 frozen 2026-10-18
 
 ### `IF-WIRE-002 — 요청 JSON 파싱·검증 오류 매핑`
 
@@ -307,7 +307,7 @@
 - 필수 필드 누락·타입 불일치·형식 위반(`Seq`, 길이 등) → 422 `invalid_field`, `details: {"field": "<이름>"}`(알 수 있을 때). 단 API_V1이 전용 code를 둔 경우(`invalid_agent_id`, `invalid_receiver_url`, `body_too_large`, `request_too_large`, `self_dm_not_supported`, `reply_to_room_mismatch`, `read_marker_ahead`, `mutually_exclusive_cursors`, `unknown_audience`, `ttl_too_long`)는 그 code가 우선.
 - 크기: wire body > 128 KiB → 413 `request_too_large`(파싱 전 차단). decoded `body` > 16 KiB → 413 `body_too_large`.
 - 예외(S11): `PUT /v1/agents/{agent_id}/avatar`는 `StrictJson`을 쓰지 않는다. body는 이미지 bytes이고 크기 한도는 그 경로에만 건 `AVATAR_MAX_BYTES`이며 규칙은 `IF-WIRE-008`이다. 다른 모든 write handler는 위 규칙 그대로다.
-- **상태**: frozen · 2026-10-15 · 비객체 body 규칙 명시 2026-10-18 · avatar 예외 frozen-pending 2026-10-18
+- **상태**: frozen · 2026-10-15 · 비객체 body 규칙 명시 2026-10-18 · avatar 예외 frozen 2026-10-18
 
 ### `IF-WIRE-003 — API_V1 오류표 보충 code`
 
@@ -431,7 +431,7 @@
 - `GET /v1/owner` 판정 순서: 401 → 403 `forbidden`(agent principal) → 422 `unexpected_field`(어떤 query 이름이든) → 200 `{"post_as": [...]}`(`[owner].post_as` 설정 순서, 등록 여부 무관).
 - 오류 code `avatar_too_large`(413)·`avatar_not_found`(404)는 avatar endpoint에서만 쓴다. 415는 기존 `unsupported_media_type`을 쓰고 message가 허용 형식을 말한다.
 - 로그: avatar bytes 금지. 갱신·삭제 1건마다 `agent_id`, `content_type`, 크기, `sha256`만.
-- **상태**: frozen-pending · 2026-10-18 · 근거 [ADR-0008](docs/adr/0008-directory-avatars.md)
+- **상태**: frozen · 2026-10-18 · 근거 [ADR-0008](docs/adr/0008-directory-avatars.md)
 
 ## 용어집
 

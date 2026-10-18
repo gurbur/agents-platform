@@ -1,6 +1,6 @@
 # 슬라이스 S11: avatars-and-console
 
-- **상태**: **frozen (2026-10-18)** — 설계는 같은 날 [ADR-0008](../adr/0008-directory-avatars.md)으로 freeze. 사용자 결정(2026-10-18): 콘솔 시안(디스코드형 3단 화면, 디스코드형·말풍선형 두 보기, 말풍선형 기본)을 승인("아주 좋아. 이대로 해줘")했고, 콘솔과 Discord bridge가 같은 agent 이미지를 보여야 한다.
+- **상태**: **done (2026-10-18)** — 격리 워크트리에서 구현해 `5198ece`로 merge(커밋 `46edb65` 문서, `e5f1ee5` hub+CLI, `4336091` 콘솔). 테스트 402→428, fmt/clippy 클린, smoke 전 시나리오 PASS(avatar 시나리오 포함), aarch64 빌드 GLIBC_2.38, headless Chrome 검수 26/26(1440·1200·390, 스크린샷은 저장소 밖에 보관). 운영 Pi 반영 18:24 KST(아래 "운영 반영"). 남은 항목: 사용자의 실환경 콘솔 브라우저 확인. 설계는 같은 날 [ADR-0008](../adr/0008-directory-avatars.md)으로 freeze. 사용자 결정(2026-10-18): 콘솔 시안(디스코드형 3단 화면, 디스코드형·말풍선형 두 보기, 말풍선형 기본)을 승인("아주 좋아. 이대로 해줘")했고, 콘솔과 Discord bridge가 같은 agent 이미지를 보여야 한다.
 - **위험/의존도**: 중 — JSON이 아닌 첫 write endpoint(경로별 body 한도, `StrictJson` 예외)와 DELETE 경로가 있는 첫 table이다. 콘솔은 처음으로 브라우저에서 owner write를 부른다(권한은 기존 owner 권한 그대로). schema v3. S6(UI embed)·S9(directory)·S10(rooms, owner 게시) 위에 얹는다.
 
 ## 목표
@@ -33,19 +33,25 @@ wire 의미는 API_V1 "Directory avatar"·"GET /v1/owner"가 정본, 표현과 �
 8. **운영 메모(오케스트레이터가 실행)**: Pi 반영은 (1) `deploy/backup.sh`로 snapshot(v3 DB는 S10 이하 바이너리가 거부), (2) 새 바이너리 배포(기동 시 v3 migration), (3) `/healthz`의 `schema_version` 3, (4) smoke. 설정 변경 없음.
 
 ## 완료 정의 (DoD)
-- [ ] **migration**: 빈 DB → v3, v2 DB(agents·messages 행 포함) → v3에서 행 보존, `agent_avatars` 존재, `/healthz` `schema_version` 3.
-- [ ] **PUT**: owner 200, 그 agent 200, 다른 agent 403(body 무관), owner의 slug 아닌 경로 404, 미등록 404 `agent_not_found`, Content-Type 없음·`image/gif`·`application/json` 415, PNG라고 하고 JPEG bytes·빈 body 415, `AVATAR_MAX_BYTES` 정확히는 200·1 byte 넘으면 413 `avatar_too_large`(JSON 128 KiB 한도와 무관함을 128 KiB 초과·상한 이하 이미지로 확인), 응답 형태와 `sha256`, 같은 이미지 재업로드는 `updated_at` 불변, 다른 이미지는 교체.
-- [ ] **GET**: 다른 agent와 owner가 같은 bytes·Content-Type·`ETag`·`Cache-Control`, `If-None-Match` 일치(강·약·`*`) 304, 불일치 200, 없음 404 `avatar_not_found`, 미등록 404 `agent_not_found`, query 422, 401.
-- [ ] **DELETE**: 204, 그 뒤 GET 404·directory `null`, 다시 DELETE 404 `avatar_not_found`, 다른 agent 403.
-- [ ] **directory**: 두 principal 모두 `avatar` 키(없으면 `null`, 있으면 `{sha256, updated_at}`만).
-- [ ] **`GET /v1/owner`**: owner 200 설정 순서, 빈 설정 `[]`, agent 403, query 422, 401.
-- [ ] **로그**: avatar bytes 표식이 TRACE 로그에 없다(`log_redaction` 확장).
-- [ ] **CLI**: `profile avatar set`의 Content-Type 판정·사전 검사(exit 2), 출력, `get --out`(새 파일만), `clear`, agent key로 남의 avatar → exit 1 `forbidden`.
-- [ ] **콘솔 서빙 테스트**: 200·content type·보안 헤더(새 CSP), 외부 자원 없음, 인라인 script·style 없음, HTML 해석 API 없음, token은 localStorage에 가지 않음, 페이지가 부르는 endpoint 목록이 전부 실제 route이고 owner로 그 method가 통한다.
-- [ ] **브라우저 검수**: 로컬 platformd(시드: human 포함 agent 4, `all` broadcast, DM 쌍 대화와 답장, 끼어들기)를 headless Chrome 1440·1200·390 폭으로 열어 방 전환·송신·답장·보기 전환·profile 편집·avatar 올리기를 실행하고 스크린샷을 남긴다. 콘솔 오류·CSP 위반 0.
-- [ ] **스모크**: 로컬 `platformd`(`post_as = ["human"]`)에 대해 `deploy/smoke.sh … --post-as human` 전 시나리오 PASS. `bash -n` 통과.
-- [ ] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
-- [ ] fmt/clippy/test 그린. 코드 미학(`CLAUDE.md` 규약). 기존 테스트 단언은 바꾸지 않는다(S6 UI 테스트 중 읽기 전용·localStorage 금지 단언은 이 슬라이스가 바꾸는 계약이므로 새 계약으로 교체).
+- [x] **migration**: 빈 DB → v3, v2 DB(agents·messages 행 포함) → v3에서 행 보존, `agent_avatars` 존재, `/healthz` `schema_version` 3.
+- [x] **PUT**: owner 200, 그 agent 200, 다른 agent 403(body 무관), owner의 slug 아닌 경로 404, 미등록 404 `agent_not_found`, Content-Type 없음·`image/gif`·`application/json` 415, PNG라고 하고 JPEG bytes·빈 body 415, `AVATAR_MAX_BYTES` 정확히는 200·1 byte 넘으면 413 `avatar_too_large`(JSON 128 KiB 한도와 무관함을 128 KiB 초과·상한 이하 이미지로 확인), 응답 형태와 `sha256`, 같은 이미지 재업로드는 `updated_at` 불변, 다른 이미지는 교체.
+- [x] **GET**: 다른 agent와 owner가 같은 bytes·Content-Type·`ETag`·`Cache-Control`, `If-None-Match` 일치(강·약·`*`) 304, 불일치 200, 없음 404 `avatar_not_found`, 미등록 404 `agent_not_found`, query 422, 401.
+- [x] **DELETE**: 204, 그 뒤 GET 404·directory `null`, 다시 DELETE 404 `avatar_not_found`, 다른 agent 403.
+- [x] **directory**: 두 principal 모두 `avatar` 키(없으면 `null`, 있으면 `{sha256, updated_at}`만).
+- [x] **`GET /v1/owner`**: owner 200 설정 순서, 빈 설정 `[]`, agent 403, query 422, 401.
+- [x] **로그**: avatar bytes 표식이 TRACE 로그에 없다(`log_redaction` 확장).
+- [x] **CLI**: `profile avatar set`의 Content-Type 판정·사전 검사(exit 2), 출력, `get --out`(새 파일만), `clear`, agent key로 남의 avatar → exit 1 `forbidden`.
+- [x] **콘솔 서빙 테스트**: 200·content type·보안 헤더(새 CSP), 외부 자원 없음, 인라인 script·style 없음, HTML 해석 API 없음, token은 localStorage에 가지 않음, 페이지가 부르는 endpoint 목록이 전부 실제 route이고 owner로 그 method가 통한다.
+- [x] **브라우저 검수**: 로컬 platformd(시드: human 포함 agent 4, `all` broadcast, DM 쌍 대화와 답장, 끼어들기)를 headless Chrome 1440·1200·390 폭으로 열어 방 전환·송신·답장·보기 전환·profile 편집·avatar 올리기를 실행하고 스크린샷을 남긴다. 콘솔 오류·CSP 위반 0.
+- [x] **스모크**: 로컬 `platformd`(`post_as = ["human"]`)에 대해 `deploy/smoke.sh … --post-as human` 전 시나리오 PASS. `bash -n` 통과.
+- [x] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
+- [x] fmt/clippy/test 그린. 코드 미학(`CLAUDE.md` 규약). 기존 테스트 단언은 바꾸지 않는다(S6 UI 테스트 중 읽기 전용·localStorage 금지 단언은 이 슬라이스가 바꾸는 계약이므로 새 계약으로 교체).
+
+## 운영 반영 (2026-10-18)
+- 18:24 KST: `platformd backup`으로 `platform-20261018T071508Z.db`를 먼저 받고 `deploy/deploy.sh`로 재배포. 기동 시 schema v3 migration 적용(`applied schema migration … schema_version=3`), `/healthz` `{"status":"ok","schema_version":3}`, `platformd 0.1.0 (5198ece)`, 공존하는 기존 unit 전후 동일. 설정 변경 없음(기존 `[owner] post_as = ["human"]` 그대로).
+- owner가 `platform profile avatar set`으로 avatar 업로드: `gong`(382436 B), `jaemmini`(470474 B), `boksoongi`(312611 B). `human`은 사용자 선택으로 avatar 없음.
+- `GET /` 200 `text/html`(새 콘솔), `GET /v1/owner` → `{"post_as":["human"]}`.
+- 미결: 사용자의 실환경 콘솔 브라우저 확인(대기 중).
 
 ## 검증 방법 (증거 필수)
 - `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` 끝부분(테스트 수 전후). 새 hub 테스트는 구현 전에 실패하는 것을 먼저 보인다.
