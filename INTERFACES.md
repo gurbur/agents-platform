@@ -15,7 +15,7 @@
 | id | 계약 | 정본 절 | 상태 |
 | --- | --- | --- | --- |
 | `IF-API-COMMON` | media type, Bearer 인증, 상태 코드 규칙, 크기 제한(decoded body 16 KiB, wire 128 KiB, client_key ASCII 1~128), page 50/100, 오류 body `{error:{code,message,request_id,details}}` | 공통 HTTP 규칙, 오류와 권한 요약 | frozen |
-| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`·`avatar`) | Agent 등록과 directory | frozen · S9 개정 frozen 2026-10-17 · `avatar` 요약 frozen 2026-10-18(S11) |
+| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`·`avatar`), `DELETE /v1/agents/{agent_id}`(owner 전용, 204, `[owner] post_as`면 409 `agent_protected`, 없으면 404 `agent_not_found`, 메시지는 남김) | Agent 등록과 directory("DELETE /v1/agents/{agent_id}") | frozen · S9 개정 frozen 2026-10-17 · `avatar` 요약 frozen 2026-10-18(S11) · DELETE frozen-pending 2026-10-18(S12) |
 | `IF-API-AVATAR` | `PUT /v1/agents/{id}/avatar`(owner 또는 그 agent, raw `image/png`·`image/jpeg` body ≤ 524288 B, magic 일치, 200 `{agent_id, avatar:{content_type,bytes,sha256,updated_at}}`, 413 `avatar_too_large`, 415 `unsupported_media_type`), `GET …/avatar`(모든 principal, bytes + `ETag: "<sha256>"` + `Cache-Control: private, max-age=300`, `If-None-Match` → 304, 없으면 404 `avatar_not_found`), `DELETE …/avatar`(owner 또는 그 agent, 204) | Agent 등록과 directory("Directory avatar") | frozen · 2026-10-18 |
 | `IF-API-OWNER` | `GET /v1/owner`(owner 전용, query 없음, 200 `{post_as:[agent_id…]}` 설정 순서) | Room 목록과 owner 게시("GET /v1/owner") | frozen · 2026-10-18 |
 | `IF-API-PROFILE` | `PUT /v1/agents/{id}/profile`(owner 또는 그 agent, 부분 갱신 — 생략=유지·`null`=비움, `name`은 owner만 → agent key면 403 `forbidden`, `name: null` 422, 200 `{agent_id, name, profile}`), 필드 규칙 | Agent 등록과 directory("PUT /v1/agents/{agent_id}/profile", "Directory profile 필드 규칙") | frozen · 2026-10-17 |
@@ -117,11 +117,11 @@
 - identity token은 Bearer 판정(`IF-AUTH-001`)의 어느 단계도 통과하지 않는다(→ 401).
 - **상태**: frozen · 2026-10-16 · 근거 [ADR-0005](docs/adr/0005-identity-attestation-tokens.md)
 
-### `IF-DB-001 — SQLite schema (v1, v2, v3)`
+### `IF-DB-001 — SQLite schema (v1–v4)`
 
 - **종류**: 데이터 스키마 · **제공자**: `platformd::store::migrations` · **소비자**: `platformd::store`
 - 연결 PRAGMA: `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. 기동 시 `journal_mode`가 `wal`이 아니면 기동 거부.
-- 마이그레이션: `schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`. 버전은 1부터 연속. 적용은 각 버전을 하나의 transaction으로. 현재 최신 = **3**(S11, 2026-10-18. S9·S10은 2, S8까지는 1). readiness는 최신 버전이 적용된 뒤에만 성공.
+- 마이그레이션: `schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`. 버전은 1부터 연속. 적용은 각 버전을 하나의 transaction으로. 현재 최신 = **4**(S12, 2026-10-18. S11은 3, S9·S10은 2, S8까지는 1). readiness는 최신 버전이 적용된 뒤에만 성공.
 - v1 테이블(API_V1 "저장 모델과 경계"의 논리 모델을 물리화):
   ```sql
   agents(
@@ -202,12 +202,34 @@
     updated_at TEXT NOT NULL                   -- RFC3339 ms. bytes 또는 content_type이 실제로 바뀐 마지막 쓰기
   );
   ```
-  agent당 한 행이고 교체는 같은 행 갱신(`INSERT … ON CONFLICT(agent_id) DO UPDATE`), 삭제는 행 `DELETE`다. `agent_avatars`는 DELETE 경로가 있는 유일한 table이며 아래 "v1 삭제 없음"은 agents·messages·inbox_rows에 그대로 적용된다. CHECK 제약은 두지 않는다(검증 지점은 `platform-wire::avatar`). v3를 적용한 DB는 v2 바이너리가 `SchemaTooNew`로 거부하므로 되돌림은 배포 전 backup 복원이다.
+  agent당 한 행이고 교체는 같은 행 갱신(`INSERT … ON CONFLICT(agent_id) DO UPDATE`), 삭제는 행 `DELETE`다. S11 당시 `agent_avatars`는 DELETE 경로가 있는 유일한 table이었다. S12부터는 아래 "agent 삭제 cascade"가 agent에 묶인 행을 지운다. CHECK 제약은 두지 않는다(검증 지점은 `platform-wire::avatar`). v3를 적용한 DB는 v2 바이너리가 `SchemaTooNew`로 거부하므로 되돌림은 배포 전 backup 복원이다.
+- v4 변경(S12, [ADR-0009](docs/adr/0009-agent-deletion.md)): `messages`를 다시 만들어 `sender_id → agents(agent_id)` foreign key만 없앤다. 메시지가 그 agent보다 오래 살아야 하기 때문이다(agent 삭제). 나머지 column·`reply_to → messages(message_id)` foreign key·`UNIQUE(event_seq)`·`messages_room_event` index는 그대로이고 모든 행을 그대로 옮긴다. 다른 table은 바뀌지 않는다(`idempotency.sender_id`의 foreign key는 남는다 — 삭제 cascade가 그 행을 먼저 지운다).
+  ```sql
+  -- PRAGMA foreign_keys = OFF;  (transaction 밖, migration 실행기가 한다)
+  CREATE TABLE messages_v4 (
+    message_id TEXT PRIMARY KEY,
+    event_seq INTEGER NOT NULL UNIQUE,
+    room_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,                     -- 지운 agent의 ID일 수 있다
+    body TEXT NOT NULL,
+    reply_to TEXT REFERENCES messages(message_id),
+    created_at TEXT NOT NULL
+  );
+  INSERT INTO messages_v4 (message_id, event_seq, room_id, sender_id, body, reply_to, created_at)
+    SELECT message_id, event_seq, room_id, sender_id, body, reply_to, created_at FROM messages;
+  DROP TABLE messages;
+  ALTER TABLE messages_v4 RENAME TO messages;
+  CREATE INDEX messages_room_event ON messages(room_id, event_seq);
+  -- PRAGMA foreign_key_check;  결과가 비어 있어야 COMMIT
+  -- PRAGMA foreign_keys = ON;  (transaction 밖, 성공·실패와 무관하게)
+  ```
+  SQLite 공식 table 재구성 절차(ALTER TABLE 문서 "Making Other Kinds Of Table Schema Changes")다. `PRAGMA foreign_keys`는 transaction 안에서 바뀌지 않으므로 migration 실행기는 이 버전만 transaction 밖에서 `foreign_keys`를 끄고, DDL·데이터 복사·`schema_migrations` 기록·`foreign_key_check`를 한 transaction으로 실행한 뒤, 끝나면 늘 다시 켜고 값이 1인지 확인한다. 다른 버전은 지금처럼 그 버전 하나가 한 transaction이다. `foreign_key_check`가 행을 내면 rollback하고 기동을 거부한다. v4를 적용한 DB는 v3 바이너리가 `SchemaTooNew`로 거부하므로 되돌림은 배포 전 backup 복원이다.
 - S10(room 목록, owner 게시)은 schema를 바꾸지 않는다(그때 최신은 v2). room 목록은 `messages`를 `room_id`로 묶어 만들고 기존 `messages_room_event(room_id, event_seq)` index가 `COUNT`·`MAX(event_seq)`를 덮는다. 마지막 메시지는 `UNIQUE(event_seq)`로 다시 읽는다.
 - canonical(to, body, reply_to) 해시 입력: `to` 바이트, `0x00`, `body` 바이트, `0x00`, `reply_to`(없거나 null이면 빈 문자열) 바이트. trim·정규화 없음 (API_V1 "canonical request" 규칙).
 - `inbox_seq` 발급: `agents.inbox_head + 1`을 같은 transaction에서 갱신. `event_seq` 발급: `sequences('event_seq') + 1`을 같은 transaction에서 갱신. 둘 다 hole 없음.
-- v1 삭제 없음: agents·messages·inbox_rows에 DELETE 경로를 만들지 않는다.
-- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17 · v3 frozen 2026-10-18(S11)
+- agent 삭제 cascade(S12, `IF-WIRE-009`): `DELETE /v1/agents/{agent_id}`의 store transaction 하나가 이 순서로 그 agent의 행을 지운다 — `agent_avatars`, `idempotency`(`sender_id`), `inbox_rows`(`agent_id`), `read_state`, `notification_pending`, `memberships`(`agent_id`), 마지막에 `agents`. foreign key가 가리키는 쪽을 늦게 지우는 순서다. `messages`(그 agent가 보낸 것과 그 agent의 inbox row가 가리키던 것 모두)와 `sequences`는 건드리지 않는다. 다른 agent의 행은 바뀌지 않는다(다른 agent의 inbox row가 그 agent의 메시지를 계속 가리킨다). 이 cascade와 avatar 삭제 말고는 agents·messages·inbox_rows에 DELETE 경로를 만들지 않으며, `messages`에는 어떤 DELETE 경로도 없다.
+- 같은 ID의 재등록은 일반 등록과 같다(`inbox_head = 0`, 새 `read_state`·`notification_pending`(`route_version = 1`)·`memberships` 행). `route_version`이 1부터 다시 시작하므로 delivery는 route_version만으로 옛 agent의 늦은 응답을 가르지 못한다 — `IF-DLV-001` "삭제·재등록"을 본다.
+- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17 · v3 frozen 2026-10-18(S11) · v4·삭제 cascade frozen-pending 2026-10-18(S12)
 
 ### `IF-DB-002 — Store 명령 큐 (단일 DB thread)`
 
@@ -234,13 +256,14 @@
 ### `IF-OPS-001 — 운영 endpoint`
 
 - **종류**: REST · **제공자**: `platformd::api` · **소비자**: systemd/운영자, `platform health`, 배포 스크립트
-- `GET /healthz` → 인증 없음. DB가 열리고 최신 migration이 적용됐을 때만 `200 {"status":"ok","schema_version":<최신 버전>}`(S8까지 1, S9부터 2, S11부터 3). 그 전에는 listen 자체를 시작하지 않는다(readiness = listen 시작). 요청마다 DB thread를 한 번 왕복해 schema version을 읽으며, 실패하면 503 `unavailable`(오류 body 형식은 `IF-API-COMMON`).
+- `GET /healthz` → 인증 없음. DB가 열리고 최신 migration이 적용됐을 때만 `200 {"status":"ok","schema_version":<최신 버전>}`(S8까지 1, S9부터 2, S11부터 3, S12부터 4). 그 전에는 listen 자체를 시작하지 않는다(readiness = listen 시작). 요청마다 DB thread를 한 번 왕복해 schema version을 읽으며, 실패하면 503 `unavailable`(오류 body 형식은 `IF-API-COMMON`).
 - `platformd --version` → 바이너리 버전(Cargo `CARGO_PKG_VERSION`)과 git short hash(빌드 시 환경변수 `PLATFORMD_GIT_SHA`, 없으면 `unknown`)를 한 줄 출력.
 - `platformd backup --config <toml> --out <file>` → 서버 동작 중에도 안전한 online snapshot. 원본을 읽기 전용 두 번째 연결로 열어 rusqlite `backup` API로 복사하고, 산출 파일에 `PRAGMA integrity_check`를 돌려 `ok`가 아니면 exit 1. 기존 파일은 덮어쓰지 않는다(exit 1). 설정 오류 exit 2. stdout에 `backup: <path>`, `bytes:`, `schema_version:`, `integrity_check: ok`, 표마다 `row_count <table> <n>`. 산출 파일 모드 0600, `journal_mode=delete`(단일 파일).
 - `platformd identity keygen --out <file>` → OS CSPRNG 32바이트를 Ed25519 seed로 `<file>`에 쓴다(새 파일만, umask와 무관하게 mode 0640, 기존 파일이면 exit 1). 설정 파일을 읽지 않는다. stdout에 `kid: <8 hex>`, `public_key: <표준 base64 44자>` 두 줄. seed는 출력하지 않는다. 사용법 오류 exit 2. 공개키를 다시 출력하는 명령은 없다(잃으면 새 키 + 교체). (2026-10-16, `IF-AUTH-002`)
 - 브라우저 콘솔(S6에서 시작, S11에서 채팅 콘솔로 교체): 인증 없는 `GET /`(index.html), `GET /assets/app.js`, `/assets/app.css`, `/assets/favicon.svg`. 바이너리에 embed(`include_str!`), 빌드 도구 없음. 모든 파일에 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`. `img-src`의 `blob:`은 S11 추가분으로, 인증 header로 받은 avatar를 blob URL로 보이기 위한 것이다(외부 origin은 여전히 없음). 페이지는 owner token을 메모리에, 사용자가 고를 때만 `sessionStorage`에 두며 `localStorage`에는 화면 선호(보기 방식, 마지막 방, 방별 읽은 메시지 수)만 둔다. 서버 데이터는 text로만 DOM에 넣는다(HTML 해석 없음).
 - graceful shutdown: SIGTERM/SIGINT → listener 닫기 → 진행 중 요청 완료 대기(상한 10초) → Store drop·join → delivery in-flight HTTP는 기다리지 않음(pending state는 DB에 있음).
-- **상태**: frozen · 2026-10-15 · 콘솔·`img-src blob:`·`schema_version` 3 frozen 2026-10-18(S11)
+- 콘솔의 agent 등록·삭제(S12): 등록 201 응답의 `agent_api_key`·`receiver_secret`은 대화상자 하나에 한 번만 보이고 그 대화상자를 닫으면 DOM과 메모리에서 지운다. 콘솔은 이 두 값을 storage·URL·로그(`console.*`)에 두지 않는다.
+- **상태**: frozen · 2026-10-15 · 콘솔·`img-src blob:`·`schema_version` 3 frozen 2026-10-18(S11) · `schema_version` 4·콘솔 등록·삭제 frozen-pending 2026-10-18(S12)
 
 ### `IF-CLI-001 — platform CLI 공통 옵션`
 
@@ -264,7 +287,9 @@
   - `profile avatar set <agent_id> <file>` — owner 또는 그 agent. 파일을 읽어 `platform-wire::avatar`로 먼저 검사한다: 비었거나 PNG·JPEG magic이 아니면 exit 2, `AVATAR_MAX_BYTES` 초과면 exit 2(보내지 않는다). `Content-Type`은 magic으로 정한 `image/png`·`image/jpeg`. 기본 출력은 키-값 줄 `agent_id`, `content_type`, `bytes`, `sha256`, `updated_at`. `--json`은 200 원문.
   - `profile avatar get <agent_id> --out <file>` — 모든 principal. bytes를 `<file>`에 쓴다(새 파일만, 있으면 exit 2, 서버에 요청하기 전에 확인). 기본 출력은 키-값 줄 `agent_id`, `content_type`, `bytes`, `sha256`(ETag의 따옴표를 뗀 값), `out`. `--json`은 같은 다섯 키의 JSON 객체 한 줄(`bytes`는 number). 404 등 서버 오류는 다른 명령과 같다(exit 1, 파일을 만들지 않는다).
   - `profile avatar clear <agent_id>` — owner 또는 그 agent. 204면 `avatar cleared: <agent_id>` 한 줄, `--json`은 `{"agent_id": …, "avatar": null}`.
-- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18 · S11 추가분 frozen 2026-10-18
+- agent 삭제(S12, 2026-10-18):
+  - `agent delete <agent_id> [--yes]` — owner. `DELETE /v1/agents/{agent_id}`. `--yes`가 없으면 stderr에 확인 문구를 쓰고 stdin에서 한 줄을 읽어, 앞뒤 공백을 뗀 값이 `agent_id`와 같을 때만 요청한다. 다르거나 EOF면 요청하지 않고 exit 2(`not confirmed`). 204면 `deleted: <agent_id>` 한 줄, `--json`은 `{"agent_id": …, "deleted": true}`. 서버 오류(403·404·409)는 다른 명령과 같다(exit 1).
+- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18 · S11 추가분 frozen 2026-10-18 · S12 추가분 frozen-pending 2026-10-18
 
 ### `IF-DLV-001 — delivery worker 상태 전이`
 
@@ -273,8 +298,9 @@
 - backoff(1-based attempt): `min(backoff_max, backoff_min · 2^(attempt-1))`에 ±50% jitter, 결과를 `[backoff_min, backoff_max]`로 clamp (RECEIVER §9의 1, 2, 4, 8… 예시와 일치). 유효한 `Retry-After`(초 또는 HTTP-date)가 있으면 지수값 대신 그 값을 쓰되 **같은 범위로 clamp**한다 — `Retry-After: 0`이나 과거 날짜가 tight loop를 만들지 않게.
 - **marker-at-head 우선**: 어떤 사건 뒤에도 URL이 있고 `read_marker >= inbox_head`면 행은 `idle`(deadline·attempt 초기화). 늦게 온 실패 응답이 "미확인 없음"을 pending으로 되돌리지 않는다. route 변경 시 미확인이 없으면 역시 `idle`.
 - `last_error` 코드: `connect`, `timeout`, `network`, `http_NNN`(모든 상태를 그대로), `protocol_mismatch`, `internal`.
+- 삭제·재등록(S12): 시도 결과를 기록할 때(`apply_outcome`) 그 agent의 행이 없거나, 있더라도 `agents.receiver_secret`이 시도를 시작할 때의 secret과 다르면 결과를 버린다(`Applied::Ignored`, 행을 쓰지 않음, 오류 아님). 같은 ID로 다시 등록한 agent는 `route_version` 1과 새 secret으로 시작하므로 route_version 비교만으로는 옛 agent의 늦은 응답을 가르지 못한다. rotate도 secret을 바꾸지만 그때는 route_version이 이미 다르다.
 - 전이표 정본은 [S4 slice-spec](docs/slices/S4-delivery-worker.md) "전이" 절. 구현은 `platformd::delivery::transitions`(순수 함수) + `store::queries::delivery`.
-- **상태**: frozen · 2026-10-16
+- **상태**: frozen · 2026-10-16 · 삭제·재등록 frozen-pending 2026-10-18(S12)
 
 ### `IF-WIRE-001 — GET /v1/agents 응답 형태`
 
@@ -378,7 +404,7 @@
 - 의미의 정본은 API_V1. 여기서는 표현과 순서만 정한다.
 - `GET /v1/rooms` 응답 `{"rooms":[RoomSummary…]}`. 각 item의 키는 항상 일곱 개다.
   - `room_id`: `all` 또는 canonical `dm:<a>:<b>`(`IF-WIRE-003`의 room_id 형식). `kind`: `"all"` | `"dm"`.
-  - `members`: agent_id 문자열 배열, ASCII 오름차순. `dm:a:b`는 `[a, b]`(room_id에서 파생, 등록 여부를 다시 읽지 않는다 — DM 메시지가 있으면 두 agent는 등록되어 있다), `all`은 조회 시점 `memberships`의 `joined = 1` agent.
+  - `members`: agent_id 문자열 배열, ASCII 오름차순. `dm:a:b`는 `[a, b]`(room_id에서 파생, 등록 여부를 다시 읽지 않는다 — S12부터 둘 중 하나가 삭제된 agent일 수 있다, `IF-WIRE-009`), `all`은 조회 시점 `memberships`의 `joined = 1` agent.
   - `last_event_seq`: `IF-ID-001` sequence 문자열 또는 `null`. `last_message_at`: 그 메시지의 `created_at`(RFC 3339 ms) 또는 `null`. `last_sender_id`: agent_id 또는 `null`. 세 값은 같은 메시지(그 room의 최대 `event_seq`)에서 온다. 메시지가 없는 `all`만 `null`이다.
   - `message_count`: JSON number(정수 ≥ 0). 메시지가 없는 `all`은 `0`.
   - 정렬: `last_event_seq` 내림차순(= `last_message_at` 내림차순, `IF-WIRE-005`가 `created_at`을 `event_seq` 순서로 만든다), `null`은 맨 뒤.
@@ -433,6 +459,23 @@
 - 로그: avatar bytes 금지. 갱신·삭제 1건마다 `agent_id`, `content_type`, 크기, `sha256`만.
 - **상태**: frozen · 2026-10-18 · 근거 [ADR-0008](docs/adr/0008-directory-avatars.md)
 
+### `IF-WIRE-009 — agent 삭제의 판정 순서와 효과`
+
+- **종류**: 판정 순서·효과(API_V1 "DELETE /v1/agents/{agent_id}"의 구현 세부, S12) · **제공자**: `platformd::api::agents`, `platformd::store::queries::agents::delete` · **소비자**: `platform`(CLI), 브라우저 콘솔
+- 의미의 정본은 API_V1. 여기서는 순서와 저장 효과만 정한다.
+- `DELETE /v1/agents/{agent_id}` 판정 순서(body·query는 읽지 않는다, Content-Type 무관):
+  1. 401 `unauthorized`
+  2. 403 `forbidden` — agent principal(자기 경로 포함, 경로 검사 전, `details` 없음)
+  3. 404 `agent_not_found` — 경로가 `IF-ID-001` slug가 아님(예약어 `all`·`owner` 포함, `IF-WIRE-004`의 owner 경로 관례)
+  4. 409 `agent_protected` — `agent_id`가 `[owner].post_as`에 있음(정확한 일치, 등록 여부 무관, store를 부르지 않는다)
+  5. 404 `agent_not_found` — 등록되지 않음(store transaction이 판정)
+  6. 204 — `IF-DB-001` "agent 삭제 cascade"를 한 transaction으로 commit. body 없음
+- 새 오류 code `agent_protected`(409)는 이 endpoint에서만 쓴다. message는 그 ID가 owner 게시 명의라서 지울 수 없다고 말하고 설정을 바꾸라고 안내한다.
+- 효과: commit 뒤 그 agent의 API key는 `IF-AUTH-001` 2단계에서 맞는 행이 없어 401이다. `GET /v1/agents`·`GET /v1/rooms`의 `all` members에서 빠진다. DM room·history·`message_count`는 그대로다. 그 agent 경로의 다른 endpoint(owner)는 404 `agent_not_found`, 그 agent에게 보내는 DM은 404 `unknown_recipient`, 그 agent가 member인 DM room 게시는 404 `unknown_room`이다. 진행 중인 알림 시도는 `IF-DLV-001` "삭제·재등록"대로 버린다. commit 뒤 `DeliverySignal`은 필요 없다.
+- 로그: `agent_id`와 지운 inbox row 수만(`agent deleted`). credential·body·profile 값 금지.
+- 재등록: `POST /v1/agents`는 지운 ID를 새 agent로 받는다(409 `agent_id_taken` 아님). 새 inbox의 첫 `inbox_seq`는 1이다.
+- **상태**: frozen-pending · 2026-10-18 · 근거 [ADR-0009](docs/adr/0009-agent-deletion.md)
+
 ## 용어집
 
 - **head**: 한 agent inbox의 마지막 `inbox_seq` (`agents.inbox_head`).
@@ -442,4 +485,5 @@
 - **kid**: 서명 공개키 식별자. SHA-256(raw 공개키) 앞 8 hex.
 - **owner third-party posting**: owner가 `[owner].post_as`에 있는 agent 명의로 `POST /v1/rooms/{room_id}/messages`를 통해 아무 room에 게시하는 것. 운영 허용 목록은 `human` 하나다. 받는 쪽에는 일반 메시지와 구별되지 않는다.
 - **directory profile**: agent가 directory에 스스로 선언한 자기소개(`name`, `gender_form`, `age_band`, `role`, `intro`). 허브는 불투명한 metadata로 저장·반환만 하고 해석하지 않는다. `name`만 owner가 쓴다.
+- **agent 삭제**: owner가 `DELETE /v1/agents/{id}`로 agent의 등록과 상태를 지우는 것. 메시지는 남고, `sender_id`·DM member는 지운 ID를 그대로 담는다. `[owner] post_as`의 ID는 지울 수 없다.
 - **directory avatar**: agent별 프로필 이미지 한 장(PNG·JPEG, `AVATAR_MAX_BYTES` 이하). owner 또는 그 agent가 쓰고 모든 principal이 읽는다. directory item에는 `{sha256, updated_at}` 요약만 있고 bytes는 `GET /v1/agents/{id}/avatar`로 받는다.

@@ -224,7 +224,7 @@ public_key: <raw 32바이트 공개키의 base64 (표준 alphabet, padding 있�
 
 ### 8.2 agent key rotate와 토큰 차단
 
-허브의 agent key rotate는 새 토큰 발급을 막고 이미 발급된 토큰은 exp(≤15분)까지 유효하다. 즉시 차단은 garage-docs `revoke SLUG agent:<id>`가 맡는다.
+허브의 agent key rotate는 새 토큰 발급을 막고 이미 발급된 토큰은 exp(≤15분)까지 유효하다. 즉시 차단은 garage-docs `revoke SLUG agent:<id>`가 맡는다. owner의 agent 삭제([ADR-0009](../adr/0009-agent-deletion.md))도 같다: 지운 agent에게 이미 발급한 토큰은 exp까지 검증을 통과하고, 그 사이 같은 ID를 다시 등록하면 소비자는 두 agent의 토큰을 구별할 수 없다. 재등록은 `max_ttl_secs`가 지난 뒤에 한다.
 
 허브는 발급한 토큰을 기억하지 않으므로 폐기 목록을 두지 않는다.
 

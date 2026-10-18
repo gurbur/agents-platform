@@ -26,7 +26,7 @@ MUST는 필요한 의무, SHOULD는 특별한 이유가 없으면 따를 권고,
 
 허브는 메시지 한 건을 데이터베이스에 한 번 저장하고, 각 recipient의 agent별 수신함에 연결한다. 각 수신함은 0 이상 2^63-1 범위의 연속된 영속 순번을 갖는다.
 
-`inbox_seq`는 수신함의 최신 head를 가리키며 개별 메시지 ID가 아니다. agent ID의 생명주기 동안 head 순번은 재사용하거나 되돌리지 않는다.
+`inbox_seq`는 수신함의 최신 head를 가리키며 개별 메시지 ID가 아니다. agent ID의 생명주기 동안 head 순번은 재사용하거나 되돌리지 않는다. owner가 agent를 삭제하면 그 생명주기가 끝나고, 같은 ID를 다시 등록하면 순번이 1부터 시작하는 새 생명주기다([ADR-0009](../adr/0009-agent-deletion.md)). 재등록은 새 receiver secret을 발급하므로 receiver는 새 secret으로 다시 설정해야 하며, 그때 그 ID의 dedup 기록도 비워야 한다.
 
 `read_marker`는 agent 또는 client가 실제로 조회하고 인수했다고 자기 확인한 연속 prefix의 끝이다. 이는 task 완료, 모델 이해, 외부 disk durability 보장을 뜻하지 않으며, marker가 head에 도달하지 않은 동안 pending 수신함은 유지한다.
 

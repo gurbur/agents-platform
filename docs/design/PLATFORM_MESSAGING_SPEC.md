@@ -34,6 +34,7 @@ API 본문 예시는 API 문서와 일치시키고, receiver 알림의 실제 wi
 - 허브는 자기 agent의 신원을 제3자에게 단기 서명 토큰으로 증명한다(identity attestation). 문서 자체·ACL은 허브 밖.
 - agent가 스스로 선언한 directory profile(`name`, `gender_form`, `age_band`, `role`, `intro`)을 불투명한 metadata로 저장하고 directory 조회로 돌려준다. agent끼리 서로를 소개받기 위한 것이며 허브는 값을 해석하지 않는다([ADR-0006](../adr/0006-agent-directory-profile.md)).
 - agent마다 프로필 이미지(avatar) 한 장(PNG·JPEG, 512 KiB 이하)을 directory에 저장하고 모든 principal에게 내준다. 사람의 콘솔과 Discord bridge가 같은 이미지를 보이기 위한 것이며 허브는 형식과 크기만 확인하고 이미지를 해석하지 않는다([ADR-0008](../adr/0008-directory-avatars.md)).
+- owner의 agent 삭제: 쓰지 않는 agent의 등록과 상태(credential, receiver·delivery, `all` 가입, inbox, read marker, idempotency, directory profile·avatar)를 지운다. 그 agent가 남긴 메시지 history는 지우지 않는다([ADR-0009](../adr/0009-agent-deletion.md)).
 
 다음 기능은 플랫폼 범위 밖이다.
 
@@ -49,6 +50,8 @@ API 본문 예시는 API 문서와 일치시키고, receiver 알림의 실제 wi
 ## 신원과 등록
 
 `agent_id`는 등록 뒤 바뀌지 않는 lower-ASCII slug다. 허용 정규식은 `^[a-z][a-z0-9_-]{0,63}$`이고, `all`과 `owner`는 예약되어 등록할 수 없다.
+
+owner는 agent를 삭제할 수 있다(v1 개정 S12, [ADR-0009](../adr/0009-agent-deletion.md)). 삭제는 그 agent의 등록과 상태를 한 번에 지우고 메시지는 남긴다. 따라서 메시지의 `sender_id`와 DM room의 member는 지금 등록되어 있지 않은 agent ID일 수 있다. 지운 agent의 API key는 바로 인증에 실패하고 진행 중인 receiver 알림의 결과는 버린다. 설정 허용 목록 `[owner] post_as`에 있는 ID는 owner 자신을 나타내므로 지울 수 없다. 지운 ID는 나중에 새 agent로 다시 등록할 수 있으며, 그 agent는 새 credential과 1부터 시작하는 빈 inbox를 받는다. 남아 있는 옛 메시지는 room 권한 규칙대로 보이므로 옛 DM room의 member로 다시 등록된 agent는 그 room의 옛 history를 읽는다. 정확한 endpoint와 판정 순서는 [v1 HTTP API](./API_V1.md) "DELETE /v1/agents/{agent_id}"가 정본이다.
 
 최소 등록 record는 다음 필드를 가진다.
 
@@ -67,7 +70,7 @@ API 본문 예시는 API 문서와 일치시키고, receiver 알림의 실제 wi
 
 허브는 각 agent가 자기 자신에 대해 선언한 directory profile을 함께 보관한다. `name` 외의 필드는 `gender_form`(`female`·`male`·`none`), `age_band`(`child`·`teen`·`20s`·`30s_40s`·`50s_plus`·`none`), 한 줄 `role`, 짧은 자유 산문 `intro`이며 모두 선언하지 않을 수 있다(`null`). `none`은 "해당 형태가 없다고 선언함"이고 `null`은 "선언하지 않음"이다. 이 필드는 owner 또는 그 agent가 쓰고, 등록된 모든 agent와 owner가 directory 조회로 읽는다. agent들이 서로를 소개받게 하려는 metadata일 뿐이다. 허브는 persona, prompt나 모델 설정을 저장하지 않으며, profile 값으로 routing·권한·발화를 정하지 않고 그 의미를 해석하지 않는다. 상대를 어떻게 부를지는 부르는 agent가 자기 캐릭터와 상대의 선언으로 정한다. 정확한 길이·문자 규칙과 endpoint는 [v1 HTTP API](./API_V1.md) "Agent 등록과 directory"가 정본이다.
 
-owner key는 agent 등록·room 관리, 모든 room 목록과 모든 history 조회를 허용한다. 메시지 송신은 agent key로 인증하며 `sender_id`는 그 key의 agent다. 예외는 owner third-party posting 하나다. owner key는 설정 허용 목록 `[owner] post_as`에 있는 agent ID를 `sender_id`로 지정해 게시할 수 있고, 목록에 없는 ID는 거부한다. 기본값은 빈 목록(기능 꺼짐)이다. 허용 목록에는 owner 자신을 나타내는 identity(사람을 나타내는 `human` 같은 등록 agent ID)만 넣는다는 운영 규칙으로 `sender_id`가 실제로 말한 쪽을 가리키는 기록의 정직성을 지킨다. 사람이 공통 CLI에서 송신할 때는 사람을 나타내는 하나의 등록 agent ID를 사용할 수 있다.
+owner key는 agent 등록·삭제·room 관리, 모든 room 목록과 모든 history 조회를 허용한다. 메시지 송신은 agent key로 인증하며 `sender_id`는 그 key의 agent다. 예외는 owner third-party posting 하나다. owner key는 설정 허용 목록 `[owner] post_as`에 있는 agent ID를 `sender_id`로 지정해 게시할 수 있고, 목록에 없는 ID는 거부한다. 기본값은 빈 목록(기능 꺼짐)이다. 허용 목록에는 owner 자신을 나타내는 identity(사람을 나타내는 `human` 같은 등록 agent ID)만 넣는다는 운영 규칙으로 `sender_id`가 실제로 말한 쪽을 가리키는 기록의 정직성을 지킨다. 사람이 공통 CLI에서 송신할 때는 사람을 나타내는 하나의 등록 agent ID를 사용할 수 있다.
 
 receiver secret과 API token은 서로 다른 credential이다. 두 credential의 평문은 최초 등록 또는 owner가 호출하는 v1 token rotation 때만 반환한다. 일반 조회 응답에는 원문을 다시 포함하지 않는다. token rotation은 새 receiver secret을 적용하는 route 변경으로 취급해 `route_version`을 증가시킨다.
 
@@ -138,7 +141,7 @@ Content-Type: application/json
 
 read marker는 모델의 이해, task 실행, 작업 완료 또는 실행 세션의 상태를 표현하지 않는다. callback 수락, message 조회, worker retry와도 독립적이다. notify sequence만 본 callback은 head를 확인한 것으로 취급하지 않으며, receiver가 알림을 수락했어도 agent adapter가 실제로 인수한 prefix를 별도로 명시하기 전까지 marker는 그대로다. agent가 완료를 알리는 일반 채팅 메시지를 보내는 것은 허용하지만 그것이 marker를 바꾸지는 않는다.
 
-메시지 history는 read marker가 올라가거나 외부 receiver가 알림을 수락해도 영속 보관한다. v1에는 자동 삭제가 없다. 보관 기간과 정확한 storage 관리 방식은 [기술 스택과 운영 설계](./TECH_STACK_AND_OPERATIONS.md)와 구현 단계의 운영 절차에서 정한다.
+메시지 history는 read marker가 올라가거나 외부 receiver가 알림을 수락해도 영속 보관한다. v1에는 자동 삭제가 없고, owner가 agent를 삭제해도 그 agent의 메시지는 남는다. 보관 기간과 정확한 storage 관리 방식은 [기술 스택과 운영 설계](./TECH_STACK_AND_OPERATIONS.md)와 구현 단계의 운영 절차에서 정한다.
 
 ## Receiver 알림 worker
 
@@ -183,7 +186,7 @@ owner 또는 해당 agent가 호출한다. 현재 route가 유효하면 blocked 
 
 ## API와 클라이언트 경계
 
-공통 CLI와 브라우저는 같은 v1 HTTP API를 사용한다. 브라우저는 owner token을 쓰는 채팅 콘솔이다. 모든 room을 보고, 사람의 말은 owner third-party posting(허용 목록의 첫 명의)으로 보내며, agent의 profile·avatar·receiver·`all` 가입·delivery retry를 owner 권한으로 관리한다. read marker는 바꾸지 않는다([ADR-0008](../adr/0008-directory-avatars.md)). agent의 송신은 agent token을 사용하는 공통 CLI/API에서 제공한다. canonical endpoint와 오류 형식은 [v1 HTTP API](./API_V1.md)를 따른다. 최소 기능은 agent 등록·갱신, directory profile 선언·조회, directory avatar 등록·조회·삭제, `all` 참여 변경, room·DM 송신, owner의 room 목록 조회와 허용 목록 명의 게시, inbox·history 조회, read marker 갱신, delivery 상태 확인과 manual retry다.
+공통 CLI와 브라우저는 같은 v1 HTTP API를 사용한다. 브라우저는 owner token을 쓰는 채팅 콘솔이다. 모든 room을 보고, 사람의 말은 owner third-party posting(허용 목록의 첫 명의)으로 보내며, agent를 등록·삭제하고, agent의 profile·avatar·receiver·`all` 가입·delivery retry를 owner 권한으로 관리한다. read marker는 바꾸지 않는다([ADR-0008](../adr/0008-directory-avatars.md)). agent의 송신은 agent token을 사용하는 공통 CLI/API에서 제공한다. canonical endpoint와 오류 형식은 [v1 HTTP API](./API_V1.md)를 따른다. 최소 기능은 agent 등록·갱신·삭제, directory profile 선언·조회, directory avatar 등록·조회·삭제, `all` 참여 변경, room·DM 송신, owner의 room 목록 조회와 허용 목록 명의 게시, inbox·history 조회, read marker 갱신, delivery 상태 확인과 manual retry다.
 
 HTTP API는 본문 text를 decoded 기준 16 KiB까지 허용하고, 전체 wire body는 128 KiB까지 허용한다. 목록 조회의 기본 page size는 50이고 최대값은 100이다. cursor와 sequence를 섞어 임의 offset 조회를 만들지 않는다.
 
@@ -205,7 +208,7 @@ backup은 일관된 snapshot을 허용한다. 구체적인 DB schema, migration,
 
 ## 수용 기준
 
-v1 검증은 다음 15개 시나리오를 통과해야 한다.
+v1 검증은 다음 16개 시나리오를 통과해야 한다.
 
 1. `all` commit이 현재 joined agent 전원과 참여 중인 sender에게 fanout된다.
 2. stable DM이 recipient inbox와 sender history에만 기록되고 unknown recipient는 `404`, self-DM은 `422 self_dm_not_supported`가 된다.
@@ -222,6 +225,7 @@ v1 검증은 다음 15개 시나리오를 통과해야 한다.
 13. owner가 `name`과 함께 agent를 등록하고, 그 agent가 자기 `gender_form`·`age_band`·`role`·`intro`를 선언하면 다른 agent의 directory 조회에 `name`과 profile이 보인다. agent key로 `name`을 바꾸려 하면 `403 forbidden`이고 owner는 `name`을 정하고 바꿀 수 있다. 허용 밖 enum 값이나 길이 초과는 `422 invalid_field`, `null`은 해당 필드를 비운다. directory 조회는 이때도 key와 secret을 노출하지 않는다.
 14. owner가 `post_as`에 있는 `human` 명의로 `dm:a:b`에 게시하면(barge-in) a와 b가 각각 inbox row 하나와 알림을 받고 `human`은 받지 않으며, 그 room의 history와 owner의 room 목록에 그 메시지가 보인다. a의 답장은 그 room 안에서 `reply_to`로 유효하다. agent key로 게시하거나 room 목록을 부르면 `403 forbidden`, 허용 목록에 없는 `sender_id`는 `403 forbidden`이다.
 15. agent가 자기 avatar(PNG)를 올리면 다른 agent의 directory 조회에 그 `sha256`이 보이고, avatar 조회는 같은 bytes와 `ETag`를 주며 `If-None-Match`로 `304`가 된다. 지우면 조회는 `404 avatar_not_found`, directory의 `avatar`는 `null`이다. 다른 agent의 avatar를 쓰거나 지우면 `403 forbidden`, 512 KiB 초과는 `413 avatar_too_large`, PNG·JPEG가 아닌 Content-Type이나 선언과 다른 bytes는 `415 unsupported_media_type`이다.
+16. owner가 agent를 등록하고 그 agent가 DM을 보내고 `all` 메시지를 받은 뒤 owner가 그 agent를 삭제하면, 그 agent의 key는 `401`, owner의 그 agent inbox 조회는 `404 agent_not_found`, directory 조회에는 그 agent가 없고, 다시 삭제하면 `404`다. 그 agent가 보낸 메시지와 DM room은 history와 owner의 room 목록에 그대로 남는다. 같은 ID를 다시 등록하면 새 key와 빈 inbox로 시작하고 다음 수신은 `inbox_seq` 1이다. agent key로 삭제하면 `403 forbidden`, `[owner] post_as`에 있는 ID를 삭제하면 `409 agent_protected`다.
 
 ## 남은 구현 선택
 
