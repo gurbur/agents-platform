@@ -424,3 +424,58 @@ async fn avatar_bytes_do_not_appear_in_logs() {
     );
     assert!(!logs.contains(&agent.api_key), "an API key was logged");
 }
+
+#[tokio::test]
+async fn agent_deletion_logs_no_credentials_or_bodies() {
+    let captured = install_capture();
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config_with_owner(&["human"])).await;
+    let api = server.api();
+    let peer = api.register("agent-peer", None).await;
+    let doomed = api
+        .register(
+            "agent-doomed",
+            Some("http://receiver.test/DELETE-PATH-MARKER"),
+        )
+        .await;
+    api.sent(
+        &doomed.api_key,
+        "agent-peer",
+        "DELETE-BODY-MARKER-do-not-log",
+        "d-1",
+    )
+    .await;
+    api.sent(
+        &peer.api_key,
+        "agent-doomed",
+        "DELETE-BODY-MARKER-reply",
+        "p-1",
+    )
+    .await;
+    let reply = api
+        .send(
+            Method::DELETE,
+            "/v1/agents/agent-doomed",
+            Some(OWNER_TOKEN),
+            None,
+        )
+        .await;
+    assert_eq!(reply.status.as_u16(), 204, "{}", reply.body);
+    api.send(Method::DELETE, "/v1/agents/human", Some(OWNER_TOKEN), None)
+        .await;
+    server.shutdown().await.unwrap();
+
+    let logs = captured.text();
+    assert!(
+        logs.contains("agent deleted"),
+        "the deletion is logged: {logs}"
+    );
+    for secret in [doomed.api_key.as_str(), doomed.receiver_secret.as_str()] {
+        assert!(!logs.contains(secret), "a credential was logged");
+    }
+    assert!(!logs.contains("DELETE-BODY-MARKER"), "a body was logged");
+    assert!(
+        !logs.contains("DELETE-PATH-MARKER"),
+        "a receiver path was logged"
+    );
+}

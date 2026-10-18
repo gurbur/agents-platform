@@ -1099,3 +1099,49 @@ async fn shutdown_does_not_wait_for_an_attempt_in_flight() {
         stopping.elapsed()
     );
 }
+
+// ---- S12: deletion and re-registration -----------------------------------------
+
+/// An attempt in flight while its agent is deleted and the id registered
+/// again: the late response belongs to neither route (`IF-DLV-001`
+/// "삭제·재등록"). The successor starts at route_version 1 like the old
+/// agent, so only the changed receiver secret tells them apart.
+#[tokio::test]
+async fn a_late_response_for_a_deleted_agent_does_not_touch_its_successor() {
+    let tuning = Tuning::fast();
+    let h = start(tuning).await;
+    let hold = tuning.request_timeout / 3;
+    let mock = MockReceiver::with_fallback(MockResponse::status(404).after(hold)).await;
+    let sender = h.register("sender", None).await;
+    h.register("agent-b", Some(&mock.url())).await;
+
+    h.dm(&sender, "agent-b").await;
+    mock.wait_for(1, WAIT).await;
+    let deleted = h
+        .api
+        .send(
+            Method::DELETE,
+            "/v1/agents/agent-b",
+            Some(OWNER_TOKEN),
+            None,
+        )
+        .await;
+    assert_eq!(deleted.status.as_u16(), 204, "{}", deleted.body);
+    let successor = h.register("agent-b", None).await;
+    assert_eq!(successor.body["route_version"], 1);
+    h.dm(&sender, "agent-b").await;
+    let before = h.row("agent-b").await;
+    assert_eq!(before.route_version, 1);
+    assert_eq!(before.state, "pending");
+
+    // Long enough for the held 404 to arrive and be processed.
+    tokio::time::sleep(hold + SLACK).await;
+    let after = h.row("agent-b").await;
+    assert_eq!(after, before, "the old route's 404 is not recorded");
+    let status = h.status("agent-b").await;
+    assert_eq!(status["state"], "no_receiver");
+    assert_eq!(status["last_error"], Value::Null);
+    assert_eq!(status["last_attempt_at"], Value::Null);
+    assert_eq!(mock.count(), 1);
+    h.shutdown().await;
+}

@@ -10,13 +10,14 @@
 #   --identity-aud AUD  audience for the identity token scenario (default: garage-docs);
 #                       a hub without [identity] makes that scenario SKIP
 #   --post-as AGENT_ID  a registered agent in the hub's [owner] post_as (e.g. human);
-#                       without it the owner barge-in part of the room post scenario is SKIP
+#                       without it the owner barge-in part of the room post scenario and
+#                       the protected-id part of the deletion scenario are skipped
 #   --platform PATH     platform CLI binary (default: `platform` on PATH)
 #
-# Every run registers new agents named smoke-<ulid> (v1 has no delete), so
-# runs never collide. The `all` scenario fans out to every agent joined to
-# `all`, including real ones. At the end the smoke agents leave `all` and
-# drop their receiver so they stop collecting messages and notifications.
+# Every run registers new agents named smoke-<ulid>, so runs never collide.
+# The `all` scenario fans out to every agent joined to `all`, including real
+# ones. At the end the smoke agents are deleted (their messages stay in the
+# history, like any deleted agent's).
 set -euo pipefail
 
 # shellcheck source=deploy/lib.sh
@@ -46,7 +47,7 @@ result_states=()
 result_notes=()
 
 # Filled in by the scenarios.
-agent_a="" agent_b="" agent_r=""
+agent_a="" agent_b="" agent_r="" agent_z=""
 all_message_id="" dm_message_id="" dm_room=""
 snapshot_head=""
 
@@ -712,21 +713,81 @@ check_owner_room_post() {
   note="as $post_as: both members got it, replay 200, unknown_room 404, 403s"
 }
 
-# Leaves `all` and drops receivers so smoke agents stop accumulating.
+# Scenario 16: Z sends a DM to A and is deleted; Z's key is 401, its inbox
+# and directory entry are gone, the DM stays in A's history and the room
+# list, a DM to Z is unknown_recipient and a second delete 404. Z registers
+# again with a fresh inbox whose first row is inbox_seq 1. An agent key may
+# not delete (403) and, with --post-as, that id is protected (409).
+check_agent_deletion() {
+  local key_a key_z json message_id room
+  key_a="$(token_file "$agent_a")"
+  register "$agent_z" || return 1
+  key_z="$(token_file "$agent_z")"
+  send_as "$agent_z" "$agent_a" "smoke dm from the deleted agent" smoke-deleted-dm
+  expect_status 201 "DM from $agent_z" || return 1
+  message_id="$(jq -r .message_id <<<"$http_body")"
+  room="$(jq -r .room_id <<<"$http_body")"
+  cp "$key_z" "$workdir/$agent_z.old.token"
+
+  json="$(cli "$owner_token_file" agent delete "$agent_z" --yes)" || {
+    note="platform agent delete failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" ".agent_id == \"$agent_z\" and .deleted == true" "delete output: $json" || return 1
+  api GET /v1/inbox "$workdir/$agent_z.old.token"
+  expect_status 401 "deleted agent's key" || return 1
+  api GET "/v1/agents/$agent_z/inbox" "$owner_token_file"
+  expect_status 404 "owner inbox of the deleted agent" || return 1
+  expect_json "$http_body" '.error.code == "agent_not_found"' "inbox code: $http_body" || return 1
+  json="$(cli "$owner_token_file" agent list)" || return 1
+  expect_json "$json" "all(.items[]; .agent_id != \"$agent_z\")" "directory still lists $agent_z" || return 1
+  json="$(cli "$key_a" history --room "$room")" || {
+    note="history of $room failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" "any(.items[]; .message_id == \"$message_id\" and .sender_id == \"$agent_z\")" \
+    "the deleted agent's DM left the history" || return 1
+  json="$(cli "$owner_token_file" rooms)" || return 1
+  expect_json "$json" "any(.rooms[]; .room_id == \"$room\")" "rooms no longer lists $room" || return 1
+  send_as "$agent_a" "$agent_z" "anyone there?" "smoke-to-deleted-$(new_ulid)"
+  expect_status 404 "DM to the deleted agent" || return 1
+  expect_json "$http_body" '.error.code == "unknown_recipient"' "DM code: $http_body" || return 1
+  api DELETE "/v1/agents/$agent_z" "$owner_token_file"
+  expect_status 404 "second delete" || return 1
+
+  register "$agent_z" || return 1
+  json="$(cli "$key_z" inbox)" || return 1
+  expect_json "$json" '.items == [] and .snapshot_head_seq == "0"' "re-registered inbox is not empty" || return 1
+  send_as "$agent_a" "$agent_z" "welcome back" smoke-welcome-back
+  expect_status 201 "DM to the re-registered agent" || return 1
+  json="$(cli "$key_z" inbox)" || return 1
+  expect_json "$json" '.items | length == 1 and .[0].inbox_seq == "1"' "first new row is not inbox_seq 1" || return 1
+
+  api DELETE "/v1/agents/$agent_z" "$key_a"
+  expect_status 403 "agent key on delete" || return 1
+  local protected="skipped (no --post-as)"
+  if [[ -n "$post_as" ]]; then
+    api DELETE "/v1/agents/$post_as" "$owner_token_file"
+    expect_status 409 "delete of post_as $post_as" || return 1
+    expect_json "$http_body" '.error.code == "agent_protected"' "protected code: $http_body" || return 1
+    protected="$post_as 409"
+  fi
+  api DELETE "/v1/agents/$agent_z" "$owner_token_file"
+  expect_status 204 "delete of the re-registered agent" || return 1
+  note="401, 404s, history and room kept, re-register seq 1, agent 403, protected: $protected"
+}
+
+# Deletes the smoke agents so they stop accumulating; their messages stay.
 check_cleanup() {
   local agent failed=""
   for agent in "$agent_a" "$agent_b" ${agent_r:+"$agent_r"}; do
-    api PUT "/v1/agents/$agent/membership/all" "$owner_token_file" '{"joined":false}'
-    [[ "$http_status" == 200 ]] || failed="$failed $agent:membership=$http_status"
+    cli "$owner_token_file" agent delete "$agent" --yes >/dev/null || failed="$failed $agent:$(cli_error)"
   done
-  if [[ -n "$agent_r" ]]; then
-    cli "$owner_token_file" receiver unset "$agent_r" >/dev/null || failed="$failed $agent_r:receiver"
-  fi
   [[ -z "$failed" ]] || {
     note="cleanup failed:$failed"
     return 1
   }
-  note="smoke agents left all"
+  note="smoke agents deleted"
 }
 
 # ---- main ------------------------------------------------------------------
@@ -738,7 +799,7 @@ print_table() {
     printf '%-36s %-5s %s\n' "${result_names[$index]}" "${result_states[$index]}" "${result_notes[$index]}"
     [[ "${result_states[$index]}" != FAIL ]] || failures=$((failures + 1))
   done
-  printf '\nagents: %s %s%s\n' "$agent_a" "$agent_b" "${agent_r:+ $agent_r}"
+  printf '\nagents: %s %s %s%s\n' "$agent_a" "$agent_b" "$agent_z" "${agent_r:+ $agent_r}"
   if [[ "$failures" -gt 0 ]]; then
     printf 'smoke: %d FAIL\n' "$failures"
     return 1
@@ -756,6 +817,7 @@ main() {
 
   agent_a="smoke-$(new_ulid)"
   agent_b="smoke-$(new_ulid)"
+  agent_z="smoke-$(new_ulid)"
   log "smoke against $base_url as $agent_a, $agent_b"
 
   scenario "healthz / platform health" check_health
@@ -785,7 +847,8 @@ main() {
     record "receiver 202 keeps marker (5)" SKIP "no --receiver-url"
   fi
   scenario "identity token" check_identity_token
-  scenario "cleanup (leave all, unset receiver)" check_cleanup
+  scenario "agent deletion (16)" check_agent_deletion
+  scenario "cleanup (delete smoke agents)" check_cleanup
   print_table
 }
 

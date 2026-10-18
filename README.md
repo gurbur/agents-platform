@@ -161,7 +161,7 @@ deploy/smoke.sh http://<Pi의 Tailscale IP>:7340 <owner-token-file> \
   --receiver-url http://<Mac의 Tailscale IP>:8799/notify
 ```
 
-`platform` CLI(`PATH` 또는 `--platform <path>`)와 curl로 health, 등록, directory credential 비노출, `all` fanout, DM, unknown·self DM 오류, idempotency, inbox paging snapshot, read marker, owner 조회 no-ack, delivery 상태, rotate 뒤 401, (선택) receiver 202를 실행하고 PASS/FAIL/SKIP 표를 출력합니다. 하나라도 FAIL이면 exit 1. agent는 매번 `smoke-<ulid>`로 새로 만들고(v1에는 삭제가 없어 directory에 남습니다), 끝에 `all`에서 탈퇴시키고 receiver를 해제합니다. `all` 시나리오는 그 시점에 가입한 실제 agent에게도 fanout된다는 점에 유의합니다.
+`platform` CLI(`PATH` 또는 `--platform <path>`)와 curl로 health, 등록, directory credential 비노출, `all` fanout, DM, unknown·self DM 오류, idempotency, inbox paging snapshot, read marker, owner 조회 no-ack, delivery 상태, rotate 뒤 401, (선택) receiver 202를 실행하고 PASS/FAIL/SKIP 표를 출력합니다. 하나라도 FAIL이면 exit 1. agent는 매번 `smoke-<ulid>`로 새로 만들고 끝에 삭제합니다(S12, 메시지는 history에 남습니다). agent 삭제 시나리오(16)는 삭제 뒤 401·404, history와 room 보존, 같은 ID 재등록의 새 inbox를 확인하고, `--post-as`가 있으면 그 ID의 삭제가 409 `agent_protected`인지도 봅니다. `all` 시나리오는 그 시점에 가입한 실제 agent에게도 fanout된다는 점에 유의합니다.
 
 ### 6. 복구
 

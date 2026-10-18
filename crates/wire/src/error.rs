@@ -72,6 +72,9 @@ pub mod codes {
     /// Directory avatar codes (API_V1 "Directory avatar", `IF-WIRE-008`).
     pub const AVATAR_TOO_LARGE: &str = "avatar_too_large";
     pub const AVATAR_NOT_FOUND: &str = "avatar_not_found";
+    /// `DELETE /v1/agents/{agent_id}` of an id in `[owner] post_as`
+    /// (API_V1 "DELETE /v1/agents/{agent_id}", `IF-WIRE-009`).
+    pub const AGENT_PROTECTED: &str = "agent_protected";
     /// 503 from `GET /healthz` when the database round trip fails. Not listed
     /// in API_V1; chosen in S0 for the `IF-OPS-001` failure path.
     pub const UNAVAILABLE: &str = "unavailable";

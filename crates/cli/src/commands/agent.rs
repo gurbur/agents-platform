@@ -1,6 +1,8 @@
-//! `agent register|list|inbox|tokens rotate` → `POST /v1/agents`,
-//! `GET /v1/agents`, `GET /v1/agents/{id}/inbox`,
+//! `agent register|list|delete|inbox|tokens rotate` → `POST /v1/agents`,
+//! `GET /v1/agents`, `DELETE /v1/agents/{id}`, `GET /v1/agents/{id}/inbox`,
 //! `POST /v1/agents/{id}/tokens/rotate`.
+
+use std::io::BufRead as _;
 
 use clap::Subcommand;
 use platform_wire::{
@@ -32,6 +34,14 @@ pub enum AgentCommand {
     },
     /// List registered agents — GET /v1/agents
     List,
+    /// Delete an agent and its state; its messages are kept (owner) —
+    /// DELETE /v1/agents/{agent_id}
+    Delete {
+        agent_id: AgentId,
+        /// Skip typing the agent_id to confirm
+        #[arg(long)]
+        yes: bool,
+    },
     /// Read another agent's inbox (owner) — GET /v1/agents/{agent_id}/inbox
     Inbox {
         agent_id: AgentId,
@@ -68,6 +78,7 @@ pub async fn run(command: AgentCommand, context: &Context) -> Result<(), CliErro
             receiver_url,
         } => register(agent_id, name, receiver_url, context).await,
         AgentCommand::List => list(context).await,
+        AgentCommand::Delete { agent_id, yes } => delete(&agent_id, yes, context).await,
         AgentCommand::Inbox { agent_id, page } => {
             let path = agent_path(&agent_id, "/inbox");
             let response = context
@@ -120,4 +131,37 @@ async fn list(context: &Context) -> Result<(), CliError> {
         Directory::Owner(list) => output::owner_directory(&list.items),
         Directory::Agent(list) => output::agent_directory(&list.items),
     })
+}
+
+async fn delete(agent_id: &AgentId, yes: bool, context: &Context) -> Result<(), CliError> {
+    if !yes {
+        confirm_deletion(agent_id)?;
+    }
+    context.client.delete(&agent_path(agent_id, "")).await?;
+    if context.json {
+        let json = serde_json::json!({"agent_id": agent_id.as_str(), "deleted": true});
+        return output::emit_raw(json.to_string().as_bytes());
+    }
+    output::emit(&format!("deleted: {agent_id}\n"))
+}
+
+/// Asks on stderr and reads one line from stdin; only the agent_id itself
+/// (surrounding whitespace aside) confirms. Anything else, or EOF, is a
+/// usage error and nothing is sent.
+fn confirm_deletion(agent_id: &AgentId) -> Result<(), CliError> {
+    output::warn(&format!(
+        "deleting {agent_id} removes its credentials, inbox and delivery state (its messages are kept); \
+         type the agent_id to confirm, or pass --yes:"
+    ));
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .map_err(|err| CliError::io("cannot read the confirmation from stdin", err))?;
+    if answer.trim() == agent_id.as_str() {
+        return Ok(());
+    }
+    Err(CliError::Usage(format!(
+        "not confirmed: {agent_id} was not deleted"
+    )))
 }

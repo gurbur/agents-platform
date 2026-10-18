@@ -447,6 +447,46 @@ pub fn rotate_credentials(
     Ok(route_version)
 }
 
+/// What [`delete`] removed besides the agent row itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeletedAgent {
+    pub inbox_rows: usize,
+}
+
+/// Tables holding rows keyed to an agent, each with its key column, in the
+/// order [`delete`] empties them: referencing tables first, `agents` last
+/// (`IF-DB-001` "agent 삭제 cascade"). `messages` is not among them.
+const AGENT_STATE_TABLES: [(&str, &str); 7] = [
+    ("agent_avatars", "agent_id"),
+    ("idempotency", "sender_id"),
+    ("inbox_rows", "agent_id"),
+    ("read_state", "agent_id"),
+    ("notification_pending", "agent_id"),
+    ("memberships", "agent_id"),
+    ("agents", "agent_id"),
+];
+
+/// Removes the agent and every row keyed to it in the caller's
+/// transaction, keeping all messages (ADR-0009). `None` when the agent does
+/// not exist.
+pub fn delete(tx: &Transaction, agent_id: &AgentId) -> Result<Option<DeletedAgent>, StoreError> {
+    if !agent_exists(tx, agent_id)? {
+        return Ok(None);
+    }
+    let mut inbox_rows = 0;
+    for (table, column) in AGENT_STATE_TABLES {
+        // Both names are constants above, never input.
+        let removed = tx.execute(
+            &format!("DELETE FROM {table} WHERE {column} = ?1"),
+            params![agent_id.as_str()],
+        )?;
+        if table == "inbox_rows" {
+            inbox_rows = removed;
+        }
+    }
+    Ok(Some(DeletedAgent { inbox_rows }))
+}
+
 /// The last issued `event_seq` (`sequences('event_seq')`).
 pub fn current_event_seq(conn: &Connection) -> Result<i64, StoreError> {
     let value = conn.query_row(

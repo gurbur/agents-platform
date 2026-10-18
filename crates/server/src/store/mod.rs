@@ -40,6 +40,8 @@ pub enum StoreError {
     },
     #[error("database schema version {found} is newer than the supported version {supported}")]
     SchemaTooNew { found: u32, supported: u32 },
+    #[error("schema migration {version} left {violations} foreign key violations; rolled back")]
+    ForeignKeyViolations { version: u32, violations: usize },
     #[error("schema_migrations is not contiguous from 1 (found {count} rows, max version {max})")]
     SchemaGap { count: u32, max: u32 },
     #[error("database thread did not stop within {0:?}")]

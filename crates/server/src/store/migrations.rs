@@ -9,15 +9,46 @@ use super::StoreError;
 use crate::clock;
 
 /// Latest schema version this binary knows. `/healthz` reports it.
-pub const LATEST_SCHEMA_VERSION: u32 = 3;
+pub const LATEST_SCHEMA_VERSION: u32 = 4;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// `PRAGMA synchronous` value for FULL.
 const SYNCHRONOUS_FULL: i64 = 2;
 
+/// One schema version.
+struct Migration {
+    version: u32,
+    sql: &'static str,
+    /// Rebuilds a table that other tables reference: `foreign_keys` is off
+    /// around the version's transaction and `PRAGMA foreign_key_check` must
+    /// be empty before it commits (SQLite's table-rebuild procedure).
+    rebuilds_tables: bool,
+}
+
 /// Versions start at 1 and are contiguous; each is applied in one transaction.
-const MIGRATIONS: &[(u32, &str)] = &[(1, V1_SCHEMA), (2, V2_SCHEMA), (3, V3_SCHEMA)];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: V1_SCHEMA,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 2,
+        sql: V2_SCHEMA,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 3,
+        sql: V3_SCHEMA,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 4,
+        sql: V4_SCHEMA,
+        rebuilds_tables: true,
+    },
+];
 
 const BOOTSTRAP: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -120,6 +151,27 @@ CREATE TABLE agent_avatars (
 );
 ";
 
+/// v4 (S12): `messages` without the `sender_id → agents` foreign key, so a
+/// deleted agent's messages stay (ADR-0009). Same columns, the `reply_to`
+/// foreign key, `UNIQUE(event_seq)` and `messages_room_event`; every row is
+/// copied. The new table refers to `messages`, the name it is renamed to.
+const V4_SCHEMA: &str = "
+CREATE TABLE messages_v4 (
+    message_id TEXT PRIMARY KEY,
+    event_seq INTEGER NOT NULL UNIQUE,
+    room_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    reply_to TEXT REFERENCES messages(message_id),
+    created_at TEXT NOT NULL
+);
+INSERT INTO messages_v4 (message_id, event_seq, room_id, sender_id, body, reply_to, created_at)
+    SELECT message_id, event_seq, room_id, sender_id, body, reply_to, created_at FROM messages;
+DROP TABLE messages;
+ALTER TABLE messages_v4 RENAME TO messages;
+CREATE INDEX messages_room_event ON messages(room_id, event_seq);
+";
+
 /// Opens the database file and applies and verifies the connection PRAGMAs.
 /// Refuses to continue unless the journal mode is WAL.
 pub fn open_connection(path: &Path) -> Result<Connection, StoreError> {
@@ -174,27 +226,79 @@ pub fn apply_through(conn: &mut Connection, max_version: u32) -> Result<u32, Sto
         });
     }
 
-    for &(version, sql) in MIGRATIONS
+    for migration in MIGRATIONS
         .iter()
-        .filter(|(version, _)| *version <= max_version)
+        .filter(|migration| migration.version <= max_version)
     {
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Re-read inside the write lock so a concurrent opener cannot double-apply.
-        if current_version(&tx)? >= version {
+        if current_version(conn)? >= migration.version {
             continue;
         }
-        tx.execute_batch(sql)?;
-        tx.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-            params![version, clock::now_rfc3339_ms()],
-        )?;
-        tx.commit()?;
-        tracing::info!(version, "applied schema migration");
+        if migration.rebuilds_tables {
+            apply_with_foreign_keys_off(conn, migration)?;
+        } else {
+            apply_one(conn, migration)?;
+        }
     }
 
     let version = current_version(conn)?;
     verify_contiguous(conn, version)?;
     Ok(version)
+}
+
+/// Applies `migration` in one IMMEDIATE transaction, together with its
+/// `schema_migrations` row; nothing when another opener applied it first.
+fn apply_one(conn: &mut Connection, migration: &Migration) -> Result<(), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Re-read inside the write lock so a concurrent opener cannot double-apply.
+    if current_version(&tx)? >= migration.version {
+        return Ok(());
+    }
+    tx.execute_batch(migration.sql)?;
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+        params![migration.version, clock::now_rfc3339_ms()],
+    )?;
+    if migration.rebuilds_tables {
+        let violations = foreign_key_violations(&tx)?;
+        if violations > 0 {
+            // Dropping `tx` rolls the version back.
+            return Err(StoreError::ForeignKeyViolations {
+                version: migration.version,
+                violations,
+            });
+        }
+    }
+    tx.commit()?;
+    tracing::info!(version = migration.version, "applied schema migration");
+    Ok(())
+}
+
+/// SQLite's table-rebuild procedure: `PRAGMA foreign_keys` cannot change
+/// inside a transaction, so it is turned off around [`apply_one`] and back
+/// on afterwards whether or not the migration succeeded.
+fn apply_with_foreign_keys_off(
+    conn: &mut Connection,
+    migration: &Migration,
+) -> Result<(), StoreError> {
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let applied = apply_one(conn, migration);
+    let restored = conn
+        .pragma_update(None, "foreign_keys", "ON")
+        .map_err(StoreError::from)
+        .and_then(|()| expect_pragma(conn, "foreign_keys", 1));
+    applied?;
+    restored
+}
+
+/// Rows reported by `PRAGMA foreign_key_check` across every table.
+fn foreign_key_violations(conn: &Connection) -> Result<usize, StoreError> {
+    let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while rows.next()?.is_some() {
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Highest applied schema version, or 0 for an empty database.

@@ -1,6 +1,6 @@
-//! Agent registration and directory, directory profile, receiver route,
-//! `all` membership and token rotation (`IF-API-AGENTS`, `IF-API-PROFILE`,
-//! `IF-API-RECEIVER`, `IF-API-MEMBERSHIP`, `IF-API-ROTATE`).
+//! Agent registration, directory and deletion, directory profile, receiver
+//! route, `all` membership and token rotation (`IF-API-AGENTS`,
+//! `IF-API-PROFILE`, `IF-API-RECEIVER`, `IF-API-MEMBERSHIP`, `IF-API-ROTATE`).
 //!
 //! Authentication and permission run in `FromRequestParts` extractors, so a
 //! caller without permission gets 401/403 before the body is examined.
@@ -9,7 +9,7 @@ use axum::extract::{FromRequestParts, Path, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{patch, post, put};
+use axum::routing::{delete, patch, post, put};
 use axum::{Json, Router};
 use platform_wire::{
     AgentEntry, AgentId, AgentList, DeliverySummary, MembershipRequest, MembershipResponse,
@@ -30,6 +30,7 @@ use crate::store::queries::agents::{self as agent_queries, AgentRecord, NewAgent
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/agents", post(register).get(list))
+        .route("/v1/agents/{agent_id}", delete(delete_agent))
         .route("/v1/agents/{agent_id}/profile", put(update_profile))
         .route("/v1/agents/{agent_id}/receiver", patch(update_receiver))
         .route(
@@ -152,6 +153,36 @@ async fn register(
         receiver_secret: credentials.receiver_secret,
     };
     Ok((StatusCode::CREATED, Json(body)))
+}
+
+/// `DELETE /v1/agents/{agent_id}`: owner only, body and query unread.
+/// Order is `IF-WIRE-009`: 401/403 from the extractor, 404 for a path that
+/// is not a slug, 409 for an id in `[owner] post_as`, then the store's 404
+/// or the cascade (ADR-0009: the agent's state goes, its messages stay).
+async fn delete_agent(
+    _owner: OwnerOnly,
+    State(state): State<AppState>,
+    AgentPath(raw_agent_id): AgentPath,
+) -> Result<StatusCode, ApiError> {
+    let agent_id: AgentId = raw_agent_id
+        .parse()
+        .map_err(|_| ApiError::agent_not_found())?;
+    if state.post_as.contains(&agent_id) {
+        return Err(ApiError::conflict(
+            codes::AGENT_PROTECTED,
+            "this agent_id is in [owner] post_as and cannot be deleted; remove it from the configuration first",
+        ));
+    }
+
+    let target = agent_id.clone();
+    let deleted = state
+        .store
+        .transaction(move |tx| agent_queries::delete(tx, &target))
+        .await?
+        .ok_or_else(ApiError::agent_not_found)?;
+
+    info!(agent_id = %agent_id, inbox_rows = deleted.inbox_rows, "agent deleted");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `GET /v1/agents`: both views carry `name` and `profile` so agents can

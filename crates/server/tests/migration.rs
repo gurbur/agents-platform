@@ -364,3 +364,206 @@ fn has_avatar_table(conn: &rusqlite::Connection) -> Result<bool, StoreError> {
     )?;
     Ok(count == 1)
 }
+
+/// Rows only v3 has, compared alongside [`V1_ROWS`].
+fn v3_extra_rows(conn: &rusqlite::Connection) -> Result<Vec<Vec<SqlValue>>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT agent_id, content_type, bytes, sha256, updated_at FROM agent_avatars ORDER BY agent_id",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            (0..5).map(|index| row.get::<_, SqlValue>(index)).collect()
+        })?
+        .collect::<Result<Vec<Vec<SqlValue>>, _>>()?;
+    Ok(rows)
+}
+
+/// `(table, from, to)` of every foreign key of `table`.
+fn foreign_keys_of(
+    conn: &rusqlite::Connection,
+    table: &str,
+) -> Result<Vec<(String, String, String)>, StoreError> {
+    let mut statement = conn.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(2)?, row.get(3)?, row.get(4)?)))?
+        .collect::<Result<Vec<(String, String, String)>, _>>()?;
+    Ok(rows)
+}
+
+fn foreign_key_violations(conn: &rusqlite::Connection) -> Result<usize, StoreError> {
+    let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
+    let count = statement.query_map([], |_| Ok(()))?.count();
+    Ok(count)
+}
+
+fn index_names(conn: &rusqlite::Connection, table: &str) -> Result<Vec<String>, StoreError> {
+    let mut statement =
+        conn.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1")?;
+    let rows = statement
+        .query_map([table], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(rows)
+}
+
+/// A v3 database with every v1 row plus a profile and an avatar.
+async fn write_v3_database(fx: &Fixture) -> (Rows, Vec<Vec<SqlValue>>) {
+    std::fs::create_dir_all(fx.db_path().parent().unwrap()).unwrap();
+    let (store, thread) = Store::open(&fx.db_path()).unwrap();
+    let version = store
+        .run(|conn| migrations::apply_through(conn, 3))
+        .await
+        .unwrap();
+    assert_eq!(version, 3);
+    let rows = v1_rows();
+    let before = store
+        .transaction(move |tx| {
+            tx.execute_batch(&rows)?;
+            tx.execute(
+                "UPDATE agents SET name = 'A', profile_updated_at = created_at WHERE agent_id = 'agent-a'",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO agent_avatars (agent_id, content_type, bytes, sha256, updated_at)
+                 VALUES ('agent-a', 'image/png', X'89504E470D0A1A0A00', 'abc', '2026-10-18T00:00:00.000Z')",
+                [],
+            )?;
+            Ok((v1_snapshot(tx)?, v3_extra_rows(tx)?))
+        })
+        .await
+        .unwrap();
+    drop(store);
+    thread.shutdown(JOIN_LIMIT).await.unwrap();
+    before
+}
+
+/// Schema v3 → v4 (S12): `messages` is rebuilt without its `sender_id`
+/// foreign key and keeps every row, so an agent that sent messages can be
+/// deleted while its messages stay.
+#[tokio::test]
+async fn a_v3_database_rebuilds_messages_without_the_sender_foreign_key() {
+    let fx = Fixture::new();
+    let before = write_v3_database(&fx).await;
+    let fks_before = fx.read_db(|conn| foreign_keys_of(conn, "messages")).await;
+    assert!(
+        fks_before
+            .iter()
+            .any(|(table, from, _)| table == "agents" && from == "sender_id"),
+        "v3 still has the sender foreign key: {fks_before:?}"
+    );
+
+    let config = fx.load_config();
+    let server = RunningServer::start(&config).await;
+    let health: Value = reqwest::get(server.url("/healthz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["schema_version"], LATEST_SCHEMA_VERSION);
+    server.shutdown().await.unwrap();
+
+    let (after, extra, fks, violations, indexes, versions) = fx
+        .read_db(|conn| {
+            Ok((
+                v1_snapshot(conn)?,
+                v3_extra_rows(conn)?,
+                foreign_keys_of(conn, "messages")?,
+                foreign_key_violations(conn)?,
+                index_names(conn, "messages")?,
+                applied_migrations(conn)?,
+            ))
+        })
+        .await;
+    assert_eq!(after, before.0, "every row and value is unchanged");
+    assert_eq!(extra, before.1, "avatars are unchanged");
+    assert_eq!(
+        fks,
+        [(
+            "messages".to_owned(),
+            "reply_to".to_owned(),
+            "message_id".to_owned()
+        )],
+        "only reply_to keeps a foreign key"
+    );
+    assert_eq!(violations, 0, "PRAGMA foreign_key_check is empty");
+    assert!(
+        indexes.iter().any(|name| name == "messages_room_event"),
+        "{indexes:?}"
+    );
+    let versions: Vec<u32> = versions.iter().map(|(version, _)| *version).collect();
+    assert_eq!(versions, (1..=LATEST_SCHEMA_VERSION).collect::<Vec<u32>>());
+
+    // agent-a sent both messages; deleting it keeps them.
+    let server = RunningServer::start(&config).await;
+    let api_after = server.api();
+    let deleted = api_after
+        .send(
+            reqwest::Method::DELETE,
+            "/v1/agents/agent-a",
+            Some(OWNER_TOKEN),
+            None,
+        )
+        .await;
+    assert_eq!(deleted.status.as_u16(), 204, "{}", deleted.body);
+    let history = api_after
+        .get("/v1/messages?room_id=dm:agent-a:agent-b", KEY_B)
+        .await;
+    assert_eq!(history.body["items"][0]["message_id"], MESSAGE_DM);
+    assert_eq!(history.body["items"][0]["sender_id"], "agent-a");
+    server.shutdown().await.unwrap();
+}
+
+/// The v4 migration turns `foreign_keys` off only around its own
+/// transaction: the connection has it on afterwards, and a violation found
+/// by `PRAGMA foreign_key_check` rolls the version back.
+#[tokio::test]
+async fn the_v4_migration_restores_foreign_keys_and_refuses_violations() {
+    let fx = Fixture::new();
+    write_v3_database(&fx).await;
+    let (store, thread) = Store::open(&fx.db_path()).unwrap();
+    let (version, foreign_keys) = store
+        .run(|conn| {
+            let version = migrations::apply(conn)?;
+            let foreign_keys: i64 =
+                conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+            Ok((version, foreign_keys))
+        })
+        .await
+        .unwrap();
+    assert_eq!(version, LATEST_SCHEMA_VERSION);
+    assert_eq!(foreign_keys, 1);
+    drop(store);
+    thread.shutdown(JOIN_LIMIT).await.unwrap();
+
+    let broken = Fixture::new();
+    write_v3_database(&broken).await;
+    let (store, thread) = Store::open(&broken.db_path()).unwrap();
+    let outcome = store
+        .run(|conn| {
+            // A dangling inbox row that only foreign_keys=OFF lets in.
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+            conn.execute(
+                "INSERT INTO inbox_rows (agent_id, inbox_seq, message_id)
+                 VALUES ('agent-a', 9, 'msg-01M5000000000000000000GONE')",
+                [],
+            )?;
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+            let applied = migrations::apply(conn);
+            let version = migrations::current_version(conn)?;
+            let foreign_keys: i64 =
+                conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+            let has_sender_fk = foreign_keys_of(conn, "messages")?
+                .iter()
+                .any(|(table, _, _)| table == "agents");
+            Ok((applied.is_err(), version, foreign_keys, has_sender_fk))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        (true, 3, 1, true),
+        "refused, rolled back to v3, foreign_keys on, messages untouched"
+    );
+    drop(store);
+    thread.shutdown(JOIN_LIMIT).await.unwrap();
+}

@@ -204,6 +204,11 @@ pub fn begin_attempt(
 
 /// Records the outcome of an attempt, unless the route moved on meanwhile.
 /// `jitter` is a sample from `[-JITTER, JITTER]` for the backoff.
+///
+/// The agent may have been deleted while the POST was in flight, and its id
+/// registered again: a successor starts at `route_version` 1 like the old
+/// agent, so the receiver secret tells them apart (`IF-DLV-001` "삭제·재등록").
+/// Either way the response belongs to no current route.
 pub fn apply_outcome(
     tx: &Transaction,
     attempt: &Attempt,
@@ -212,7 +217,12 @@ pub fn apply_outcome(
     policy: &RetryPolicy,
     jitter: f64,
 ) -> Result<Applied, StoreError> {
-    let mut record = require(tx, &attempt.agent_id)?;
+    let Some(mut record) = load(tx, &attempt.agent_id)? else {
+        return Ok(Applied::Ignored);
+    };
+    if record.receiver_secret != attempt.receiver_secret {
+        return Ok(Applied::Ignored);
+    }
     update(tx, &attempt.agent_id, &mut record, |n, view| {
         n.apply_outcome(attempt.posted, outcome, view.cursor, now, policy, jitter)
     })
