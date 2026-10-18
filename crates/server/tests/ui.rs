@@ -1,5 +1,8 @@
-//! S6 browser UI: embedded static files, security headers, and the
-//! read-only contract (every endpoint the page calls is a GET).
+//! The browser console (S6, replaced by the S11 chat console): embedded
+//! static files, security headers, no external resources, text-only
+//! rendering, the token kept out of persistent storage, and every
+//! endpoint the page calls is a real route the owner may use with that
+//! method.
 
 mod common;
 
@@ -8,15 +11,19 @@ use std::collections::BTreeSet;
 use common::{Fixture, OWNER_TOKEN, RunningServer};
 use reqwest::header::HeaderMap;
 use reqwest::{Method, StatusCode};
+use serde_json::json;
 
 const INDEX_HTML: &str = include_str!("../ui/index.html");
 const APP_JS: &str = include_str!("../ui/app.js");
 const APP_CSS: &str = include_str!("../ui/app.css");
 const FAVICON_SVG: &str = include_str!("../ui/favicon.svg");
 
-/// The S6 spec's policy, verbatim.
+/// The S6 policy plus `blob:` images for the fetched avatars (S11).
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; \
-                   img-src 'self'; base-uri 'none'; frame-ancestors 'none'";
+                   img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'";
+
+/// The SVG namespace the script uses to build icons; a name, not a fetch.
+const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
     headers
@@ -109,27 +116,93 @@ fn page_has_no_inline_script_or_style() {
     // The only script element is the external, empty-bodied app.js.
     assert_eq!(INDEX_HTML.matches("<script").count(), 1);
     assert!(INDEX_HTML.contains("<script src=\"/assets/app.js\" defer></script>"));
+    // Script-built nodes may not carry a style attribute either (CSSOM only).
+    assert!(!APP_JS.contains("setAttribute('style'"));
+    assert!(!APP_JS.contains("{ style:") && !APP_JS.contains(", style:"));
 }
 
 #[test]
-fn script_only_sends_get_and_never_parses_html_or_persists_beyond_the_session() {
-    let methods: Vec<&str> = APP_JS
-        .match_indices("method:")
-        .map(|(at, _)| APP_JS[at..].lines().next().unwrap_or_default().trim())
+fn no_file_loads_anything_from_another_origin() {
+    let script = APP_JS.replace(SVG_NAMESPACE, "");
+    for (name, source) in [
+        ("index.html", INDEX_HTML),
+        ("app.css", APP_CSS),
+        ("app.js", script.as_str()),
+    ] {
+        for remote in ["http://", "https://", "//cdn", "@import", "url("] {
+            assert!(!source.contains(remote), "{name} contains {remote}");
+        }
+    }
+    let local_refs: Vec<&str> = INDEX_HTML
+        .match_indices("=\"/")
+        .map(|(at, _)| {
+            let rest = &INDEX_HTML[at + 2..];
+            &rest[..rest.find('"').unwrap_or(rest.len())]
+        })
         .collect();
-    assert_eq!(methods, ["method: 'GET',"]);
+    assert_eq!(
+        local_refs,
+        ["/assets/favicon.svg", "/assets/app.css", "/assets/app.js"]
+    );
+}
+
+#[test]
+fn script_never_parses_html_and_keeps_the_token_out_of_local_storage() {
     for forbidden in [
         "innerHTML",
         "outerHTML",
         "insertAdjacentHTML",
         "document.write",
-        "localStorage",
         "document.cookie",
         "eval(",
+        "new Function",
     ] {
         assert!(!APP_JS.contains(forbidden), "app.js uses {forbidden}");
     }
     assert!(APP_JS.starts_with("'use strict';"));
+
+    // localStorage is reached through one getter and one setter, for view
+    // preferences only.
+    let local: Vec<&str> = APP_JS
+        .lines()
+        .filter(|line| line.contains("localStorage"))
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"))
+        .collect();
+    assert_eq!(
+        local,
+        [
+            "return window.localStorage.getItem(key);",
+            "window.localStorage.setItem(key, value);"
+        ]
+    );
+    for line in APP_JS.lines().filter(|line| line.contains("prefSet(")) {
+        assert!(!line.to_lowercase().contains("token"), "{line}");
+    }
+    // The token key is only ever used with sessionStorage.
+    for line in APP_JS
+        .lines()
+        .filter(|line| line.contains("TOKEN_STORAGE_KEY"))
+    {
+        let line = line.trim();
+        assert!(
+            line.starts_with("const TOKEN_STORAGE_KEY") || line.contains("sessionStorage"),
+            "{line}"
+        );
+    }
+}
+
+/// Every `API.name(` the script calls, with the method it uses.
+fn request_pairs(source: &str) -> BTreeSet<(&str, &str)> {
+    source
+        .match_indices("request('")
+        .map(|(at, _)| {
+            let rest = &source[at + "request('".len()..];
+            let (method, rest) = rest.split_once("', API.").expect("request(METHOD, API.x(");
+            let name = &rest[..rest.find('(').expect("call")];
+            (method, name)
+        })
+        .collect()
 }
 
 /// The `/v1/` path literals in `app.js`, up to the closing quote.
@@ -144,32 +217,170 @@ fn endpoint_literals(source: &str) -> BTreeSet<&str> {
         .collect()
 }
 
-/// Every endpoint the page calls answers a GET from the owner, and the page
-/// names no other endpoint.
-#[tokio::test]
-async fn every_endpoint_the_page_calls_is_an_owner_get() {
-    let calls = [
-        ("/v1/agents", "/v1/agents".to_owned()),
-        ("/v1/messages", "/v1/messages?room_id=all".to_owned()),
-        (
-            "/v1/agents/${encodeURIComponent(agentId)}/inbox",
-            "/v1/agents/agent-a/inbox".to_owned(),
+/// What the page calls: API name, method, path literal, and a concrete
+/// request for it.
+struct Call {
+    name: &'static str,
+    method: Method,
+    literal: &'static str,
+    path: &'static str,
+    body: Option<(&'static str, Vec<u8>)>,
+}
+
+fn json_body(value: serde_json::Value) -> Option<(&'static str, Vec<u8>)> {
+    Some(("application/json", serde_json::to_vec(&value).unwrap()))
+}
+
+fn calls() -> Vec<Call> {
+    let png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0];
+    let call = |name, method, literal, path, body| Call {
+        name,
+        method,
+        literal,
+        path,
+        body,
+    };
+    vec![
+        call("owner", Method::GET, "/v1/owner", "/v1/owner", None),
+        call("agents", Method::GET, "/v1/agents", "/v1/agents", None),
+        call("rooms", Method::GET, "/v1/rooms", "/v1/rooms", None),
+        call(
+            "messages",
+            Method::GET,
+            "/v1/messages",
+            "/v1/messages?room_id=all",
+            None,
         ),
-        (
+        call(
+            "roomPost",
+            Method::POST,
+            "/v1/rooms/${encodeURIComponent(roomId)}/messages",
+            "/v1/rooms/dm%3Aagent-a%3Ahuman/messages",
+            json_body(json!({"sender_id": "human", "body": "hi", "client_key": "console-1"})),
+        ),
+        call(
+            "message",
+            Method::GET,
+            "/v1/messages/${encodeURIComponent(messageId)}",
+            "/v1/messages/msg-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+            None,
+        ),
+        call(
+            "profile",
+            Method::PUT,
+            "/v1/agents/${encodeURIComponent(agentId)}/profile",
+            "/v1/agents/agent-a/profile",
+            json_body(json!({"role": "ops"})),
+        ),
+        call(
+            "avatar",
+            Method::PUT,
+            "/v1/agents/${encodeURIComponent(agentId)}/avatar",
+            "/v1/agents/agent-a/avatar",
+            Some(("image/png", png)),
+        ),
+        call(
+            "avatar",
+            Method::GET,
+            "/v1/agents/${encodeURIComponent(agentId)}/avatar",
+            "/v1/agents/agent-a/avatar",
+            None,
+        ),
+        call(
+            "avatar",
+            Method::DELETE,
+            "/v1/agents/${encodeURIComponent(agentId)}/avatar",
+            "/v1/agents/agent-a/avatar",
+            None,
+        ),
+        call(
+            "receiver",
+            Method::PATCH,
+            "/v1/agents/${encodeURIComponent(agentId)}/receiver",
+            "/v1/agents/agent-a/receiver",
+            json_body(json!({"receiver_url": null})),
+        ),
+        call(
+            "membership",
+            Method::PUT,
+            "/v1/agents/${encodeURIComponent(agentId)}/membership/all",
+            "/v1/agents/agent-a/membership/all",
+            json_body(json!({"joined": true})),
+        ),
+        call(
+            "delivery",
+            Method::GET,
             "/v1/agents/${encodeURIComponent(agentId)}/delivery",
-            "/v1/agents/agent-a/delivery".to_owned(),
+            "/v1/agents/agent-a/delivery",
+            None,
         ),
-    ];
-    let expected: BTreeSet<&str> = calls.iter().map(|(literal, _)| *literal).collect();
-    assert_eq!(endpoint_literals(APP_JS), expected);
+        call(
+            "retry",
+            Method::POST,
+            "/v1/agents/${encodeURIComponent(agentId)}/delivery/retry",
+            "/v1/agents/agent-a/delivery/retry",
+            None,
+        ),
+        call(
+            "inbox",
+            Method::GET,
+            "/v1/agents/${encodeURIComponent(agentId)}/inbox",
+            "/v1/agents/agent-a/inbox",
+            None,
+        ),
+    ]
+}
+
+/// The page names exactly these endpoints and methods, and the owner gets a
+/// success from each (in this order, so the avatar exists to fetch and
+/// delete). The console never calls the read-marker endpoint.
+#[tokio::test]
+async fn every_endpoint_the_page_calls_answers_the_owner() {
+    let calls = calls();
+    let literals: BTreeSet<&str> = calls.iter().map(|call| call.literal).collect();
+    assert_eq!(endpoint_literals(APP_JS), literals);
+    let pairs: BTreeSet<(&str, &str)> = calls
+        .iter()
+        .map(|call| (call.method.as_str(), call.name))
+        .collect();
+    assert_eq!(request_pairs(APP_JS), pairs);
+    assert!(!APP_JS.contains("read-marker"));
 
     let fx = Fixture::new();
-    let server = RunningServer::start(&fx.load_config()).await;
+    let server = RunningServer::start(&fx.load_config_with_owner(&["human"])).await;
     let api = server.api();
     api.register("agent-a", None).await;
-    for (_, path) in &calls {
-        let reply = api.get(path, OWNER_TOKEN).await;
-        assert_eq!(reply.status, StatusCode::OK, "{path}: {}", reply.body);
+    api.register("human", None).await;
+    for call in &calls {
+        let (content_type, body) = match &call.body {
+            Some((content_type, body)) => {
+                (vec![("content-type", *content_type)], Some(body.clone()))
+            }
+            None => (Vec::new(), None),
+        };
+        let reply = api
+            .send_bytes(
+                call.method.clone(),
+                call.path,
+                Some(OWNER_TOKEN),
+                &content_type,
+                body,
+            )
+            .await;
+        let expected_missing = call.name == "message";
+        if expected_missing {
+            // A real route: the made-up id is simply not there.
+            reply.assert_error(404, "message_not_found");
+            continue;
+        }
+        assert!(
+            reply.status.is_success(),
+            "{} {}: {} {}",
+            call.method,
+            call.path,
+            reply.status,
+            String::from_utf8_lossy(&reply.bytes)
+        );
     }
 
     server.shutdown().await.unwrap();
