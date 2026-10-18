@@ -6,6 +6,7 @@
 //! | `Content-Type` is not `application/json` | 415 | `unsupported_media_type` |
 //! | wire body over [`MAX_WIRE_BODY_BYTES`] | 413 | `request_too_large` |
 //! | body is not JSON | 400 | `invalid_json` |
+//! | body is JSON but not an object | 422 | `invalid_field` (no `details.field`) |
 //! | field outside the allowed set | 422 | `unexpected_field` + `details.field` |
 //! | missing field, wrong type, invalid value | 422 | `invalid_field` + `details.field` |
 //!
@@ -18,7 +19,7 @@ use axum::extract::{DefaultBodyLimit, FromRequest, Request};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use platform_wire::codes;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde_json::error::Category;
 
 use super::ApiError;
@@ -76,11 +77,34 @@ fn body_rejection(rejection: BytesRejection) -> ApiError {
 }
 
 fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ApiError> {
+    // serde's derive also reads a struct from a sequence, positionally
+    // (`["x"]` into a one-field struct), so the shape is checked first.
+    if !is_object_text(bytes) {
+        return Err(non_object(bytes));
+    }
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value = serde_path_to_error::deserialize(&mut deserializer).map_err(classify)?;
     // Trailing non-whitespace after the value is a syntax error.
     deserializer.end().map_err(|_| invalid_json())?;
     Ok(value)
+}
+
+/// A JSON text is an object exactly when its first non-whitespace byte is `{`.
+fn is_object_text(bytes: &[u8]) -> bool {
+    let is_json_whitespace = |byte: &u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
+    bytes.iter().find(|byte| !is_json_whitespace(byte)) == Some(&b'{')
+}
+
+/// The rejection for a body that is not an object: syntax errors stay 400.
+fn non_object(bytes: &[u8]) -> ApiError {
+    if serde_json::from_slice::<IgnoredAny>(bytes).is_err() {
+        return invalid_json();
+    }
+    not_an_object()
+}
+
+fn not_an_object() -> ApiError {
+    ApiError::unprocessable(codes::INVALID_FIELD, "request body must be a JSON object")
 }
 
 fn invalid_json() -> ApiError {
@@ -107,7 +131,7 @@ fn classify(err: serde_path_to_error::Error<serde_json::Error>) -> ApiError {
     }
     let path = err.path().to_string();
     if path == "." {
-        return ApiError::unprocessable(codes::INVALID_FIELD, "request body must be a JSON object");
+        return not_an_object();
     }
     ApiError::invalid_field(&path, format!("invalid value for field `{path}`"))
 }
@@ -177,10 +201,35 @@ mod tests {
 
     #[test]
     fn non_object_body_is_invalid_field_without_name() {
-        let err = parse_sample("[]").unwrap_err();
-        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(err.code(), codes::INVALID_FIELD);
-        assert_eq!(detail_field(&err), None);
+        // `[true]` and `[true, null]` would read positionally into `Sample`.
+        for body in [
+            "[]",
+            "[true]",
+            " [true, null]",
+            "true",
+            "\"x\"",
+            "1",
+            "null",
+        ] {
+            let err = parse_sample(body).unwrap_err();
+            assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body:?}");
+            assert_eq!(err.code(), codes::INVALID_FIELD, "{body:?}");
+            assert_eq!(detail_field(&err), None, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_non_object_body_is_still_invalid_json() {
+        for body in ["[true", "[true] x", "tru", "   "] {
+            let err = parse_sample(body).unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{body:?}");
+            assert_eq!(err.code(), codes::INVALID_JSON, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn leading_whitespace_before_an_object_is_accepted() {
+        assert!(parse_sample(" \r\n\t{\"joined\": false}").is_ok());
     }
 
     #[test]

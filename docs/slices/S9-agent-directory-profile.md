@@ -42,7 +42,7 @@ wire 의미는 API_V1 "Agent 등록과 directory"가 정본, 판정 방법과 �
 
 ## 구현 중 발견 (2026-10-17)
 - smoke의 `--name "smoke $agent"`는 38자라 상한(32)을 넘어 첫 실행에서 실패했다. 위처럼 정정.
-- serde 파생 역직렬화는 JSON 배열을 위치 필드로 읽어 `[]`가 빈 profile 갱신(200), `["x"]`가 `name` 설정으로 통했다. 테스트로 잡아 `UpdateProfileRequest`는 객체만 받게 고쳤다. **같은 구멍이 기존 요청 타입(`POST /v1/agents` 등)에도 있다** — 범위 밖이라 두었고, 별도 결함 수정(실패 테스트 먼저)으로 처리한다.
+- serde 파생 역직렬화는 JSON 배열을 위치 필드로 읽어 `[]`가 빈 profile 갱신(200), `["x"]`가 `name` 설정으로 통했다. 테스트로 잡아 `UpdateProfileRequest`는 객체만 받게 고쳤다. **같은 구멍이 기존 요청 타입(`POST /v1/agents` 등)에도 있다** — 범위 밖이라 두었고, 별도 결함 수정(실패 테스트 먼저)으로 처리한다. → 2026-10-18 수정: `StrictJson`이 typed 역직렬화 전에 최상위 값이 객체인지 보고, 객체가 아닌 유효 JSON은 422 `invalid_field`(`details.field` 없음)로 거부한다. JSON body를 받는 7개 endpoint 모두에 적용되며, 고치기 전 6개 endpoint의 배열 body가 201/200으로 통하는 실패를 `crates/server/tests/non_object_body.rs`로 먼저 보였다(profile은 이미 거부).
 - CLI 표는 문자 수로 패딩해 한글 이름이 섞인 `NAME` 열이 시각적으로 어긋난다(기존 표 코드 한계, AGENT_GUIDE §4.2에 명시).
 
 ## 검증 방법 (증거 필수)

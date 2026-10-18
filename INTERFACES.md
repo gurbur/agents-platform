@@ -273,10 +273,11 @@
 - **종류**: 오류 규칙(API_V1 "잘못된 JSON·필드 형식은 400 또는 422"의 구체화) · **제공자**: `platformd::api::StrictJson` · **소비자**: 모든 write handler
 - `Content-Type`이 `application/json`이 아니면 415 `unsupported_media_type`.
 - body가 JSON으로 파싱되지 않으면 400 `invalid_json`.
+- body는 JSON 객체여야 한다. 파싱되지만 최상위 값이 객체가 아니면(배열·문자열·숫자·`null` 등) 422 `invalid_field`, `details.field` 없음 — 배열을 필드 순서대로 읽지 않는다.
 - 허용 밖 필드(`deny_unknown_fields`) → 422 `unexpected_field`, `details: {"field": "<이름>"}`.
 - 필수 필드 누락·타입 불일치·형식 위반(`Seq`, 길이 등) → 422 `invalid_field`, `details: {"field": "<이름>"}`(알 수 있을 때). 단 API_V1이 전용 code를 둔 경우(`invalid_agent_id`, `invalid_receiver_url`, `body_too_large`, `request_too_large`, `self_dm_not_supported`, `reply_to_room_mismatch`, `read_marker_ahead`, `mutually_exclusive_cursors`, `unknown_audience`, `ttl_too_long`)는 그 code가 우선.
 - 크기: wire body > 128 KiB → 413 `request_too_large`(파싱 전 차단). decoded `body` > 16 KiB → 413 `body_too_large`.
-- **상태**: frozen · 2026-10-15
+- **상태**: frozen · 2026-10-15 · 비객체 body 규칙 명시 2026-10-18
 
 ### `IF-WIRE-003 — API_V1 오류표 보충 code`
 
