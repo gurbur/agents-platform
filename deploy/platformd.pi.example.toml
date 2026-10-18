@@ -19,6 +19,13 @@ owner_token_file = "/etc/platformd/owner.token"
 # Receiver callback tuning is optional; omit [delivery] to use the defaults
 # documented in platformd.example.toml.
 
+# Owner room posting is optional; without [owner] the owner cannot post into
+# rooms (403 for every sender_id). The production hub lets the owner post as
+# its human agent: uncomment the table and set post_as = ["human"], then
+# restart platformd.service. List only identities that are the owner.
+#[owner]
+#post_as = []
+
 # Identity attestation is optional; without [identity] the token endpoint
 # answers 503 identity_disabled. To enable it, create the key with
 #   sudo platformd identity keygen --out /etc/platformd/identity.key

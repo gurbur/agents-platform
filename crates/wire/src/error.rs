@@ -66,6 +66,9 @@ pub mod codes {
     pub const INTERNAL: &str = "internal";
     pub const REPLY_TO_NOT_FOUND: &str = "reply_to_not_found";
     pub const MESSAGE_NOT_FOUND: &str = "message_not_found";
+    /// `POST /v1/rooms/{room_id}/messages` into a DM whose member is not
+    /// registered (API_V1 "Room 목록과 owner 게시", `IF-WIRE-007`).
+    pub const UNKNOWN_ROOM: &str = "unknown_room";
     /// 503 from `GET /healthz` when the database round trip fails. Not listed
     /// in API_V1; chosen in S0 for the `IF-OPS-001` failure path.
     pub const UNAVAILABLE: &str = "unavailable";

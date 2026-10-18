@@ -121,25 +121,12 @@ fn validate(sender: AgentId, request: SendMessageRequest) -> Result<ValidSend, A
         reply_to,
     } = request;
 
-    if !is_valid_client_key(&client_key) {
-        return Err(ApiError::invalid_field(
-            "client_key",
-            format!("client_key must be 1..={MAX_CLIENT_KEY_BYTES} ASCII bytes"),
-        ));
-    }
-    if body.len() > MAX_BODY_BYTES {
-        return Err(ApiError::payload_too_large(
-            codes::BODY_TOO_LARGE,
-            format!("body exceeds {MAX_BODY_BYTES} bytes of UTF-8"),
-        ));
-    }
+    check_client_key(&client_key)?;
+    check_body_size(&body)?;
     let to = to
         .parse::<Recipient>()
         .map_err(|err| ApiError::invalid_field("to", err.to_string()))?;
-    let reply_to = reply_to
-        .map(|raw| raw.parse::<MessageId>())
-        .transpose()
-        .map_err(|err| ApiError::invalid_field("reply_to", err.to_string()))?;
+    let reply_to = parse_reply_to(reply_to)?;
 
     Ok(ValidSend {
         sender,
@@ -150,18 +137,48 @@ fn validate(sender: AgentId, request: SendMessageRequest) -> Result<ValidSend, A
     })
 }
 
+/// 422 `invalid_field` unless `client_key` is 1..=128 ASCII bytes.
+pub(super) fn check_client_key(client_key: &str) -> Result<(), ApiError> {
+    if is_valid_client_key(client_key) {
+        return Ok(());
+    }
+    Err(ApiError::invalid_field(
+        "client_key",
+        format!("client_key must be 1..={MAX_CLIENT_KEY_BYTES} ASCII bytes"),
+    ))
+}
+
+/// 413 `body_too_large` above 16 KiB of decoded UTF-8.
+pub(super) fn check_body_size(body: &str) -> Result<(), ApiError> {
+    if body.len() <= MAX_BODY_BYTES {
+        return Ok(());
+    }
+    Err(ApiError::payload_too_large(
+        codes::BODY_TOO_LARGE,
+        format!("body exceeds {MAX_BODY_BYTES} bytes of UTF-8"),
+    ))
+}
+
+/// The optional `reply_to`, which must be a `msg-` ULID (`IF-WIRE-005`).
+pub(super) fn parse_reply_to(raw: Option<String>) -> Result<Option<MessageId>, ApiError> {
+    raw.map(|raw| raw.parse::<MessageId>())
+        .transpose()
+        .map_err(|err| ApiError::invalid_field("reply_to", err.to_string()))
+}
+
 fn is_valid_client_key(client_key: &str) -> bool {
     (1..=MAX_CLIENT_KEY_BYTES).contains(&client_key.len()) && client_key.is_ascii()
 }
 
-fn new_message_id() -> MessageId {
+pub(super) fn new_message_id() -> MessageId {
     // Invariant: a ULID always prints as 26 upper-case Crockford digits
     // starting with 0..=7, which is exactly what `MessageId` accepts.
     MessageId::from_ulid_text(&Ulid::generate().to_string())
         .expect("a generated ULID is a valid message_id")
 }
 
-fn rejection_error(rejection: SendRejection) -> ApiError {
+/// The error for a send or owner post that committed nothing.
+pub(super) fn rejection_error(rejection: SendRejection) -> ApiError {
     match rejection {
         SendRejection::IdempotencyConflict => ApiError::conflict(
             codes::IDEMPOTENCY_CONFLICT,
@@ -185,6 +202,13 @@ fn rejection_error(rejection: SendRejection) -> ApiError {
         SendRejection::ReplyToRoomMismatch => ApiError::unprocessable(
             codes::REPLY_TO_ROOM_MISMATCH,
             "reply_to names a message in another room",
+        ),
+        SendRejection::UnknownSender => {
+            ApiError::agent_not_found().with_detail("field", "sender_id")
+        }
+        SendRejection::UnknownRoom => ApiError::not_found(
+            codes::UNKNOWN_ROOM,
+            "a member of this DM room is not a registered agent",
         ),
     }
 }

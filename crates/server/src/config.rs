@@ -9,6 +9,7 @@ use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
+use platform_wire::AgentId;
 use platform_wire::identity::MAX_TOKEN_LIFETIME_SECS;
 use serde::Deserialize;
 
@@ -78,6 +79,41 @@ pub struct Config {
     /// `None` when the `[identity]` table is absent: identity attestation is
     /// disabled.
     pub identity: Option<IdentityConfig>,
+    pub owner: OwnerConfig,
+}
+
+/// `[owner]` after validation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OwnerConfig {
+    /// Agents the owner may name as `sender_id` of
+    /// `POST /v1/rooms/{room_id}/messages`. Empty (the default) turns owner
+    /// posting off.
+    pub post_as: Vec<AgentId>,
+}
+
+/// On-disk `[owner]`; the table and `post_as` are optional.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct OwnerFile {
+    post_as: Vec<String>,
+}
+
+impl OwnerFile {
+    /// Startup checks: every entry is an `agent_id` (reserved words
+    /// refused) and listed once.
+    fn validate(self) -> Result<OwnerConfig, String> {
+        let mut post_as: Vec<AgentId> = Vec::with_capacity(self.post_as.len());
+        for raw in self.post_as {
+            let agent_id: AgentId = raw
+                .parse()
+                .map_err(|err| format!("owner.post_as entry {raw:?}: {err}"))?;
+            if post_as.contains(&agent_id) {
+                return Err(format!("owner.post_as lists {raw:?} twice"));
+            }
+            post_as.push(agent_id);
+        }
+        Ok(OwnerConfig { post_as })
+    }
 }
 
 /// `[identity]` after validation, with the signing key loaded.
@@ -204,6 +240,8 @@ struct ConfigFile {
     delivery: DeliveryConfig,
     #[serde(default)]
     identity: Option<IdentityFile>,
+    #[serde(default)]
+    owner: OwnerFile,
 }
 
 fn default_listen() -> SocketAddr {
@@ -230,6 +268,7 @@ impl Config {
         if let Some(identity) = &file.identity {
             identity.validate().map_err(invalid)?;
         }
+        let owner = file.owner.validate().map_err(invalid)?;
 
         let base = config_dir(path);
         let db_path = base.join(&file.db_path);
@@ -247,6 +286,7 @@ impl Config {
             owner_token,
             delivery: file.delivery,
             identity,
+            owner,
         })
     }
 }
@@ -724,6 +764,103 @@ mod tests {
         );
         let commented: ConfigFile = toml::from_str(&example).unwrap();
         assert!(commented.identity.is_none());
+    }
+
+    // ---- [owner] -------------------------------------------------------------
+
+    fn owner_config(fx: &Fixture, table: &str) -> PathBuf {
+        fx.write("owner.token", VALID_TOKEN);
+        fx.config(&format!("{MINIMAL}{table}"))
+    }
+
+    #[test]
+    fn owner_posting_is_off_without_the_table() {
+        let fx = Fixture::new();
+        let config = Config::load(&owner_config(&fx, "")).unwrap();
+        assert!(config.owner.post_as.is_empty());
+        let config = Config::load(&owner_config(&fx, "[owner]\n")).unwrap();
+        assert!(config.owner.post_as.is_empty(), "post_as defaults to empty");
+    }
+
+    #[test]
+    fn owner_post_as_is_applied_in_order() {
+        let fx = Fixture::new();
+        let path = owner_config(&fx, "[owner]\npost_as = [\"human\", \"ops-desk\"]\n");
+        let config = Config::load(&path).unwrap();
+        let expected: Vec<AgentId> = vec!["human".parse().unwrap(), "ops-desk".parse().unwrap()];
+        assert_eq!(config.owner.post_as, expected);
+    }
+
+    #[test]
+    fn owner_post_as_entries_are_agent_ids_listed_once() {
+        for (list, needle) in [
+            ("[\"Human\"]", "Human"),
+            ("[\"owner\"]", "owner"),
+            ("[\"all\"]", "all"),
+            ("[\"\"]", "owner.post_as"),
+            ("[\"human\", \"human\"]", "twice"),
+        ] {
+            let fx = Fixture::new();
+            let path = owner_config(&fx, &format!("[owner]\npost_as = {list}\n"));
+            assert_invalid(&path, needle);
+        }
+    }
+
+    #[test]
+    fn owner_rejects_unknown_keys() {
+        let fx = Fixture::new();
+        let path = owner_config(&fx, "[owner]\npost_as = []\npost_as_anyone = true\n");
+        assert!(matches!(
+            Config::load(&path),
+            Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    /// Uncomments every `#`-prefixed TOML line of the example's `#[owner]`
+    /// block, which ends at the first line that is not commented TOML.
+    fn uncomment_owner_block(example: &str) -> String {
+        let start = example.find("#[owner]").expect("commented [owner] block");
+        let (before, block) = example.split_at(start);
+        let mut lines: Vec<String> = Vec::new();
+        let mut in_block = true;
+        for line in block.lines() {
+            match line.strip_prefix('#') {
+                Some(rest) if in_block && !rest.starts_with([' ', '#']) && !rest.is_empty() => {
+                    lines.push(rest.to_owned());
+                }
+                _ => {
+                    in_block = false;
+                    lines.push(line.to_owned());
+                }
+            }
+        }
+        format!("{before}{}\n", lines.join("\n"))
+    }
+
+    #[test]
+    fn example_owner_block_loads_once_uncommented() {
+        let example = include_str!("../../../platformd.example.toml");
+        let fx = Fixture::new();
+        fx.write("owner.token", VALID_TOKEN);
+        let enabled = uncomment_owner_block(example);
+        assert!(enabled.contains("\n[owner]\n"), "{enabled}");
+
+        let config = Config::load(&fx.config(&enabled)).unwrap();
+
+        assert!(config.owner.post_as.is_empty(), "the example keeps it off");
+        assert!(config.identity.is_none(), "[identity] stays commented");
+    }
+
+    #[test]
+    fn pi_example_owner_block_parses_once_uncommented() {
+        let example = include_str!("../../../deploy/platformd.pi.example.toml")
+            .replace("100.x.y.z", "100.64.0.1");
+        let enabled = uncomment_owner_block(&example);
+        assert!(enabled.contains("\n[owner]\n"), "{enabled}");
+        let file: ConfigFile = toml::from_str(&enabled).unwrap();
+        assert!(file.owner.validate().unwrap().post_as.is_empty());
+        let commented: ConfigFile = toml::from_str(&example).unwrap();
+        assert!(commented.owner.post_as.is_empty());
     }
 
     #[test]

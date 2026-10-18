@@ -103,11 +103,15 @@ pub async fn start(config: &Config) -> Result<Server, StartupError> {
         ),
         None => info!("identity attestation disabled (no [identity] table)"),
     }
+    // Agent ids are not secrets; the allowlist is worth seeing at startup.
+    let post_as: Vec<&str> = config.owner.post_as.iter().map(|id| id.as_str()).collect();
+    info!(?post_as, "owner room posting allowlist");
     let router = api::router(api::AppState::new(
         store,
         config.owner_token.clone(),
         delivery.clone(),
         identity,
+        config.owner.post_as.clone(),
     ));
 
     Ok(Server {

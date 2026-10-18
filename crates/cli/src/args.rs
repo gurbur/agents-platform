@@ -16,6 +16,7 @@ use crate::commands::inbox::InboxArgs;
 use crate::commands::message::MessageCommand;
 use crate::commands::profile::ProfileCommand;
 use crate::commands::receiver::ReceiverCommand;
+use crate::commands::rooms::RoomCommand;
 use crate::commands::send::SendArgs;
 use crate::error::CliError;
 
@@ -63,6 +64,11 @@ pub enum Command {
     Inbox(InboxArgs),
     /// Read a room's history — GET /v1/messages
     History(HistoryArgs),
+    /// List every room, agent-to-agent DMs included (owner) — GET /v1/rooms
+    Rooms,
+    /// Post into a room as an allowlisted agent (owner)
+    #[command(subcommand)]
+    Room(RoomCommand),
     /// Single message lookup
     #[command(subcommand)]
     Message(MessageCommand),

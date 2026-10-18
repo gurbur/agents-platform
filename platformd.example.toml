@@ -21,6 +21,14 @@ backoff_min_secs = 1
 backoff_max_secs = 300
 redrive_after_secs = 300
 
+# Owner room posting (docs/adr/0007-owner-posts-into-any-room.md). Optional:
+# without this table post_as is empty and POST /v1/rooms/{room_id}/messages
+# answers 403 for every sender_id. post_as lists the agent_ids the owner may
+# post as; list only identities that are the owner (e.g. "human"), never
+# another agent. Each entry must be a registered agent to be usable.
+#[owner]
+#post_as = []
+
 # Identity attestation (docs/design/IDENTITY_ATTESTATION.md). Optional:
 # without this table POST /v1/identity/tokens answers 503 identity_disabled
 # and the rest of the API is unaffected. To enable, create the key with

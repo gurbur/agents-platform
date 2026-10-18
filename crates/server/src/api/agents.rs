@@ -40,7 +40,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Extractor: the caller is the owner (else 401/403).
-struct OwnerOnly;
+pub(super) struct OwnerOnly;
 
 impl FromRequestParts<AppState> for OwnerOnly {
     type Rejection = ApiError;

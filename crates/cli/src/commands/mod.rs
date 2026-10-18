@@ -12,6 +12,7 @@ pub mod inbox;
 pub mod message;
 pub mod profile;
 pub mod receiver;
+pub mod rooms;
 pub mod send;
 
 use std::io::Read;
@@ -54,6 +55,8 @@ pub async fn run(command: Command, context: &Context) -> Result<(), CliError> {
         Command::Delivery(args) => delivery::run(args, context).await,
         Command::Identity(command) => identity::run(command, context).await,
         Command::Profile(command) => profile::run(command, context).await,
+        Command::Rooms => rooms::list(context).await,
+        Command::Room(command) => rooms::run(command, context).await,
         Command::Health => health::run(context).await,
     }
 }

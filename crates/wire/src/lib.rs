@@ -13,6 +13,7 @@ pub mod identity;
 pub mod inbox;
 pub mod messages;
 pub mod profile;
+pub mod rooms;
 pub mod seq;
 
 pub use agent_id::{AgentId, AgentIdError};
@@ -35,4 +36,5 @@ pub use profile::{
     ProfileField, ProfileFieldError, ProfileFieldProblem, ProfileResponse, ProfileUpdate,
     UnknownValue, UpdateProfileRequest, validate_name,
 };
+pub use rooms::{ROOMS_SOFT_CAP, RoomKind, RoomList, RoomPostRequest, RoomSummary};
 pub use seq::{Seq, SeqError};

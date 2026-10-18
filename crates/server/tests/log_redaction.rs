@@ -335,3 +335,45 @@ async fn tokens_and_seed_do_not_appear_in_logs() {
     }
     assert!(!logs.contains(&agent.api_key), "an API key was logged");
 }
+
+#[tokio::test]
+async fn room_post_bodies_do_not_appear_in_logs() {
+    let captured = install_capture();
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config_with_owner(&["human"])).await;
+    let api = server.api();
+    api.register("agent-a", None).await;
+    api.register("agent-b", None).await;
+    api.register("human", None).await;
+
+    let body_marker = "ROOM-POST-MARKER-do-not-log";
+    for (room, key) in [("dm:agent-a:agent-b", "room-key-1"), ("all", "room-key-2")] {
+        let reply = api
+            .post(
+                &format!("/v1/rooms/{room}/messages"),
+                OWNER_TOKEN,
+                json!({"sender_id": "human", "body": body_marker, "client_key": key}),
+            )
+            .await;
+        assert_eq!(reply.status.as_u16(), 201, "{}", reply.body);
+    }
+    api.post(
+        "/v1/rooms/dm:agent-a:agent-b/messages",
+        OWNER_TOKEN,
+        json!({"sender_id": "human", "body": "ROOM-POST-MARKER-conflict", "client_key": "room-key-1"}),
+    )
+    .await
+    .assert_error(409, "idempotency_conflict");
+    api.get("/v1/rooms", OWNER_TOKEN).await;
+    server.shutdown().await.unwrap();
+
+    let logs = captured.text();
+    assert!(
+        !logs.contains("ROOM-POST-MARKER"),
+        "a room post body was logged"
+    );
+    assert!(
+        logs.contains("post_as"),
+        "startup logs the allowlist: {logs}"
+    );
+}

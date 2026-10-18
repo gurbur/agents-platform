@@ -12,6 +12,7 @@ mod messages;
 mod query;
 mod receiver_url;
 mod request_id;
+mod rooms;
 mod ui;
 
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use std::sync::Arc;
 use axum::extract::{FromRef, State};
 use axum::routing::get;
 use axum::{Json, Router, middleware};
-use platform_wire::{HealthStatus, codes};
+use platform_wire::{AgentId, HealthStatus, codes};
 use tracing::warn;
 
 use crate::auth::Authenticator;
@@ -40,6 +41,8 @@ pub struct AppState {
     delivery: DeliverySignal,
     /// `None` when identity attestation is disabled.
     identity: Option<Arc<Issuer>>,
+    /// `[owner] post_as`: the agents the owner may post as (`IF-CFG-001`).
+    post_as: Arc<[AgentId]>,
 }
 
 impl AppState {
@@ -48,6 +51,7 @@ impl AppState {
         owner_token: OwnerToken,
         delivery: DeliverySignal,
         identity: Option<Issuer>,
+        post_as: Vec<AgentId>,
     ) -> Self {
         let authenticator = Authenticator::new(owner_token, store.clone());
         Self {
@@ -55,6 +59,7 @@ impl AppState {
             authenticator,
             delivery,
             identity: identity.map(Arc::new),
+            post_as: post_as.into(),
         }
     }
 }
@@ -72,6 +77,7 @@ pub fn router(state: AppState) -> Router {
         .merge(delivery::routes())
         .merge(messages::routes())
         .merge(inbox::routes())
+        .merge(rooms::routes())
         .merge(identity::routes())
         .merge(ui::routes())
         .fallback(not_found)

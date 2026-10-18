@@ -2,13 +2,15 @@
 # Acceptance smoke against a running platformd, through the `platform` CLI
 # and curl. Prints a PASS/FAIL/SKIP table; exits 1 if anything failed.
 #
-# Usage: deploy/smoke.sh <base-url> <owner-token-file> [--receiver-url URL] [--identity-aud AUD] [--platform PATH]
+# Usage: deploy/smoke.sh <base-url> <owner-token-file> [--receiver-url URL] [--identity-aud AUD] [--post-as AGENT_ID] [--platform PATH]
 #   <base-url>          e.g. http://100.x.y.z:7340 or http://127.0.0.1:7340
 #   <owner-token-file>  file holding the owner token (read, never printed)
 #   --receiver-url URL  a mock receiver the server can reach (deploy/mock-receiver.py);
 #                       without it the receiver scenario is SKIP
 #   --identity-aud AUD  audience for the identity token scenario (default: garage-docs);
 #                       a hub without [identity] makes that scenario SKIP
+#   --post-as AGENT_ID  a registered agent in the hub's [owner] post_as (e.g. human);
+#                       without it the owner barge-in part of the room post scenario is SKIP
 #   --platform PATH     platform CLI binary (default: `platform` on PATH)
 #
 # Every run registers new agents named smoke-<ulid> (v1 has no delete), so
@@ -30,6 +32,7 @@ base_url=""
 owner_token_file=""
 receiver_url=""
 identity_aud="$DEFAULT_IDENTITY_AUD"
+post_as=""
 platform_bin=platform
 workdir=""
 
@@ -44,7 +47,7 @@ all_message_id="" dm_message_id="" dm_room=""
 snapshot_head=""
 
 usage() {
-  sed -n '5,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '5,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -60,6 +63,11 @@ parse_args() {
       --identity-aud)
         [[ $# -ge 2 ]] || usage
         identity_aud="$2"
+        shift
+        ;;
+      --post-as)
+        [[ $# -ge 2 ]] || usage
+        post_as="$2"
         shift
         ;;
       --platform)
@@ -531,6 +539,89 @@ check_identity_token() {
   note="kid $kid, exp-iat $(jq '.exp - .iat' <<<"$claims")s, owner 403"
 }
 
+# Scenario 14, list half: the owner sees the smoke DM room with its two
+# members and `all`; an agent key is refused.
+check_rooms_list() {
+  local json
+  json="$(cli "$owner_token_file" rooms)" || {
+    note="platform rooms failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" "any(.rooms[]; .room_id == \"$dm_room\" and .kind == \"dm\"
+      and .members == (\"$dm_room\" | ltrimstr(\"dm:\") | split(\":\"))
+      and (.last_sender_id | type == \"string\") and .message_count >= 1)" \
+    "rooms lacks $dm_room with its members" || return 1
+  expect_json "$json" 'any(.rooms[]; .room_id == "all" and .kind == "all")' "rooms lacks all" || return 1
+  api GET /v1/rooms "$(token_file "$agent_a")"
+  expect_status 403 "agent key on GET /v1/rooms" || return 1
+  expect_json "$http_body" '.error.code == "forbidden"' "agent rooms code: $http_body" || return 1
+  note="$(jq '.rooms | length' <<<"$json") rooms, agent 403"
+}
+
+# Scenario 14, post half: agent key and a non-allowlisted sender are 403;
+# with --post-as the owner barges into the smoke DM as that agent, both
+# smoke agents get the row, the room history shows it, a replay is 200 and
+# a DM room with an unregistered member is 404. Bodies stay out of notes.
+check_owner_room_post() {
+  local path="/v1/rooms/$dm_room/messages" request
+  request="$(jq -nc --arg sender "$agent_a" '{sender_id: $sender, body: "smoke barge-in", client_key: "smoke-barge"}')"
+  api POST "$path" "$(token_file "$agent_a")" "$request"
+  expect_status 403 "agent key on room post" || return 1
+  expect_json "$http_body" '.error.code == "forbidden"' "agent post code: $http_body" || return 1
+  api POST "$path" "$owner_token_file" "$request"
+  expect_status 403 "sender outside post_as" || return 1
+  expect_json "$http_body" '.error.code == "forbidden" and .error.details.field == "sender_id"' \
+    "allowlist code: $http_body" || return 1
+  if [[ -z "$post_as" ]]; then
+    skip_note="403s pass; barge-in needs --post-as"
+    return 0
+  fi
+
+  local key json message_id
+  key="smoke-barge-$(new_ulid)"
+  json="$(cli "$owner_token_file" room post "$dm_room" --as "$post_as" --body "smoke barge-in" \
+    --reply-to "$dm_message_id" --client-key "$key")" || {
+    note="platform room post as $post_as failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" ".room_id == \"$dm_room\" and .sender_id == \"$post_as\" and .reply_to == \"$dm_message_id\"" \
+    "room post response does not match" || return 1
+  message_id="$(jq -r .message_id <<<"$json")"
+  local agent
+  for agent in "$agent_a" "$agent_b"; do
+    inbox_has "$agent" "$message_id" || {
+      note="$agent inbox lacks the barge-in"
+      return 1
+    }
+  done
+  json="$(cli "$(token_file "$agent_a")" history --room "$dm_room")" || {
+    note="history of $dm_room failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" "any(.items[]; .message_id == \"$message_id\" and .sender_id == \"$post_as\")" \
+    "room history lacks the barge-in" || return 1
+
+  request="$(jq -nc --arg sender "$post_as" --arg key "$key" --arg reply "$dm_message_id" \
+    '{sender_id: $sender, body: "smoke barge-in", client_key: $key, reply_to: $reply}')"
+  api POST "$path" "$owner_token_file" "$request"
+  expect_status 200 "replayed room post" || return 1
+  expect_json "$http_body" ".message_id == \"$message_id\" and .deduplicated == true" \
+    "replay did not return the original" || return 1
+
+  local ghost unknown_room
+  ghost="smoke-unknown-$(new_ulid)"
+  if [[ "$agent_a" < "$ghost" ]]; then
+    unknown_room="dm:$agent_a:$ghost"
+  else
+    unknown_room="dm:$ghost:$agent_a"
+  fi
+  api POST "/v1/rooms/$unknown_room/messages" "$owner_token_file" \
+    "$(jq -nc --arg sender "$post_as" '{sender_id: $sender, body: "x", client_key: "smoke-unknown-room"}')"
+  expect_status 404 "room with an unregistered member" || return 1
+  expect_json "$http_body" '.error.code == "unknown_room"' "unknown room code: $http_body" || return 1
+  note="as $post_as: both members got it, replay 200, unknown_room 404, 403s"
+}
+
 # Leaves `all` and drops receivers so smoke agents stop accumulating.
 check_cleanup() {
   local agent failed=""
@@ -594,6 +685,8 @@ main() {
   scenario "owner reads do not ack (12)" check_owner_no_ack
   scenario "delivery no_receiver" check_delivery_no_receiver
   scenario "rotate: old key 401 (12)" check_rotate
+  scenario "rooms list (14)" check_rooms_list
+  scenario "owner room post (14)" check_owner_room_post
   if [[ -n "$receiver_url" ]]; then
     agent_r="smoke-$(new_ulid)"
     scenario "receiver 202 keeps marker (5)" check_receiver

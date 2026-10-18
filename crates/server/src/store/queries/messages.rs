@@ -27,6 +27,19 @@ pub struct SendCommand {
     pub created_at: String,
 }
 
+/// A validated owner post (`POST /v1/rooms/{room_id}/messages`). `sender`
+/// is already known to be in `[owner] post_as`; `message_id` and
+/// `created_at` are used only if the request is new.
+pub struct RoomPostCommand {
+    pub sender: AgentId,
+    pub client_key: String,
+    pub room: RoomId,
+    pub body: String,
+    pub reply_to: Option<MessageId>,
+    pub message_id: MessageId,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendOutcome {
     /// Committed now. `recipients` is the number of inbox rows written.
@@ -49,6 +62,10 @@ pub enum SendRejection {
     UnknownRecipient,
     ReplyToNotFound,
     ReplyToRoomMismatch,
+    /// Owner post only: the allowlisted `sender_id` is not registered.
+    UnknownSender,
+    /// Owner post only: a member of the DM room is not registered.
+    UnknownRoom,
 }
 
 /// History direction and exclusive bound.
@@ -96,52 +113,151 @@ pub fn canonical_request_hash(to: &str, body: &str, reply_to: Option<&str>) -> S
 /// delivery transition, `IF-DLV-001`) and the key are written. Every
 /// rejection happens before the first write.
 pub fn commit_send(tx: &Transaction, command: &SendCommand) -> Result<SendOutcome, StoreError> {
-    let to_text = command.to.to_string();
     let request_hash = canonical_request_hash(
-        &to_text,
+        &command.to.to_string(),
         &command.body,
         command.reply_to.as_ref().map(MessageId::as_str),
     );
-
-    if let Some((stored_hash, message_id)) =
-        find_idempotency(tx, &command.sender, &command.client_key)?
-    {
-        if stored_hash != request_hash {
-            return Ok(SendOutcome::Rejected(SendRejection::IdempotencyConflict));
-        }
-        let original = find_message(tx, &message_id)?.ok_or_else(|| {
-            StoreError::Invariant("idempotency row points at a missing message".to_owned())
-        })?;
-        return Ok(SendOutcome::Deduplicated(original));
+    if let Some(replayed) = replay(tx, &command.sender, &command.client_key, &request_hash)? {
+        return Ok(replayed);
     }
 
     let (room, recipients) = match resolve_recipients(tx, &command.sender, &command.to)? {
         Ok(resolved) => resolved,
         Err(rejection) => return Ok(SendOutcome::Rejected(rejection)),
     };
-    if let Some(reply_to) = &command.reply_to {
-        match find_room_of(tx, reply_to)? {
-            None => return Ok(SendOutcome::Rejected(SendRejection::ReplyToNotFound)),
-            Some(reply_room) if reply_room != room.to_string() => {
-                return Ok(SendOutcome::Rejected(SendRejection::ReplyToRoomMismatch));
-            }
-            Some(_) => {}
-        }
+    if let Some(rejection) = check_reply_to(tx, command.reply_to.as_ref(), &room)? {
+        return Ok(SendOutcome::Rejected(rejection));
     }
 
+    let draft = Draft {
+        sender: &command.sender,
+        client_key: &command.client_key,
+        request_hash: &request_hash,
+        room,
+        body: &command.body,
+        reply_to: command.reply_to.as_ref(),
+        message_id: &command.message_id,
+        created_at: &command.created_at,
+    };
+    commit_new(tx, draft, &recipients)
+}
+
+/// The `POST /v1/rooms/{room_id}/messages` transaction (`IF-WIRE-007`
+/// 11–15): sender registered, then the idempotency lookup in the sender's
+/// own namespace (the room id stands in for `to` in the canonical hash),
+/// then the room's members and `reply_to`. Recipients are the room members
+/// minus the sender; `all` needs no membership of the sender. The writes are
+/// those of [`commit_send`].
+pub fn commit_room_post(
+    tx: &Transaction,
+    command: &RoomPostCommand,
+) -> Result<SendOutcome, StoreError> {
+    if !agent_exists(tx, &command.sender)? {
+        return Ok(SendOutcome::Rejected(SendRejection::UnknownSender));
+    }
+    let request_hash = canonical_request_hash(
+        &command.room.to_string(),
+        &command.body,
+        command.reply_to.as_ref().map(MessageId::as_str),
+    );
+    if let Some(replayed) = replay(tx, &command.sender, &command.client_key, &request_hash)? {
+        return Ok(replayed);
+    }
+
+    let Some(recipients) = room_recipients(tx, &command.sender, &command.room)? else {
+        return Ok(SendOutcome::Rejected(SendRejection::UnknownRoom));
+    };
+    if let Some(rejection) = check_reply_to(tx, command.reply_to.as_ref(), &command.room)? {
+        return Ok(SendOutcome::Rejected(rejection));
+    }
+
+    let draft = Draft {
+        sender: &command.sender,
+        client_key: &command.client_key,
+        request_hash: &request_hash,
+        room: command.room.clone(),
+        body: &command.body,
+        reply_to: command.reply_to.as_ref(),
+        message_id: &command.message_id,
+        created_at: &command.created_at,
+    };
+    commit_new(tx, draft, &recipients)
+}
+
+/// The idempotency lookup both sends start with. `Some` ends the request:
+/// the original message for the same canonical request, a conflict for a
+/// different one.
+fn replay(
+    conn: &Connection,
+    sender: &AgentId,
+    client_key: &str,
+    request_hash: &str,
+) -> Result<Option<SendOutcome>, StoreError> {
+    let Some((stored_hash, message_id)) = find_idempotency(conn, sender, client_key)? else {
+        return Ok(None);
+    };
+    if stored_hash != request_hash {
+        return Ok(Some(SendOutcome::Rejected(
+            SendRejection::IdempotencyConflict,
+        )));
+    }
+    let original = find_message(conn, &message_id)?.ok_or_else(|| {
+        StoreError::Invariant("idempotency row points at a missing message".to_owned())
+    })?;
+    Ok(Some(SendOutcome::Deduplicated(original)))
+}
+
+/// `reply_to` must name an existing message in `room`.
+fn check_reply_to(
+    conn: &Connection,
+    reply_to: Option<&MessageId>,
+    room: &RoomId,
+) -> Result<Option<SendRejection>, StoreError> {
+    let Some(reply_to) = reply_to else {
+        return Ok(None);
+    };
+    match find_room_of(conn, reply_to)? {
+        None => Ok(Some(SendRejection::ReplyToNotFound)),
+        Some(reply_room) if reply_room != room.to_string() => {
+            Ok(Some(SendRejection::ReplyToRoomMismatch))
+        }
+        Some(_) => Ok(None),
+    }
+}
+
+/// A new message whose checks have all passed.
+struct Draft<'a> {
+    sender: &'a AgentId,
+    client_key: &'a str,
+    request_hash: &'a str,
+    room: RoomId,
+    body: &'a str,
+    reply_to: Option<&'a MessageId>,
+    message_id: &'a MessageId,
+    created_at: &'a str,
+}
+
+/// Writes the message, one inbox row per recipient with its delivery
+/// transition, and the idempotency key, all in the caller's transaction.
+fn commit_new(
+    tx: &Transaction,
+    draft: Draft<'_>,
+    recipients: &[AgentId],
+) -> Result<SendOutcome, StoreError> {
     let event_seq = next_event_seq(tx)?;
     let message = Message {
-        message_id: command.message_id.clone(),
+        message_id: draft.message_id.clone(),
         event_seq,
-        room_id: room,
-        sender_id: command.sender.clone(),
-        body: command.body.clone(),
-        reply_to: command.reply_to.clone(),
-        created_at: command.created_at.clone(),
+        room_id: draft.room,
+        sender_id: draft.sender.clone(),
+        body: draft.body.to_owned(),
+        reply_to: draft.reply_to.cloned(),
+        created_at: draft.created_at.to_owned(),
     };
     insert_message(tx, &message)?;
     let now = SystemTime::now();
-    for recipient in &recipients {
+    for recipient in recipients {
         append_inbox_row(tx, recipient, &message.message_id)?;
         delivery_queries::record_new_inbox_row(tx, recipient, now)?;
     }
@@ -149,9 +265,9 @@ pub fn commit_send(tx: &Transaction, command: &SendCommand) -> Result<SendOutcom
         "INSERT INTO idempotency (sender_id, client_key, request_hash, message_id)
          VALUES (?1, ?2, ?3, ?4)",
         params![
-            command.sender.as_str(),
-            command.client_key,
-            request_hash,
+            draft.sender.as_str(),
+            draft.client_key,
+            draft.request_hash,
             message.message_id.as_str()
         ],
     )?;
@@ -252,7 +368,35 @@ fn resolve_recipients(
     }
 }
 
-fn joined_all_members(conn: &Connection) -> Result<Vec<AgentId>, StoreError> {
+/// The inbox recipients of an owner post: the room's members minus the
+/// sender. `None` when a DM member is not registered (`unknown_room`).
+fn room_recipients(
+    conn: &Connection,
+    sender: &AgentId,
+    room: &RoomId,
+) -> Result<Option<Vec<AgentId>>, StoreError> {
+    match room {
+        // Every joined member, the sender included when it is joined: the
+        // `all` broadcast rule. No membership is required of the sender.
+        RoomId::All => Ok(Some(joined_all_members(conn)?)),
+        RoomId::Dm(low, high) => {
+            for member in [low, high] {
+                if !agent_exists(conn, member)? {
+                    return Ok(None);
+                }
+            }
+            let recipients = [low, high]
+                .into_iter()
+                .filter(|member| *member != sender)
+                .cloned()
+                .collect();
+            Ok(Some(recipients))
+        }
+    }
+}
+
+/// The agents currently joined to `all`, in ASCII order.
+pub(crate) fn joined_all_members(conn: &Connection) -> Result<Vec<AgentId>, StoreError> {
     let mut statement = conn.prepare(
         "SELECT agent_id FROM memberships WHERE room_id = ?1 AND joined = 1 ORDER BY agent_id",
     )?;

@@ -9,7 +9,7 @@ use platform_wire::{
     AgentEntry, AgentProfile, DeliveryRetryResponse, DeliveryState, DeliveryStatus, HealthStatus,
     HistoryCursor, HistoryPage, IdentityTokenResponse, InboxItem, InboxPage, MembershipResponse,
     Message, MessageResponse, OwnerAgentEntry, ProfileResponse, ReadMarkerResponse,
-    ReceiverResponse, RegisterAgentResponse, RotateTokensResponse, Seq,
+    ReceiverResponse, RegisterAgentResponse, RoomSummary, RotateTokensResponse, Seq,
 };
 
 use crate::error::CliError;
@@ -276,6 +276,34 @@ pub fn membership(membership: &MembershipResponse) -> String {
             membership.effective_event_seq.to_string(),
         ),
     ])
+}
+
+/// `rooms`: one row per room in the server's order (newest first).
+pub fn rooms(rooms: &[RoomSummary]) -> String {
+    let mut table = Table::new(vec![
+        "ROOM",
+        "KIND",
+        "MEMBERS",
+        "LAST_AT",
+        "LAST_SENDER",
+        "COUNT",
+    ]);
+    for room in rooms {
+        let members: Vec<&str> = room.members.iter().map(|id| id.as_str()).collect();
+        table.push(vec![
+            room.room_id.to_string(),
+            room.kind.as_str().to_owned(),
+            if members.is_empty() {
+                NONE.to_owned()
+            } else {
+                members.join(",")
+            },
+            or_none(room.last_message_at.as_deref()),
+            or_none(room.last_sender_id.as_ref()),
+            room.message_count.to_string(),
+        ]);
+    }
+    table.render()
 }
 
 /// The commit result plus the `client_key` to reuse for a retry.

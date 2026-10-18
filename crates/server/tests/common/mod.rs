@@ -69,6 +69,24 @@ impl Fixture {
         Config::load(&path).expect("valid config")
     }
 
+    /// Like [`Fixture::load_config`] with an `[owner]` table whose
+    /// `post_as` lists `post_as`.
+    pub fn load_config_with_owner(&self, post_as: &[&str]) -> Config {
+        let list = post_as
+            .iter()
+            .map(|id| format!("{id:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let path = self.write_config_text(&format!(
+            "listen = \"127.0.0.1:0\"\n\
+             db_path = \"data/platform.db\"\n\
+             owner_token_file = \"owner.token\"\n\
+             [owner]\n\
+             post_as = [{list}]\n"
+        ));
+        Config::load(&path).expect("valid config")
+    }
+
     /// Like [`Fixture::load_config`] with an `[identity]` table holding
     /// `identity` (TOML `key = value` lines; `signing_key_file` is added) and
     /// a signing key generated into `identity.key`.

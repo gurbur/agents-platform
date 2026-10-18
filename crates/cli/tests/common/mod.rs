@@ -38,6 +38,17 @@ impl Platformd {
         Self::start_with(&config, true).await
     }
 
+    /// With an `[owner]` table whose `post_as` lists `post_as`.
+    pub async fn start_with_owner(post_as: &[&str]) -> Self {
+        let list = post_as
+            .iter()
+            .map(|id| format!("{id:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let config = format!("{BASE_CONFIG}[owner]\npost_as = [{list}]\n");
+        Self::start_with(&config, false).await
+    }
+
     async fn start_with(config_text: &str, with_identity_key: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("owner.token"), OWNER_TOKEN).unwrap();
