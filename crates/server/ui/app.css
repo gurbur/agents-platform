@@ -101,7 +101,7 @@ button,a,label,summary,input,textarea,select,[data-act],[role="tab"],[role="swit
 .back,.only-phone{display:none}
 .top .only-phone.on{color:var(--ac)}
 
-.feed{flex:1;overflow:auto;padding:8px 0 16px;scroll-behavior:smooth}
+.feed{flex:1;overflow:auto;overscroll-behavior:contain;padding:8px 0 16px;scroll-behavior:smooth}
 .empty{color:var(--tx-3);text-align:center;padding:48px 16px;font-size:13.5px}
 .older{color:var(--tx-3);text-align:center;padding:12px 16px 0;font-size:12px}
 .day{display:flex;align-items:center;gap:12px;margin:24px 16px 8px;color:var(--tx-3);font-size:12px;font-weight:550}

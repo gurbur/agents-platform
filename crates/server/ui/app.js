@@ -32,10 +32,12 @@ const BOTTOM_SLACK_PX = 48;
 const MAX_POLL_PAGES = 5;
 const MAX_JUMP_PAGES = 10;
 const SNIPPET_CONCURRENCY = 4;
-// Swipe-left-to-reply on touch: the drag claims the gesture past SWIPE_CLAIM_PX
-// (horizontal over vertical), follows the finger up to SWIPE_MAX_PX, then
-// resists; releasing past SWIPE_REPLY_PX starts the reply.
-const SWIPE_CLAIM_PX = 10;
+// Swipe-left-to-reply on touch: the drag claims the gesture at SWIPE_CLAIM_PX
+// leftward (horizontal at least as far as vertical), follows the finger up to
+// SWIPE_MAX_PX, then resists; releasing past SWIPE_REPLY_PX starts the reply.
+// A finger held still for SWIPE_LONG_PRESS_MS is a long press, not a swipe.
+const SWIPE_CLAIM_PX = 8;
+const SWIPE_LONG_PRESS_MS = 450;
 const SWIPE_REPLY_PX = 60;
 const SWIPE_MAX_PX = 80;
 const SWIPE_RESIST = 0.3;
@@ -852,10 +854,18 @@ function swipeOffset(dx) {
 }
 
 function onSwipeDown(event) {
-  if (event.pointerType !== 'touch' || !event.isPrimary || !S.me) return;
+  if (event.pointerType !== 'touch' || !S.me) return;
+  // A second finger (pinch) ends an undecided swipe.
+  if (!event.isPrimary) {
+    if (swipe && !swipe.claimed) swipe = null;
+    return;
+  }
   const row = event.target.closest('.msg, .b-row');
   if (!row || !row.id.startsWith('m-')) return;
-  swipe = { row, id: row.id.slice(2), x: event.clientX, y: event.clientY, claimed: false, offset: 0, icon: null };
+  swipe = {
+    row, id: row.id.slice(2), pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+    at: event.timeStamp, claimed: false, offset: 0, icon: null,
+  };
 }
 
 function claimSwipe(state) {
@@ -864,31 +874,58 @@ function claimSwipe(state) {
   state.row.classList.add('swiping');
   state.icon = h('span', { class: 'swipe-ico', 'aria-hidden': 'true' }, icon('reply'));
   state.row.append(state.icon);
+  try {
+    state.row.setPointerCapture(state.pointerId);
+  } catch (_) {
+    // The pointer may already be gone; touch pointers are captured anyway.
+  }
 }
 
-function onSwipeMove(event) {
-  if (!swipe || event.pointerType !== 'touch' || !event.isPrimary) return;
+// One finger position, from either the pointer or the touch stream (whichever
+// arrives first). Returns true while the browser must not scroll: the swipe is
+// claimed, or the move so far leans left and is still too short to decide.
+function swipeStep(x, y, timeStamp) {
+  if (!swipe) return false;
   if (!swipe.row.isConnected) {
     swipe = null;
-    return;
+    return false;
   }
-  const dx = event.clientX - swipe.x;
-  const dy = event.clientY - swipe.y;
+  const dx = x - swipe.x;
+  const dy = y - swipe.y;
   if (!swipe.claimed) {
-    // Until the move is clearly a leftward horizontal drag the browser keeps
-    // the gesture (scroll, long-press selection).
-    if (Math.abs(dy) > SWIPE_CLAIM_PX && Math.abs(dy) >= Math.abs(dx)) {
+    // After a long press the browser keeps the gesture (text selection).
+    if (timeStamp - swipe.at > SWIPE_LONG_PRESS_MS) {
       swipe = null;
-      return;
+      return false;
     }
-    if (dx >= -SWIPE_CLAIM_PX || Math.abs(dx) <= Math.abs(dy)) return;
+    if (dx > 0 || Math.abs(dy) > Math.abs(dx)) {
+      // Vertical or rightward: once decided the browser keeps it (scroll).
+      if (Math.max(Math.abs(dx), Math.abs(dy)) >= SWIPE_CLAIM_PX) swipe = null;
+      return false;
+    }
+    if (-dx < SWIPE_CLAIM_PX) return dx !== 0;
     claimSwipe(swipe);
   }
+  // Once claimed the row follows dx only; vertical drift never cancels it.
   swipe.offset = swipeOffset(dx);
   swipe.row.style.transform = `translateX(${swipe.offset}px)`;
   // The icon stays put at the right edge while the row slides over it.
   swipe.icon.style.transform = `translateX(${-swipe.offset}px)`;
   swipe.icon.style.opacity = String(Math.min(1, -swipe.offset / SWIPE_REPLY_PX));
+  return true;
+}
+
+function onSwipeMove(event) {
+  if (event.pointerType !== 'touch' || !event.isPrimary) return;
+  swipeStep(event.clientX, event.clientY, event.timeStamp);
+}
+
+// The only non-passive listener: cancelling the touchmove is what stops the
+// browser from starting (or continuing) a vertical scroll under a swipe.
+function onSwipeTouchMove(event) {
+  if (!swipe || event.touches.length !== 1) return;
+  const touch = event.touches[0];
+  if (swipeStep(touch.clientX, touch.clientY, event.timeStamp) && event.cancelable) event.preventDefault();
 }
 
 function settleSwipe(state) {
@@ -925,6 +962,7 @@ function onSwipeEnd(event) {
 function bindSwipe() {
   feed.addEventListener('pointerdown', onSwipeDown, { passive: true });
   feed.addEventListener('pointermove', onSwipeMove, { passive: true });
+  feed.addEventListener('touchmove', onSwipeTouchMove, { passive: false });
   feed.addEventListener('pointerup', onSwipeEnd, { passive: true });
   feed.addEventListener('pointercancel', onSwipeEnd, { passive: true });
 }

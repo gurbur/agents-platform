@@ -158,6 +158,12 @@ fn swipe_to_reply_leaves_vertical_scroll_and_zoom_to_the_browser() {
             .unwrap_or_else(|| panic!("no {kind} listener on the feed"));
         assert!(line.contains("{ passive: true }"), "{line}");
     }
+    // Only the touchmove listener may cancel, to lock scroll under a claimed swipe.
+    assert!(
+        APP_JS
+            .contains("feed.addEventListener('touchmove', onSwipeTouchMove, { passive: false });")
+    );
+    assert!(APP_CSS.contains("overscroll-behavior:contain"));
 }
 
 #[test]
