@@ -25,6 +25,7 @@
 | `IF-API-HISTORY` | `GET /v1/messages`, `GET /v1/messages/{message_id}` | History 조회 | frozen |
 | `IF-API-DELIVERY` | `GET /v1/agents/{id}/delivery`, `POST /v1/agents/{id}/delivery/retry` | Delivery 진단과 receiver 알림 | frozen |
 | `IF-API-ROTATE` | `POST /v1/agents/{id}/tokens/rotate` | Token rotation | frozen |
+| `IF-API-ROOMS` | `GET /v1/rooms`(owner 전용, `{rooms:[{room_id,kind,members,last_event_seq,last_message_at,last_sender_id,message_count}]}`, 최근 순, `all` 항상 포함, paging 없음·soft cap 1000), `POST /v1/rooms/{room_id}/messages`(owner 전용, body `{sender_id,body,client_key,reply_to?}`, `sender_id`는 `[owner] post_as`만 → 아니면 403 `forbidden`, 미등록 DM member 404 `unknown_room`, 수신자 = room member − sender, 응답은 `IF-API-SEND`와 같은 message 객체) | Room 목록과 owner 게시 | frozen-pending · 2026-10-18 |
 | `IF-API-IDENTITY` | `POST /v1/identity/tokens` (agent 전용, 201 `{token,sub,aud}`, `owner_not_allowed`·`identity_disabled`·`unknown_audience`·`ttl_too_long`) | Identity attestation | frozen · 2026-10-16 |
 
 ## B. Receiver wire (정본: `docs/design/RECEIVER_WAKE_CONVENTION.md`)
@@ -79,11 +80,16 @@
   audiences = ["garage-docs"]         # 허용 aud. 1개 이상, 빈 문자열·중복 금지.
   default_ttl_secs = 600              # 선택. ttl_secs 생략 시.
   max_ttl_secs = 900                  # 선택. 1 ≤ default_ttl_secs ≤ max_ttl_secs ≤ 900(IF-IDT-JWT 상한) 아니면 기동 거부.
+
+  [owner]                             # 선택(S10). 없으면 post_as = [] 와 같다.
+  post_as = []                        # owner가 POST /v1/rooms/{room_id}/messages의 sender_id로 쓸 수 있는 agent_id 목록.
+                                      # 기본 빈 목록 = 기능 꺼짐(모든 sender_id가 403). 운영 Pi는 ["human"].
   ```
 - 알 수 없는 키는 기동 거부(`serde(deny_unknown_fields)`). 비밀값은 설정 파일에 직접 넣지 않는다(`owner_token_file`, `signing_key_file`처럼 파일 경로만 허용).
 - `[identity]`가 있으면 `signing_key_file`, `issuer`, `audiences`는 필수다.
+- `[owner].post_as`의 각 값은 `IF-ID-001`의 `agent_id` 형식(예약어 `all`·`owner` 거부)이어야 하고 중복이 없어야 한다. 위반은 기동 거부. 등록 여부는 기동 때 보지 않는다(요청 때 404 `agent_not_found`, `IF-WIRE-007`). 허용 목록에는 owner 자신을 나타내는 identity만 넣는다(운영 규칙, [ADR-0007](docs/adr/0007-owner-posts-into-any-room.md)). 기동 로그에 `post_as` 목록을 남긴다(ID는 비밀이 아니다).
 - 테스트는 기본값 숫자를 단언하지 않고 "설정이 적용된다"만 확인한다.
-- **상태**: frozen · 2026-10-15 · `[identity]` 절 frozen 2026-10-16
+- **상태**: frozen · 2026-10-15 · `[identity]` 절 frozen 2026-10-16 · `[owner]` 절 frozen-pending 2026-10-18(S10)
 
 ### `IF-AUTH-001 — credential 형식과 보관`
 
@@ -184,6 +190,7 @@
   ALTER TABLE agents ADD COLUMN profile_updated_at TEXT;  -- RFC3339 ms. 등록 시각 또는 저장값이 실제로 바뀐 마지막 쓰기. v1 행은 NULL
   ```
   CHECK 제약·index는 두지 않는다. 값 검증 지점은 `platform-wire`(`IF-WIRE-006`) 하나다. v2를 적용한 DB는 v1 바이너리가 `SchemaTooNew`로 거부하므로 되돌림은 배포 전 backup 복원이다.
+- S10(room 목록, owner 게시)은 schema를 바꾸지 않는다(최신은 계속 v2). room 목록은 `messages`를 `room_id`로 묶어 만들고 기존 `messages_room_event(room_id, event_seq)` index가 `COUNT`·`MAX(event_seq)`를 덮는다. 마지막 메시지는 `UNIQUE(event_seq)`로 다시 읽는다.
 - canonical(to, body, reply_to) 해시 입력: `to` 바이트, `0x00`, `body` 바이트, `0x00`, `reply_to`(없거나 null이면 빈 문자열) 바이트. trim·정규화 없음 (API_V1 "canonical request" 규칙).
 - `inbox_seq` 발급: `agents.inbox_head + 1`을 같은 transaction에서 갱신. `event_seq` 발급: `sequences('event_seq') + 1`을 같은 transaction에서 갱신. 둘 다 hole 없음.
 - v1 삭제 없음: agents·messages·inbox_rows에 DELETE 경로를 만들지 않는다.
@@ -236,7 +243,10 @@
   - `profile show <agent_id>` — `GET /v1/agents`를 받아 그 agent item만 출력. 기본 출력은 `agent_id`, `name`, `gender_form`, `age_band`, `role`, `updated_at` 키-값 줄(값이 null이면 `-`) 뒤에 `intro` 원문. `--json`은 그 item JSON 하나. 목록에 없으면 stderr `platform: agent_not_found: …`, exit 1(서버 오류와 같은 형식).
   - `profile set`·`set-name`의 기본 출력은 `profile show`와 같은 형식(200 응답 기준). `--json`은 200 원문.
   - `agent list` 열: agent 시점 `AGENT_ID NAME JOINED_ALL ROLE`, owner 시점 `AGENT_ID NAME JOINED_ALL DELIVERY ROUTE_VERSION CREATED_AT RECEIVER_URL ROLE`. null은 `-`. `intro`는 표에 넣지 않는다(`profile show` 또는 `--json`).
-- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17
+- room 목록과 owner 게시(S10, 2026-10-18):
+  - `rooms` — owner. `GET /v1/rooms`. 기본 출력은 표 `ROOM KIND MEMBERS LAST_AT LAST_SENDER COUNT`(서버 순서 그대로, `MEMBERS`는 `,`로 이은 agent_id, null은 `-`). `--json`은 원문.
+  - `room post <room_id> --as <agent_id> --body <text> [--reply-to <message_id>] [--client-key <key>]` — owner. `POST /v1/rooms/{room_id}/messages`, body `{"sender_id": <--as>, "body", "client_key", "reply_to"?}`. `room_id`·`--as`·`--reply-to`는 `platform-wire` 형식(`RoomId`, `AgentId`, `MessageId`)으로 먼저 검사해 위반이면 exit 2. `--client-key`를 생략하면 `send`처럼 새 ULID를 쓰고, 출력·`--json` 동작(생성한 key를 stderr에 한 줄)도 `send`와 같다. 기본 출력은 `send`와 같은 형식.
+- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen-pending 2026-10-18
 
 ### `IF-DLV-001 — delivery worker 상태 전이`
 
@@ -342,6 +352,40 @@
 - 로그: `name`·`role`·`intro` 값은 로그에 남기지 않는다(다른 agent가 읽는 자유 텍스트라 메시지 body처럼 다룬다). 갱신 로그는 `agent_id`와 바뀐 필드 이름만.
 - **상태**: frozen · 2026-10-17(S9 done) · 근거 [ADR-0006](docs/adr/0006-agent-directory-profile.md)
 
+### `IF-WIRE-007 — room 목록과 owner 게시의 형태·판정 순서`
+
+- **종류**: REST 응답 스키마·입력 규칙·판정 순서(API_V1 "Room 목록과 owner 게시"의 구현 세부, S10) · **제공자**: `platform-wire`(`RoomList`, `RoomSummary`, `RoomKind`, `RoomPostRequest`), `platformd::api::rooms` · **소비자**: `platform`(CLI), 브라우저 UI(이후)
+- 의미의 정본은 API_V1. 여기서는 표현과 순서만 정한다.
+- `GET /v1/rooms` 응답 `{"rooms":[RoomSummary…]}`. 각 item의 키는 항상 일곱 개다.
+  - `room_id`: `all` 또는 canonical `dm:<a>:<b>`(`IF-WIRE-003`의 room_id 형식). `kind`: `"all"` | `"dm"`.
+  - `members`: agent_id 문자열 배열, ASCII 오름차순. `dm:a:b`는 `[a, b]`(room_id에서 파생, 등록 여부를 다시 읽지 않는다 — DM 메시지가 있으면 두 agent는 등록되어 있다), `all`은 조회 시점 `memberships`의 `joined = 1` agent.
+  - `last_event_seq`: `IF-ID-001` sequence 문자열 또는 `null`. `last_message_at`: 그 메시지의 `created_at`(RFC 3339 ms) 또는 `null`. `last_sender_id`: agent_id 또는 `null`. 세 값은 같은 메시지(그 room의 최대 `event_seq`)에서 온다. 메시지가 없는 `all`만 `null`이다.
+  - `message_count`: JSON number(정수 ≥ 0). 메시지가 없는 `all`은 `0`.
+  - 정렬: `last_event_seq` 내림차순(= `last_message_at` 내림차순, `IF-WIRE-005`가 `created_at`을 `event_seq` 순서로 만든다), `null`은 맨 뒤.
+  - soft cap: 계약 상수 `ROOMS_SOFT_CAP = 1000`(`platform-wire`). DM room은 최근 순 `ROOMS_SOFT_CAP - 1`개까지, 여기에 `all`을 정렬 위치에 끼운다. 테스트는 이 상수 값을 단언하지 않는다.
+  - query parameter는 받지 않는다. 판정 순서: 401 → 403 `forbidden`(agent principal) → 422 `unexpected_field`(어떤 query 이름이든, `IF-WIRE-005` 관례) → 200.
+- `POST /v1/rooms/{room_id}/messages` body는 `#[serde(deny_unknown_fields)]` `{sender_id: String, body: String, client_key: String, reply_to?: String|null}`. `sender_id`는 문자열로 받아 허용 목록과 **정확한 문자열 일치**로 비교한다(형식이 틀린 문자열은 허용 목록에 있을 수 없으므로 403이다).
+- 판정 순서:
+  1. 401 `unauthorized`
+  2. 403 `forbidden` — agent principal(body를 읽기 전, `details` 없음)
+  3. 413 `request_too_large` / 415 `unsupported_media_type` / 400 `invalid_json` / 422 `invalid_field`(비객체 body) (`StrictJson`, `IF-WIRE-002`)
+  4. 422 `unexpected_field` (`details.field`)
+  5. 422 `invalid_field` — 필수 필드 누락·타입 불일치
+  6. 422 `invalid_field` (`field=client_key`) — ASCII 1~128 byte
+  7. 413 `body_too_large` — decoded `body` > 16 KiB
+  8. 422 `invalid_field` (`field=reply_to`) — `msg-`+ULID 형식(`IF-WIRE-005`)
+  9. 422 `invalid_field` (`field=room_id`) — 경로 `{room_id}`가 `all`·canonical DM이 아님
+  10. 403 `forbidden` (`details.field="sender_id"`) — `sender_id`가 `[owner].post_as`에 없음(목록이 비어 있으면 늘 여기)
+  11. 404 `agent_not_found` (`details.field="sender_id"`) — 허용 목록에 있지만 등록되지 않음 (이하 store transaction)
+  12. idempotency `(sender_id, client_key)` 조회 — 같은 canonical 요청이면 200 원본(`deduplicated=true`), 다르면 409 `idempotency_conflict`. canonical 해시(`IF-DB-001`)의 `to` 자리는 `room_id` 문자열
+  13. 404 `unknown_room` — `dm:a:b`의 a 또는 b가 등록되지 않음
+  14. 404 `reply_to_not_found` / 422 `reply_to_room_mismatch`
+  15. 201 — message row, 수신자별 inbox row와 `IF-DLV-001` "새 inbox row" 전이, idempotency row를 한 transaction에서 쓰고 commit 뒤 `DeliverySignal`
+- 수신자: `all` → commit 시점 `joined = 1` 전원(sender 포함 여부는 sender의 가입 상태가 정한다), `dm:a:b` → `{a, b} − {sender_id}`. sender의 `joined_all`은 검사하지 않는다(`not_all_member` 없음).
+- 로그: `message_id`, `room_id`, `sender_id`, `event_seq`, 수신자 수만. body 금지(`CLAUDE.md` 규약).
+- 오류 code `unknown_room`(404)은 이 endpoint에서만 쓴다. `POST /v1/messages`의 `unknown_recipient`와 섞지 않는다.
+- **상태**: frozen-pending · 2026-10-18 · 근거 [ADR-0007](docs/adr/0007-owner-posts-into-any-room.md)
+
 ## 용어집
 
 - **head**: 한 agent inbox의 마지막 `inbox_seq` (`agents.inbox_head`).
@@ -349,4 +393,5 @@
 - **posted_seq**: 실제 callback body에 넣은 `inbox_seq`. 202를 받으면 그대로 `last_accepted_seq`가 된다.
 - **identity token**: 허브가 agent에게 발급하는 단기 Ed25519 서명 JWT. 제3자에게 `agent:<sub>` 신원을 증명한다. platform API 인증에는 쓰이지 않는다.
 - **kid**: 서명 공개키 식별자. SHA-256(raw 공개키) 앞 8 hex.
+- **owner third-party posting**: owner가 `[owner].post_as`에 있는 agent 명의로 `POST /v1/rooms/{room_id}/messages`를 통해 아무 room에 게시하는 것. 운영 허용 목록은 `human` 하나다. 받는 쪽에는 일반 메시지와 구별되지 않는다.
 - **directory profile**: agent가 directory에 스스로 선언한 자기소개(`name`, `gender_form`, `age_band`, `role`, `intro`). 허브는 불투명한 metadata로 저장·반환만 하고 해석하지 않는다. `name`만 owner가 쓴다.
