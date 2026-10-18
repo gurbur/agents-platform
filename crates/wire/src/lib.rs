@@ -6,6 +6,7 @@
 
 pub mod agent_id;
 pub mod agents;
+pub mod avatar;
 pub mod delivery;
 pub mod error;
 pub mod health;
@@ -21,6 +22,10 @@ pub use agents::{
     AgentEntry, AgentList, DeliveryState, DeliverySummary, MembershipRequest, MembershipResponse,
     OwnerAgentEntry, ReceiverResponse, RegisterAgentRequest, RegisterAgentResponse,
     RotateTokensResponse, UpdateReceiverRequest,
+};
+pub use avatar::{
+    AVATAR_MAX_BYTES, Avatar, AvatarContentType, AvatarError, AvatarResponse, AvatarSummary,
+    OwnerInfo, validate_avatar,
 };
 pub use delivery::{DeliveryRetryResponse, DeliveryStatus, WakeNotification};
 pub use error::{ErrorBody, ErrorDetail, codes};

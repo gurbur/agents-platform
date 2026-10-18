@@ -27,6 +27,10 @@ readonly RECEIVER_WAIT_SECS=30
 readonly PAGE_LIMIT=2
 readonly ULID_ALPHABET=0123456789abcdefghjkmnpqrstvwxyz
 readonly DEFAULT_IDENTITY_AUD=garage-docs
+# A valid 1x1 PNG for the avatar scenario, and the hub's avatar limit
+# (platform-wire AVATAR_MAX_BYTES).
+readonly AVATAR_PNG_HEX=89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da6364f8cf500f00038601805a347d6b0000000049454e44ae426082
+readonly AVATAR_MAX_BYTES=524288
 
 base_url=""
 owner_token_file=""
@@ -137,6 +141,31 @@ api() {
   fi
   http_status="$(curl "${args[@]}" "$base_url$path")" || http_status="curl-error"
   http_body="$(cat "$out" 2>/dev/null || true)"
+}
+
+# api_bytes METHOD PATH TOKEN_FILE CONTENT_TYPE FILE [HEADER] -> sets
+# http_status and http_body like api, sending FILE as the raw body (FILE
+# may be empty for no body) with one optional extra header.
+api_bytes() {
+  local method="$1" path="$2" token="$3" content_type="$4" file="$5" extra="${6:-}"
+  local headers="$workdir/headers" out="$workdir/body"
+  printf 'Authorization: Bearer %s\n' "$(tr -d '[:space:]' <"$token")" >"$headers"
+  [[ -z "$content_type" ]] || printf 'Content-Type: %s\n' "$content_type" >>"$headers"
+  [[ -z "$extra" ]] || printf '%s\n' "$extra" >>"$headers"
+  local args=(-sS -X "$method" -o "$out" -w '%{http_code}' -H "@$headers")
+  [[ -z "$file" ]] || args+=(--data-binary "@$file")
+  http_status="$(curl "${args[@]}" "$base_url$path")" || http_status="curl-error"
+  http_body="$(cat "$out" 2>/dev/null || true)"
+}
+
+# Writes the hex string $1 as bytes to file $2.
+write_hex() {
+  local hex="$1" escaped=""
+  while [[ -n "$hex" ]]; do
+    escaped="$escaped\\x${hex:0:2}"
+    hex="${hex:2}"
+  done
+  printf '%b' "$escaped" >"$2"
 }
 
 # Decodes one unpadded base64url JWT segment (jq's @base64d wants the
@@ -300,6 +329,67 @@ check_directory_profile() {
   expect_json "$http_body" '.error.code == "invalid_field" and .error.details.field == "gender_form"' \
     "unknown enum: not invalid_field on gender_form" || return 1
   note="B sees A, agent set-name 403, owner rename, clear, enum 422"
+}
+
+# Scenario 15: A uploads a PNG avatar, B sees its sha256 in the directory
+# and downloads the same bytes, the ETag revalidates to 304, B cannot write
+# A's avatar, oversize is 413 and a wrong type 415, and after A clears it
+# the download is 404 and the directory shows null.
+check_directory_avatar() {
+  local key_a key_b png="$workdir/avatar.png" got="$workdir/avatar-got.png" json sha rc=0
+  key_a="$(token_file "$agent_a")"
+  key_b="$(token_file "$agent_b")"
+  write_hex "$AVATAR_PNG_HEX" "$png"
+  json="$(cli "$key_a" profile avatar set "$agent_a" "$png")" || {
+    note="profile avatar set failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" '.avatar.content_type == "image/png" and (.avatar.sha256 | test("^[0-9a-f]{64}$"))' \
+    "avatar set response: $json" || return 1
+  sha="$(jq -r .avatar.sha256 <<<"$json")"
+
+  json="$(cli "$key_b" agent list)" || {
+    note="agent list as $agent_b failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" "any(.items[]; .agent_id == \"$agent_a\" and .avatar.sha256 == \"$sha\")" \
+    "$agent_b does not see the avatar of $agent_a" || return 1
+  json="$(cli "$key_b" profile avatar get "$agent_a" --out "$got")" || {
+    note="profile avatar get failed: $(cli_error)"
+    return 1
+  }
+  cmp -s "$png" "$got" || {
+    note="downloaded avatar differs from the upload"
+    return 1
+  }
+  api_bytes GET "/v1/agents/$agent_a/avatar" "$key_b" "" "" "If-None-Match: \"$sha\""
+  expect_status 304 "If-None-Match with the ETag" || return 1
+
+  cli "$key_b" profile avatar set "$agent_a" "$png" >/dev/null || rc=$?
+  if [[ "$rc" != 1 ]] || ! grep -q 'forbidden' "$workdir/cli.stderr"; then
+    note="$agent_b writing $agent_a's avatar: exit $rc, expected 1 forbidden"
+    return 1
+  fi
+  local big="$workdir/avatar-big.png"
+  head -c $((AVATAR_MAX_BYTES + 1)) /dev/zero >"$big"
+  api_bytes PUT "/v1/agents/$agent_a/avatar" "$key_a" image/png "$big"
+  expect_status 413 "oversized avatar" || return 1
+  expect_json "$http_body" '.error.code == "avatar_too_large"' "oversize code: $http_body" || return 1
+  api_bytes PUT "/v1/agents/$agent_a/avatar" "$key_a" image/gif "$png"
+  expect_status 415 "image/gif avatar" || return 1
+  expect_json "$http_body" '.error.code == "unsupported_media_type"' "type code: $http_body" || return 1
+
+  cli "$key_a" profile avatar clear "$agent_a" >/dev/null || {
+    note="profile avatar clear failed: $(cli_error)"
+    return 1
+  }
+  api_bytes GET "/v1/agents/$agent_a/avatar" "$key_b" "" ""
+  expect_status 404 "avatar after clear" || return 1
+  expect_json "$http_body" '.error.code == "avatar_not_found"' "cleared code: $http_body" || return 1
+  json="$(cli "$key_b" agent list)" || return 1
+  expect_json "$json" "any(.items[]; .agent_id == \"$agent_a\" and .avatar == null)" \
+    "directory still lists the cleared avatar" || return 1
+  note="sha256 listed, bytes equal, 304, B 403, 413, 415, cleared 404"
 }
 
 inbox_has() {
@@ -658,7 +748,7 @@ print_table() {
 
 main() {
   parse_args "$@"
-  require_cmd curl jq od seq "$platform_bin"
+  require_cmd curl jq od seq cmp head "$platform_bin"
   workdir="$(mktemp -d)"
   chmod 0700 "$workdir"
   # shellcheck disable=SC2064 # expand now
@@ -676,6 +766,7 @@ main() {
   fi
   scenario "directory hides credentials" check_directory_hides_credentials
   scenario "directory profile (13)" check_directory_profile
+  scenario "directory avatar (15)" check_directory_avatar
   scenario "all fanout (1)" check_all_fanout
   scenario "DM recipient-only (2)" check_dm
   scenario "unknown 404 / self DM 422 (2)" check_dm_errors

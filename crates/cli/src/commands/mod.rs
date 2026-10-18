@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod all;
+pub mod avatar;
 pub mod delivery;
 pub mod health;
 pub mod history;

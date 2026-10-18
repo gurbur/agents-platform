@@ -9,7 +9,7 @@ use super::StoreError;
 use crate::clock;
 
 /// Latest schema version this binary knows. `/healthz` reports it.
-pub const LATEST_SCHEMA_VERSION: u32 = 2;
+pub const LATEST_SCHEMA_VERSION: u32 = 3;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
@@ -17,7 +17,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 const SYNCHRONOUS_FULL: i64 = 2;
 
 /// Versions start at 1 and are contiguous; each is applied in one transaction.
-const MIGRATIONS: &[(u32, &str)] = &[(1, V1_SCHEMA), (2, V2_SCHEMA)];
+const MIGRATIONS: &[(u32, &str)] = &[(1, V1_SCHEMA), (2, V2_SCHEMA), (3, V3_SCHEMA)];
 
 const BOOTSTRAP: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -105,6 +105,19 @@ ALTER TABLE agents ADD COLUMN age_band TEXT;
 ALTER TABLE agents ADD COLUMN role TEXT;
 ALTER TABLE agents ADD COLUMN intro TEXT;
 ALTER TABLE agents ADD COLUMN profile_updated_at TEXT;
+";
+
+/// v3 (S11): the directory avatar, one row per agent that has one. A new
+/// table only; every v2 table and row stays as it is. No CHECK constraints:
+/// `platform-wire::avatar` is the one validation point.
+const V3_SCHEMA: &str = "
+CREATE TABLE agent_avatars (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id),
+    content_type TEXT NOT NULL,
+    bytes BLOB NOT NULL,
+    sha256 TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 ";
 
 /// Opens the database file and applies and verifies the connection PRAGMAs.

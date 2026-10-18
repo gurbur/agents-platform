@@ -6,7 +6,8 @@ use std::str::FromStr;
 use std::time::SystemTime;
 
 use platform_wire::{
-    AgeBand, AgentId, AgentProfile, DeliveryState, GenderForm, ProfileField, ProfileUpdate,
+    AgeBand, AgentId, AgentProfile, AvatarSummary, DeliveryState, GenderForm, ProfileField,
+    ProfileUpdate,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -62,6 +63,8 @@ pub struct AgentRecord {
     pub route_version: i64,
     pub created_at: String,
     pub delivery_state: DeliveryState,
+    /// `None` when the agent has no avatar.
+    pub avatar: Option<AvatarSummary>,
 }
 
 /// An agent's display name and profile as stored.
@@ -147,14 +150,17 @@ pub fn register(tx: &Transaction, agent: &NewAgent) -> Result<Registration, Stor
     }))
 }
 
-/// Every agent in ASCII `agent_id` order (SQLite BINARY collation).
+/// Every agent in ASCII `agent_id` order (SQLite BINARY collation), with
+/// the avatar summary but never the avatar bytes.
 pub fn list(conn: &Connection) -> Result<Vec<AgentRecord>, StoreError> {
     let mut statement = conn.prepare(
         "SELECT a.agent_id, m.joined, a.receiver_url, a.route_version, a.created_at, n.state,
-                a.name, a.gender_form, a.age_band, a.role, a.intro, a.profile_updated_at
+                a.name, a.gender_form, a.age_band, a.role, a.intro, a.profile_updated_at,
+                v.sha256, v.updated_at
          FROM agents a
          JOIN memberships m ON m.agent_id = a.agent_id AND m.room_id = ?1
          JOIN notification_pending n ON n.agent_id = a.agent_id
+         LEFT JOIN agent_avatars v ON v.agent_id = a.agent_id
          ORDER BY a.agent_id",
     )?;
     let rows = statement.query_map(params![ALL_ROOM], |row| {
@@ -166,11 +172,13 @@ pub fn list(conn: &Connection) -> Result<Vec<AgentRecord>, StoreError> {
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
             StoredProfile::from_row(row, 6)?,
+            avatar_summary(row.get(12)?, row.get(13)?),
         ))
     })?;
     let mut records = Vec::new();
     for row in rows {
-        let (agent_id, joined_all, receiver_url, route_version, created_at, state, stored) = row?;
+        let (agent_id, joined_all, receiver_url, route_version, created_at, state, stored, avatar) =
+            row?;
         let delivery_state = display_state(receiver_url.as_deref(), &state)?;
         let ProfileRecord { name, profile } = stored.into_record()?;
         records.push(AgentRecord {
@@ -182,9 +190,19 @@ pub fn list(conn: &Connection) -> Result<Vec<AgentRecord>, StoreError> {
             route_version,
             created_at,
             delivery_state,
+            avatar,
         });
     }
     Ok(records)
+}
+
+/// The avatar summary from the two `LEFT JOIN`ed columns: both are set
+/// together or neither is.
+fn avatar_summary(sha256: Option<String>, updated_at: Option<String>) -> Option<AvatarSummary> {
+    Some(AvatarSummary {
+        sha256: sha256?,
+        updated_at: updated_at?,
+    })
 }
 
 /// Applies a validated partial update. The row is written only when a

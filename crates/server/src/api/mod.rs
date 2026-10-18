@@ -2,6 +2,7 @@
 //! contain SQL.
 
 mod agents;
+mod avatar;
 mod delivery;
 mod error;
 mod history;
@@ -9,6 +10,7 @@ mod identity;
 mod inbox;
 mod json;
 mod messages;
+mod owner;
 mod query;
 mod receiver_url;
 mod request_id;
@@ -74,10 +76,12 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .merge(agents::routes())
+        .merge(avatar::routes())
         .merge(delivery::routes())
         .merge(messages::routes())
         .merge(inbox::routes())
         .merge(rooms::routes())
+        .merge(owner::routes())
         .merge(identity::routes())
         .merge(ui::routes())
         .fallback(not_found)

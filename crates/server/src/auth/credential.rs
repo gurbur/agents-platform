@@ -46,7 +46,12 @@ impl fmt::Debug for IssuedCredentials {
 
 /// Lower-case hex SHA-256 of the presented bearer string.
 pub fn hash_api_key(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
+    sha256_hex(token.as_bytes())
+}
+
+/// Lower-case hex SHA-256 of `bytes` (the API key hash, the avatar `ETag`).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
     digest
         .iter()
         .fold(String::with_capacity(digest.len() * 2), |mut hex, byte| {

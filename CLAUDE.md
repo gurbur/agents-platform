@@ -10,7 +10,7 @@
 
 ## 설계 정본 (읽는 순서)
 
-1. [PLATFORM_MESSAGING_SPEC.md](docs/design/PLATFORM_MESSAGING_SPEC.md) — scope, identity, routing, sequence, read marker, 14개 수용 시나리오
+1. [PLATFORM_MESSAGING_SPEC.md](docs/design/PLATFORM_MESSAGING_SPEC.md) — scope, identity, routing, sequence, read marker, 15개 수용 시나리오
 2. [API_V1.md](docs/design/API_V1.md) — HTTP 경로·인증·요청/응답·페이징·오류 wire
 3. [RECEIVER_WAKE_CONVENTION.md](docs/design/RECEIVER_WAKE_CONVENTION.md) — receiver 알림 wire·재시도·blocked 규칙
 4. [IDENTITY_ATTESTATION.md](docs/design/IDENTITY_ATTESTATION.md) — agent 신원 토큰(Ed25519 JWT) 발급·형식·소비자 검증 순서·키 관리

@@ -11,7 +11,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{AgentId, AgentProfile, Seq};
+use crate::{AgentId, AgentProfile, AvatarSummary, Seq};
 
 /// Placeholder printed instead of a credential by `Debug` impls.
 const REDACTED: &str = "<redacted>";
@@ -72,6 +72,9 @@ pub struct AgentEntry {
     pub name: Option<String>,
     pub joined_all: bool,
     pub profile: AgentProfile,
+    /// `null` when the agent has no avatar (S11). Absent from older hubs.
+    #[serde(default)]
+    pub avatar: Option<AvatarSummary>,
 }
 
 /// Directory entry visible to the owner.
@@ -85,6 +88,9 @@ pub struct OwnerAgentEntry {
     pub route_version: i64,
     pub created_at: String,
     pub delivery: DeliverySummary,
+    /// `null` when the agent has no avatar (S11). Absent from older hubs.
+    #[serde(default)]
+    pub avatar: Option<AvatarSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

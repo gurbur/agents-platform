@@ -297,3 +297,70 @@ async fn the_owner_names_a_migrated_agent() {
 
     server.shutdown().await.unwrap();
 }
+
+/// Schema v2 → v3 (S11): a v2 database gains an empty `agent_avatars`
+/// table, keeps its agents (with their profile) and serves `avatar: null`.
+#[tokio::test]
+async fn a_v2_database_gains_an_empty_avatar_table() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.db_path().parent().unwrap()).unwrap();
+    let (store, thread) = Store::open(&fx.db_path()).unwrap();
+    let version = store
+        .run(|conn| migrations::apply_through(conn, 2))
+        .await
+        .unwrap();
+    assert_eq!(version, 2);
+    let rows = v1_rows();
+    let before = store
+        .transaction(move |tx| {
+            tx.execute_batch(&rows)?;
+            tx.execute(
+                "UPDATE agents SET name = 'A', role = 'ops', profile_updated_at = created_at
+                 WHERE agent_id = 'agent-a'",
+                [],
+            )?;
+            Ok((v1_snapshot(tx)?, has_avatar_table(tx)?))
+        })
+        .await
+        .unwrap();
+    assert!(!before.1, "v2 has no avatar table");
+    drop(store);
+    thread.shutdown(JOIN_LIMIT).await.unwrap();
+
+    let server = RunningServer::start(&fx.load_config()).await;
+    let api = server.api();
+    let directory = api.get("/v1/agents", KEY_B).await;
+    assert_eq!(directory.status, 200, "{}", directory.body);
+    let a = item(&directory.body, "agent-a");
+    assert_eq!(a["name"], "A");
+    assert_eq!(a["profile"]["role"], "ops");
+    assert_eq!(a["avatar"], Value::Null);
+    server.shutdown().await.unwrap();
+
+    let (after, has_table, avatars, versions) = fx
+        .read_db(|conn| {
+            let avatars: i64 =
+                conn.query_row("SELECT COUNT(*) FROM agent_avatars", [], |row| row.get(0))?;
+            Ok((
+                v1_snapshot(conn)?,
+                has_avatar_table(conn)?,
+                avatars,
+                applied_migrations(conn)?,
+            ))
+        })
+        .await;
+    assert_eq!(after, before.0, "every row is unchanged");
+    assert!(has_table);
+    assert_eq!(avatars, 0);
+    let versions: Vec<u32> = versions.iter().map(|(version, _)| *version).collect();
+    assert_eq!(versions, (1..=LATEST_SCHEMA_VERSION).collect::<Vec<u32>>());
+}
+
+fn has_avatar_table(conn: &rusqlite::Connection) -> Result<bool, StoreError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'agent_avatars'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count == 1)
+}

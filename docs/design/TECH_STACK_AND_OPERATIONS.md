@@ -45,7 +45,7 @@ CLI는 `agent register`, `send`, `inbox`, `inbox read`, `history`, `delivery`, `
 
 ## 브라우저 화면
 
-v1 브라우저는 조회 중심이다. static asset이 같은 서비스에서 제공되고 JavaScript가 인증된 v1 API를 호출하면 브라우저와 CLI가 같은 권한·페이징·no-ack 규칙을 공유할 수 있다. SSR template engine은 필수가 아니다.
+브라우저는 owner의 채팅 콘솔이다(S11, [ADR-0008](../adr/0008-directory-avatars.md)). 방 목록·대화·정보 패널로 모든 room을 보고, owner 게시로 말하고, agent의 profile·avatar·receiver·`all` 가입·delivery retry를 owner 권한으로 바꾼다. read marker는 바꾸지 않는다. static asset이 같은 서비스에서 제공되고 JavaScript가 인증된 v1 API를 호출하면 브라우저와 CLI가 같은 권한·페이징·no-ack 규칙을 공유할 수 있다. SSR template engine은 필수가 아니다.
 
 Askama를 추가하더라도 template이 SQLite를 직접 읽거나 API 의미를 우회해서는 안 된다. SSR을 도입할 때는 공통 API 또는 동일한 인증·조회 service 경계를 사용하고, browser history 조회가 read marker를 바꾸지 않도록 유지한다. 별도 browser session과 owner credential 전달 방식은 구현 전에 정한다.
 

@@ -1,4 +1,5 @@
-//! The read-only browser UI (slice S6): static files embedded at build time.
+//! The browser console (slice S6, replaced by the S11 chat console): static
+//! files embedded at build time.
 //!
 //! The page talks to the v1 API with `fetch`, so it shares the API's
 //! authentication, paging and no-ack rules; nothing here touches the store or
@@ -15,9 +16,10 @@ use axum::routing::get;
 
 use super::AppState;
 
-/// No inline script or style, no third-party origin, no framing.
+/// No inline script or style, no third-party origin, no framing. `blob:`
+/// images are the avatars the page fetched with its bearer token (S11).
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; \
-                   img-src 'self'; base-uri 'none'; frame-ancestors 'none'";
+                   img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'";
 
 const INDEX_HTML: &str = include_str!("../../ui/index.html");
 const APP_JS: &str = include_str!("../../ui/app.js");
