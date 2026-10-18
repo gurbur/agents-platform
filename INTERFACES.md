@@ -25,7 +25,7 @@
 | `IF-API-HISTORY` | `GET /v1/messages`, `GET /v1/messages/{message_id}` | History 조회 | frozen |
 | `IF-API-DELIVERY` | `GET /v1/agents/{id}/delivery`, `POST /v1/agents/{id}/delivery/retry` | Delivery 진단과 receiver 알림 | frozen |
 | `IF-API-ROTATE` | `POST /v1/agents/{id}/tokens/rotate` | Token rotation | frozen |
-| `IF-API-ROOMS` | `GET /v1/rooms`(owner 전용, `{rooms:[{room_id,kind,members,last_event_seq,last_message_at,last_sender_id,message_count}]}`, 최근 순, `all` 항상 포함, paging 없음·soft cap 1000), `POST /v1/rooms/{room_id}/messages`(owner 전용, body `{sender_id,body,client_key,reply_to?}`, `sender_id`는 `[owner] post_as`만 → 아니면 403 `forbidden`, 미등록 DM member 404 `unknown_room`, 수신자 = room member − sender, 응답은 `IF-API-SEND`와 같은 message 객체) | Room 목록과 owner 게시 | frozen-pending · 2026-10-18 |
+| `IF-API-ROOMS` | `GET /v1/rooms`(owner 전용, `{rooms:[{room_id,kind,members,last_event_seq,last_message_at,last_sender_id,message_count}]}`, 최근 순, `all` 항상 포함, paging 없음·soft cap 1000), `POST /v1/rooms/{room_id}/messages`(owner 전용, body `{sender_id,body,client_key,reply_to?}`, `sender_id`는 `[owner] post_as`만 → 아니면 403 `forbidden`, 미등록 DM member 404 `unknown_room`, 수신자 = room member − sender, 응답은 `IF-API-SEND`와 같은 message 객체) | Room 목록과 owner 게시 | frozen · 2026-10-18 |
 | `IF-API-IDENTITY` | `POST /v1/identity/tokens` (agent 전용, 201 `{token,sub,aud}`, `owner_not_allowed`·`identity_disabled`·`unknown_audience`·`ttl_too_long`) | Identity attestation | frozen · 2026-10-16 |
 
 ## B. Receiver wire (정본: `docs/design/RECEIVER_WAKE_CONVENTION.md`)
@@ -89,7 +89,7 @@
 - `[identity]`가 있으면 `signing_key_file`, `issuer`, `audiences`는 필수다.
 - `[owner].post_as`의 각 값은 `IF-ID-001`의 `agent_id` 형식(예약어 `all`·`owner` 거부)이어야 하고 중복이 없어야 한다. 위반은 기동 거부. 등록 여부는 기동 때 보지 않는다(요청 때 404 `agent_not_found`, `IF-WIRE-007`). 허용 목록에는 owner 자신을 나타내는 identity만 넣는다(운영 규칙, [ADR-0007](docs/adr/0007-owner-posts-into-any-room.md)). 기동 로그에 `post_as` 목록을 남긴다(ID는 비밀이 아니다).
 - 테스트는 기본값 숫자를 단언하지 않고 "설정이 적용된다"만 확인한다.
-- **상태**: frozen · 2026-10-15 · `[identity]` 절 frozen 2026-10-16 · `[owner]` 절 frozen-pending 2026-10-18(S10)
+- **상태**: frozen · 2026-10-15 · `[identity]` 절 frozen 2026-10-16 · `[owner]` 절 frozen 2026-10-18(S10)
 
 ### `IF-AUTH-001 — credential 형식과 보관`
 
@@ -246,7 +246,7 @@
 - room 목록과 owner 게시(S10, 2026-10-18):
   - `rooms` — owner. `GET /v1/rooms`. 기본 출력은 표 `ROOM KIND MEMBERS LAST_AT LAST_SENDER COUNT`(서버 순서 그대로, `MEMBERS`는 `,`로 이은 agent_id, null은 `-`). `--json`은 원문.
   - `room post <room_id> --as <agent_id> --body <text> [--reply-to <message_id>] [--client-key <key>]` — owner. `POST /v1/rooms/{room_id}/messages`, body `{"sender_id": <--as>, "body", "client_key", "reply_to"?}`. `room_id`·`--as`·`--reply-to`는 `platform-wire` 형식(`RoomId`, `AgentId`, `MessageId`)으로 먼저 검사해 위반이면 exit 2. `--client-key`를 생략하면 `send`처럼 새 ULID를 쓰고, 출력·`--json` 동작(생성한 key를 stderr에 한 줄)도 `send`와 같다. 기본 출력은 `send`와 같은 형식.
-- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen-pending 2026-10-18
+- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18
 
 ### `IF-DLV-001 — delivery worker 상태 전이`
 
@@ -384,7 +384,7 @@
 - 수신자: `all` → commit 시점 `joined = 1` 전원(sender 포함 여부는 sender의 가입 상태가 정한다), `dm:a:b` → `{a, b} − {sender_id}`. sender의 `joined_all`은 검사하지 않는다(`not_all_member` 없음).
 - 로그: `message_id`, `room_id`, `sender_id`, `event_seq`, 수신자 수만. body 금지(`CLAUDE.md` 규약).
 - 오류 code `unknown_room`(404)은 이 endpoint에서만 쓴다. `POST /v1/messages`의 `unknown_recipient`와 섞지 않는다.
-- **상태**: frozen-pending · 2026-10-18 · 근거 [ADR-0007](docs/adr/0007-owner-posts-into-any-room.md)
+- **상태**: frozen · 2026-10-18 · 근거 [ADR-0007](docs/adr/0007-owner-posts-into-any-room.md)
 
 ## 용어집
 

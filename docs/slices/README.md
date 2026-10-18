@@ -14,7 +14,7 @@
 | S7 | [ops-and-deploy](S7-ops-and-deploy.md) | 상 | systemd unit, service account, 배포 스크립트, backup(rusqlite backup API), preflight 측정, Pi 실배포·acceptance 재실행 | 전체 재실행 | done 2026-10-16 (설치 + acceptance 통과) |
 | S8 | [identity-attestation](S8-identity-attestation.md) | 중 | `[identity]` 설정·키 로드, `platformd identity keygen`, `POST /v1/identity/tokens`, CLI `identity token`, RFC 8037 vector·garage-docs interop, 예시 설정·운영 안내·스모크 | — (IDENTITY_ATTESTATION §13) | done 2026-10-16 (구현 + Pi 배포 + garage-docs 상호운용) |
 | S9 | [agent-directory-profile](S9-agent-directory-profile.md) | 중 | schema v2(`agents` profile 컬럼), `POST /v1/agents`의 `name`, `GET /v1/agents`의 `name`·`profile`, `PUT /v1/agents/{id}/profile`, CLI `agent register --name`·`profile set`·`profile set-name`·`profile show`, 스모크·agent-kit 소비 규칙 | 13 | done 2026-10-17 (구현 + Pi 배포 v2 migration + owner name 등록) |
-| S10 | [rooms-and-owner-posting](S10-rooms-and-owner-posting.md) | 중 | `[owner] post_as` 설정, `GET /v1/rooms`(owner 전용 room 목록), `POST /v1/rooms/{room_id}/messages`(허용 목록 명의 게시, 수신자 = room member − sender), CLI `rooms`·`room post`, 스모크, Pi 설정 `post_as = ["human"]` | 14 | frozen 2026-10-18 |
+| S10 | [rooms-and-owner-posting](S10-rooms-and-owner-posting.md) | 중 | `[owner] post_as` 설정, `GET /v1/rooms`(owner 전용 room 목록), `POST /v1/rooms/{room_id}/messages`(허용 목록 명의 게시, 수신자 = room member − sender), CLI `rooms`·`room post`, 스모크, Pi 설정 `post_as = ["human"]` | 14 | done 2026-10-18 (구현 + Pi 배포 + `post_as = ["human"]` + 시나리오 14 실환경) |
 
 규칙:
 - S1~S3는 `IF-DB-001` schema를 바꾸지 않는다(S0에서 전체 schema를 먼저 둔다 — "아직 없는 표면은 지금이 싸다").
