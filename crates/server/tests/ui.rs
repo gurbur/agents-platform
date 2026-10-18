@@ -122,6 +122,32 @@ fn page_has_no_inline_script_or_style() {
 }
 
 #[test]
+fn phone_layout_keeps_text_controls_at_16px_without_disabling_zoom() {
+    // iOS zooms into a focused control under 16px; the fix is the font size,
+    // never a viewport that forbids pinch zoom.
+    assert!(!INDEX_HTML.contains("maximum-scale") && !INDEX_HTML.contains("user-scalable"));
+    let phone = APP_CSS
+        .split("@media (max-width:720px){")
+        .nth(1)
+        .expect("phone media query");
+    let rule = phone
+        .lines()
+        .find(|line| line.contains("font-size:16px"))
+        .expect("16px rule in the phone layout");
+    for control in [
+        ".field input",
+        ".box textarea",
+        "dl.kv input",
+        "dl.kv textarea",
+        "dl.kv select",
+        ".url input",
+    ] {
+        assert!(rule.contains(control), "{control} not at 16px on phones");
+    }
+    assert!(APP_CSS.contains("touch-action:manipulation"));
+}
+
+#[test]
 fn no_file_loads_anything_from_another_origin() {
     let script = APP_JS.replace(SVG_NAMESPACE, "");
     for (name, source) in [

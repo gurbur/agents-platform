@@ -17,9 +17,12 @@
 *{box-sizing:border-box}
 [hidden]{display:none !important}
 html,body{height:100%;margin:0}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 body{background:var(--bg-app);color:var(--tx);font:14.5px/1.55 var(--font);-webkit-font-smoothing:antialiased;letter-spacing:-.003em}
 button,input,textarea,select{font:inherit;color:inherit}
 button{cursor:pointer}
+/* A quick double tap on a control must not zoom the page (iOS). */
+button,a,label,summary,input,textarea,select,[data-act],[role="tab"],[role="switch"]{touch-action:manipulation}
 :focus-visible{outline:2px solid var(--ac);outline-offset:2px;border-radius:6px}
 .svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
 
@@ -148,7 +151,7 @@ button{cursor:pointer}
 .box{display:flex;align-items:flex-end;gap:8px;padding:6px 6px 6px 14px;background:var(--bg-raise);border:1px solid var(--line);border-radius:8px}
 #strips:not(:empty) + .box{border-top-left-radius:0;border-top-right-radius:0}
 .box:focus-within{border-color:var(--ac-line)}
-.box textarea{flex:1;min-height:32px;max-height:180px;padding:5px 0;border:0;outline:none;background:none;resize:none;line-height:1.5}
+.box textarea{flex:1;min-width:0;width:100%;min-height:32px;max-height:180px;padding:5px 0;border:0;outline:none;background:none;resize:none;line-height:1.5}
 .box textarea::placeholder{color:var(--tx-3)}
 .box textarea:disabled{cursor:not-allowed}
 .send{display:grid;place-items:center;width:32px;height:32px;border:0;border-radius:6px;background:none;color:var(--tx-3)}
@@ -307,4 +310,7 @@ td .id{font:12px var(--mono);color:var(--tx-3)}
   .hint{display:none}
   .info{width:100vw;box-shadow:none}
   td,th{padding-left:14px;padding-right:14px}
+  /* iOS zooms into any focused text control under 16px; the phone layout
+     keeps every one at 16px instead of disabling zoom in the viewport. */
+  .field input,.box textarea,dl.kv input,dl.kv textarea,dl.kv select,.url input{font-size:16px}
 }
