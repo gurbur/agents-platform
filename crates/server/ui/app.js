@@ -8,6 +8,11 @@
 // messages of each room were seen). Server data reaches the DOM as text
 // nodes only: message bodies, names and intros are data, never markup.
 // The console never moves a read marker.
+//
+// Slice S12 adds registering and deleting agents from the directory. The
+// two one-time credentials of a registration live only in the text of the
+// credential dialog while it is open and are wiped when it closes; they
+// never reach storage, the URL or the console log.
 
 const TOKEN_STORAGE_KEY = 'agents-platform.owner-token';
 const PREF_STYLE = 'agents-console-style';
@@ -38,6 +43,7 @@ const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const API = Object.freeze({
   owner: () => '/v1/owner',
   agents: () => '/v1/agents',
+  agent: (agentId) => `/v1/agents/${encodeURIComponent(agentId)}`,
   rooms: () => '/v1/rooms',
   messages: () => '/v1/messages',
   message: (messageId) => `/v1/messages/${encodeURIComponent(messageId)}`,
@@ -97,6 +103,10 @@ const S = {
   avatarBusy: new Set(),
   avatarTarget: null,
   sending: false,
+  regBusy: false,
+  credFor: null,
+  delTarget: null,
+  delBusy: false,
   pendingSend: null,
   sendError: null,
   timers: [],
@@ -956,7 +966,7 @@ function agentBlock(id) {
   const agent = agentOf(id);
   if (!agent) {
     return [h('div', { class: 'blk' }, h('div', { class: 'prof' }, av(id, 56), h('div', null, h('div', { class: 'nm', text: id }), h('div', { class: 'id', text: id }))),
-      h('p', { class: 'muted flush', text: '디렉토리에 없는 에이전트입니다.' }))];
+      h('p', { class: 'muted flush' }, h('b', { text: '등록되지 않은 agent' }), ' — 삭제되었거나 등록된 적 없는 ID입니다. 남은 대화는 그대로 읽을 수 있습니다.'))];
   }
   const nodes = [profileBlock(agent)];
   nodes.push(h('div', { class: 'seg sub', role: 'tablist' },
@@ -1243,7 +1253,139 @@ function renderDir() {
     h('td', null, h('span', { class: 'cell' }, av(agent.agent_id, 28), h('span', null, agent.name || agent.agent_id, ' ', h('span', { class: 'id', text: agent.agent_id })))),
     h('td', { text: agent.profile.role || NONE_TEXT }),
     h('td', { text: agent.joined_all ? '예' : '아니요' }),
-    h('td', null, pill(agent)))));
+    h('td', null, pill(agent)),
+    h('td', { class: 'act' }, S.postAs.includes(agent.agent_id)
+      ? h('span', { class: 'pill none', title: 'owner 게시 명의([owner] post_as)라 지울 수 없습니다', text: '보호됨' })
+      : h('button', { class: 'btn sm ghost-bad', data: { act: 'del-open', id: agent.agent_id }, text: '삭제' })))));
+}
+
+// ------------------------------------------------- registration, deletion
+
+function openRegister() {
+  $('regForm').reset();
+  showFormError('regError', null);
+  $('reg').showModal();
+  $('regId').focus();
+}
+
+function showFormError(id, text) {
+  $(id).hidden = !text;
+  $(id).textContent = text || '';
+}
+
+async function submitRegister() {
+  if (S.regBusy) return;
+  const body = { agent_id: $('regId').value.trim(), name: $('regName').value.trim() };
+  const receiverUrl = $('regUrl').value.trim();
+  if (receiverUrl) body.receiver_url = receiverUrl;
+  S.regBusy = true;
+  $('regGo').disabled = true;
+  showFormError('regError', null);
+  let created;
+  try {
+    created = await request('POST', API.agents(), { json: body });
+  } catch (error) {
+    showFormError('regError', failureText(asFailure(error)));
+    return;
+  } finally {
+    S.regBusy = false;
+    $('regGo').disabled = false;
+  }
+  $('reg').close();
+  showCredentials(created);
+}
+
+// The response is shown once and kept nowhere else: the dialog's text is
+// the only copy, and closing the dialog (button, Escape or logout) wipes it.
+function showCredentials(created) {
+  S.credFor = created.agent_id;
+  $('credId').textContent = created.agent_id;
+  $('credKey').textContent = created.agent_api_key;
+  $('credSecret').textContent = created.receiver_secret;
+  for (const button of $('cred').querySelectorAll('[data-act="copy"]')) button.textContent = '복사';
+  $('cred').showModal();
+}
+
+async function onCredentialsClosed() {
+  $('credKey').textContent = '';
+  $('credSecret').textContent = '';
+  const id = S.credFor;
+  S.credFor = null;
+  if (!id || !S.token) return;
+  await refreshDirectory();
+  renderDir();
+  if (S.me && agentOf(id)) openDm(id);
+}
+
+// The Clipboard API needs a secure context, which a plain-HTTP tailnet origin
+// is not; then the value is selected for a manual copy instead.
+async function copySecret(button) {
+  const node = $(button.dataset.k);
+  try {
+    await navigator.clipboard.writeText(node.textContent);
+    button.textContent = '복사됨';
+    return;
+  } catch (_) {
+    window.getSelection().selectAllChildren(node);
+  }
+  button.textContent = document.execCommand('copy') ? '복사됨' : '선택됨';
+}
+
+function openDelete(id) {
+  S.delTarget = id;
+  $('delId').textContent = id;
+  const agent = agentOf(id);
+  $('delWho').replaceChildren(av(id, 36), h('div', null, h('div', { class: 'nm', text: (agent && agent.name) || id }), h('div', { class: 'id', text: id })));
+  $('delInput').value = '';
+  $('delGo').disabled = true;
+  showFormError('delError', null);
+  $('del').showModal();
+  $('delInput').focus();
+}
+
+function onDeleteInput() {
+  $('delGo').disabled = S.delBusy || $('delInput').value.trim() !== S.delTarget;
+}
+
+function deleteFailureText(id, failure) {
+  if (failure.code === 'agent_protected') {
+    return `${id}는 owner 게시 명의([owner] post_as)라 지울 수 없습니다. 설정에서 빼고 platformd를 다시 시작한 뒤 지우세요. (${failureText(failure)})`;
+  }
+  return failureText(failure);
+}
+
+async function confirmDelete() {
+  const id = S.delTarget;
+  if (S.delBusy || !id || $('delInput').value.trim() !== id) return;
+  S.delBusy = true;
+  onDeleteInput();
+  try {
+    await request('DELETE', API.agent(id));
+  } catch (error) {
+    showFormError('delError', deleteFailureText(id, asFailure(error)));
+    return;
+  } finally {
+    S.delBusy = false;
+    onDeleteInput();
+  }
+  $('del').close();
+  await afterDelete(id);
+}
+
+// The agent's messages and rooms stay; a room it was in closes if open.
+async function afterDelete(id) {
+  forgetAvatar(id);
+  S.delivery.delete(id);
+  S.inbox.delete(id);
+  S.extraRooms = S.extraRooms.filter((room) => !room.members.includes(id));
+  const room = currentRoom();
+  const closing = room && room.kind === 'dm' && room.members.includes(id);
+  if (S.member === id) S.member = null;
+  await refreshDirectory();
+  await refreshRooms();
+  renderDir();
+  if (closing) await openRoom('all', false);
+  else renderInfo();
 }
 
 function openDm(id) {
@@ -1448,6 +1590,7 @@ function logout(message) {
   stopTimers();
   S.session += 1;
   S.token = '';
+  for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
   storeToken('', false);
   for (const id of Array.from(S.avatars.keys())) forgetAvatar(id);
   S.agents = new Map();
@@ -1496,6 +1639,24 @@ function onClick(event) {
       break;
     case 'dm-open':
       openDm(id);
+      break;
+    case 'reg-open':
+      openRegister();
+      break;
+    case 'reg-close':
+      $('reg').close();
+      break;
+    case 'cred-close':
+      $('cred').close();
+      break;
+    case 'copy':
+      copySecret(target);
+      break;
+    case 'del-open':
+      openDelete(id);
+      break;
+    case 'del-close':
+      $('del').close();
       break;
     case 'more': {
       const text = target.previousElementSibling;
@@ -1653,6 +1814,16 @@ function init() {
     const file = event.target.files[0];
     if (file && S.avatarTarget) uploadAvatar(S.avatarTarget, file);
   });
+  $('regForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    submitRegister();
+  });
+  $('delForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    confirmDelete();
+  });
+  $('delInput').addEventListener('input', onDeleteInput);
+  $('cred').addEventListener('close', onCredentialsClosed);
   $('loginForm').addEventListener('submit', (event) => {
     event.preventDefault();
     const token = $('tokenInput').value.trim();

@@ -269,6 +269,13 @@ fn calls() -> Vec<Call> {
     vec![
         call("owner", Method::GET, "/v1/owner", "/v1/owner", None),
         call("agents", Method::GET, "/v1/agents", "/v1/agents", None),
+        call(
+            "agents",
+            Method::POST,
+            "/v1/agents",
+            "/v1/agents",
+            json_body(json!({"agent_id": "agent-new", "name": "New"})),
+        ),
         call("rooms", Method::GET, "/v1/rooms", "/v1/rooms", None),
         call(
             "messages",
@@ -354,12 +361,21 @@ fn calls() -> Vec<Call> {
             "/v1/agents/agent-a/inbox",
             None,
         ),
+        // Last: deletes the agent the POST above registered.
+        call(
+            "agent",
+            Method::DELETE,
+            "/v1/agents/${encodeURIComponent(agentId)}",
+            "/v1/agents/agent-new",
+            None,
+        ),
     ]
 }
 
 /// The page names exactly these endpoints and methods, and the owner gets a
 /// success from each (in this order, so the avatar exists to fetch and
-/// delete). The console never calls the read-marker endpoint.
+/// delete and the registered agent to delete). The console never calls the
+/// read-marker endpoint.
 #[tokio::test]
 async fn every_endpoint_the_page_calls_answers_the_owner() {
     let calls = calls();
@@ -410,4 +426,34 @@ async fn every_endpoint_the_page_calls_answers_the_owner() {
     }
 
     server.shutdown().await.unwrap();
+}
+
+/// The one-time credentials of a registration (S12) are shown as dialog
+/// text only: nothing in the script logs or stores them, and closing the
+/// dialog wipes both values.
+#[test]
+fn registration_credentials_are_never_logged_or_stored() {
+    assert!(!APP_JS.contains("console."), "app.js writes to the console");
+    for line in APP_JS
+        .lines()
+        .filter(|line| line.contains("agent_api_key") || line.contains("receiver_secret"))
+    {
+        let line = line.trim();
+        for sink in ["Storage", "prefSet", "location", "history.", "S."] {
+            assert!(!line.contains(sink), "{line}");
+        }
+        assert!(line.starts_with("$('cred"), "only the dialog text: {line}");
+    }
+    let closed = APP_JS
+        .split("async function onCredentialsClosed() {")
+        .nth(1)
+        .expect("close handler");
+    let body = &closed[..closed.find("\n}").expect("end of handler")];
+    for node in ["credKey", "credSecret"] {
+        assert!(
+            body.contains(&format!("$('{node}').textContent = '';")),
+            "closing does not wipe {node}"
+        );
+    }
+    assert!(APP_JS.contains("$('cred').addEventListener('close', onCredentialsClosed);"));
 }

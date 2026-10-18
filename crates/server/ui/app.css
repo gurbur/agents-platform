@@ -281,6 +281,27 @@ tbody tr[data-act]{cursor:pointer}
 tbody tr[data-act]:hover td{background:var(--hover)}
 td .cell{display:flex;align-items:center;gap:10px}
 td .id{font:12px var(--mono);color:var(--tx-3)}
+td.act{width:1%;text-align:right}
+.dlg-tools{display:flex;align-items:center;gap:8px}
+dialog.narrow{width:min(460px,calc(100vw - 32px))}
+.dlg-body{display:flex;flex-direction:column;gap:14px;padding:16px 20px 20px}
+.dlg-body .row-end{margin-top:2px}
+.form-row{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--tx-2)}
+.form-row em{font-style:normal;color:var(--tx-3);margin-left:6px;font-size:12px}
+.form-row b{color:var(--tx);font:600 12.5px var(--mono)}
+.form-row small{color:var(--tx-3);font-size:12px;line-height:1.4}
+.form-row .field{height:34px}
+.secret{display:flex;align-items:center;gap:8px;padding:6px 6px 6px 10px;background:var(--bg-input);border:1px solid var(--line-2);border-radius:6px}
+.secret code{flex:1;min-width:0;font:12.5px var(--mono);color:var(--tx);overflow-wrap:anywhere;user-select:all}
+.warnbox{padding:10px 12px;border:1px solid rgba(214,181,110,.4);border-radius:8px;background:rgba(214,181,110,.08);color:var(--warn);font-size:13px;line-height:1.5}
+.warnbox code{font:12px var(--mono)}
+.btn.danger{background:var(--bad);border-color:var(--bad);color:#24100f;font-weight:600}
+.btn.danger:hover{background:#e79c97}
+.btn.danger[disabled]{background:var(--bad)}
+.btn.ghost-bad{color:var(--bad);border-color:rgba(223,139,134,.35)}
+.btn.ghost-bad:hover{background:rgba(223,139,134,.1);color:var(--bad)}
+.prof.flush{margin:0}
+.err.flush,.warnbox.flush{margin:0}
 
 /* ---------- 반응형 ---------- */
 @media (max-width:1280px){
@@ -310,6 +331,7 @@ td .id{font:12px var(--mono);color:var(--tx-3)}
   .hint{display:none}
   .info{width:100vw;box-shadow:none}
   td,th{padding-left:14px;padding-right:14px}
+  .dlg-tools .btn.primary .svg{display:none}
   /* iOS zooms into any focused text control under 16px; the phone layout
      keeps every one at 16px instead of disabling zoom in the viewport. */
   .field input,.box textarea,dl.kv input,dl.kv textarea,dl.kv select,.url input{font-size:16px}

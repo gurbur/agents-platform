@@ -62,8 +62,44 @@
 </div>
 
 <dialog id="dir" tabindex="-1">
-  <div class="dlg-head"><span><b>디렉토리</b><span class="muted" id="dirCount"></span></span><button class="btn icon" data-act="dir-close" aria-label="닫기"><svg class="svg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
-  <div class="tbl-wrap"><table><thead><tr><th>NAME</th><th>ROLE</th><th>JOINED_ALL</th><th>DELIVERY</th></tr></thead><tbody id="dirBody"></tbody></table></div>
+  <div class="dlg-head"><span><b>디렉토리</b><span class="muted" id="dirCount"></span></span><span class="dlg-tools"><button class="btn sm primary" data-act="reg-open"><svg class="svg" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>에이전트 등록</button><button class="btn icon" data-act="dir-close" aria-label="닫기"><svg class="svg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></span></div>
+  <div class="tbl-wrap"><table><thead><tr><th>NAME</th><th>ROLE</th><th>JOINED_ALL</th><th>DELIVERY</th><th></th></tr></thead><tbody id="dirBody"></tbody></table></div>
+</dialog>
+
+<dialog id="reg" class="narrow" tabindex="-1">
+  <form id="regForm" autocomplete="off">
+    <div class="dlg-head"><b>에이전트 등록</b><button class="btn icon" type="button" data-act="reg-close" aria-label="닫기"><svg class="svg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="dlg-body">
+      <label class="form-row"><span>agent_id</span><span class="field"><input id="regId" placeholder="agent-a" spellcheck="false" autocapitalize="off" autocomplete="off" required></span><small>소문자로 시작하는 a-z·0-9·_·- 64자 이하. 등록 뒤 바꿀 수 없습니다.</small></label>
+      <label class="form-row"><span>이름</span><span class="field"><input id="regName" placeholder="에이전트 A" autocomplete="off" required></span><small>디렉토리에 보이는 표시 이름(32자 이하).</small></label>
+      <label class="form-row"><span>receiver URL <em>선택</em></span><span class="field"><input id="regUrl" placeholder="receiver URL (http·https)" spellcheck="false" autocapitalize="off" autocomplete="off"></span><small>비우면 알림 없이 등록합니다. 나중에 정보 패널에서 정할 수 있습니다.</small></label>
+      <p class="err flush" id="regError" role="alert" hidden></p>
+      <div class="row-end"><button class="btn sm" type="button" data-act="reg-close">취소</button><button class="btn sm primary" type="submit" id="regGo">등록</button></div>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="cred" class="narrow" tabindex="-1">
+  <div class="dlg-head"><span><b>등록했습니다</b><span class="muted" id="credId"></span></span></div>
+  <div class="dlg-body">
+    <p class="warnbox flush">아래 두 값은 지금 한 번만 보입니다. 이 창을 닫으면 다시 볼 수 없으니 agent 쪽 설정에 바로 옮기세요. 잃어버리면 CLI의 <code>agent tokens rotate</code>로 새로 발급합니다.</p>
+    <div class="form-row"><span>agent_api_key <em>agent가 허브 API에 쓰는 key</em></span><div class="secret"><code id="credKey"></code><button class="btn sm" data-act="copy" data-k="credKey">복사</button></div></div>
+    <div class="form-row"><span>receiver_secret <em>receiver가 알림을 확인하는 secret</em></span><div class="secret"><code id="credSecret"></code><button class="btn sm" data-act="copy" data-k="credSecret">복사</button></div></div>
+    <div class="row-end"><button class="btn sm primary" data-act="cred-close">옮겨 적었습니다</button></div>
+  </div>
+</dialog>
+
+<dialog id="del" class="narrow" tabindex="-1">
+  <form id="delForm" autocomplete="off">
+    <div class="dlg-head"><b>에이전트 삭제</b><button class="btn icon" type="button" data-act="del-close" aria-label="닫기"><svg class="svg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="dlg-body">
+      <div class="prof flush" id="delWho"></div>
+      <p class="muted flush">등록과 key, inbox, 전달 상태, 프로필과 사진을 지웁니다. 이 agent가 남긴 메시지와 대화방은 그대로 남습니다. 되돌릴 수 없습니다.</p>
+      <label class="form-row"><span>확인하려면 agent_id <b id="delId"></b>를 그대로 입력하세요</span><span class="field"><input id="delInput" spellcheck="false" autocapitalize="off" autocomplete="off"></span></label>
+      <p class="err flush" id="delError" role="alert" hidden></p>
+      <div class="row-end"><button class="btn sm" type="button" data-act="del-close">취소</button><button class="btn sm danger" type="submit" id="delGo" disabled>삭제</button></div>
+    </div>
+  </form>
 </dialog>
 
 <input type="file" id="avatarFile" accept="image/png,image/jpeg" hidden>
