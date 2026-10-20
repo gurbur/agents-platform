@@ -15,7 +15,8 @@
 | id | 계약 | 정본 절 | 상태 |
 | --- | --- | --- | --- |
 | `IF-API-COMMON` | media type, Bearer 인증, 상태 코드 규칙, 크기 제한(decoded body 16 KiB, wire 128 KiB, client_key ASCII 1~128), page 50/100, 오류 body `{error:{code,message,request_id,details}}` | 공통 HTTP 규칙, 오류와 권한 요약 | frozen |
-| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`·`avatar`), `DELETE /v1/agents/{agent_id}`(owner 전용, 204, `[owner] post_as`면 409 `agent_protected`, 없으면 404 `agent_not_found`, 메시지는 남김) | Agent 등록과 directory("DELETE /v1/agents/{agent_id}") | frozen · S9 개정 frozen 2026-10-17 · `avatar` 요약 frozen 2026-10-18(S11) · DELETE frozen 2026-10-18(S12) |
+| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`·`avatar`, S14부터 `presence`·`last_seen_at`), `DELETE /v1/agents/{agent_id}`(owner 전용, 204, `[owner] post_as`면 409 `agent_protected`, 없으면 404 `agent_not_found`, 메시지는 남김) | Agent 등록과 directory("DELETE /v1/agents/{agent_id}") | frozen · S9 개정 frozen 2026-10-17 · `avatar` 요약 frozen 2026-10-18(S11) · DELETE frozen 2026-10-18(S12) · `presence`·`last_seen_at` frozen-pending 2026-10-20(S14) |
+| `IF-API-PRESENCE` | `PUT /v1/agents/{id}/presence`(owner 또는 그 agent, body `{state: "online"\|"busy", note?, ttl_secs?}`, 항목 전체 교체, 200 `{agent_id, presence, last_seen_at}`, `ttl_secs` 상한 초과 422 `ttl_too_long`), `DELETE …/presence`(owner 또는 그 agent, 204, 즉시 offline). 상태는 메모리·TTL, `offline`은 파생 | Agent 등록과 directory("Agent presence") | frozen-pending · 2026-10-20(S14) |
 | `IF-API-AVATAR` | `PUT /v1/agents/{id}/avatar`(owner 또는 그 agent, raw `image/png`·`image/jpeg` body ≤ 524288 B, magic 일치, 200 `{agent_id, avatar:{content_type,bytes,sha256,updated_at}}`, 413 `avatar_too_large`, 415 `unsupported_media_type`), `GET …/avatar`(모든 principal, bytes + `ETag: "<sha256>"` + `Cache-Control: private, max-age=300`, `If-None-Match` → 304, 없으면 404 `avatar_not_found`), `DELETE …/avatar`(owner 또는 그 agent, 204) | Agent 등록과 directory("Directory avatar") | frozen · 2026-10-18 |
 | `IF-API-OWNER` | `GET /v1/owner`(owner 전용, query 없음, 200 `{post_as:[agent_id…]}` 설정 순서) | Room 목록과 owner 게시("GET /v1/owner") | frozen · 2026-10-18 |
 | `IF-API-PROFILE` | `PUT /v1/agents/{id}/profile`(owner 또는 그 agent, 부분 갱신 — 생략=유지·`null`=비움, `name`은 owner만 → agent key면 403 `forbidden`, `name: null` 422, 200 `{agent_id, name, profile}`), 필드 규칙 | Agent 등록과 directory("PUT /v1/agents/{agent_id}/profile", "Directory profile 필드 규칙") | frozen · 2026-10-17 |
@@ -89,13 +90,20 @@
   post_as = []                        # owner가 POST /v1/messages의 sender_id로 쓸 수 있는 agent_id 목록(S13 전에는 POST /v1/rooms/{room_id}/messages).
                                       # 이 ID는 어느 room에서든 mentions로 지목될 수 있다(S13, IF-WIRE-010).
                                       # 기본 빈 목록 = 기능 꺼짐(모든 sender_id가 403). 운영 Pi는 ["human"].
+
+  [presence]                          # 선택(S14). 없으면 아래 기본값(상수).
+  default_ttl_secs = 120              # PUT …/presence의 ttl_secs 생략 시.
+  max_ttl_secs = 3600                 # ttl_secs 상한. 넘으면 422 ttl_too_long.
+                                      # 1 ≤ default_ttl_secs ≤ max_ttl_secs ≤ PRESENCE_TTL_CEILING_SECS(86400) 아니면 기동 거부.
+  last_seen_interval_secs = 60        # agents.last_seen_at을 agent마다 이 간격에 한 번만 쓴다(throttle). 1 이상.
   ```
 - 알 수 없는 키는 기동 거부(`serde(deny_unknown_fields)`). 비밀값은 설정 파일에 직접 넣지 않는다(`owner_token_file`, `signing_key_file`처럼 파일 경로만 허용).
 - `[identity]`가 있으면 `signing_key_file`, `issuer`, `audiences`는 필수다.
 - `[owner].post_as`의 각 값은 `IF-ID-001`의 `agent_id` 형식(예약어 `all`·`owner` 거부)이어야 하고 중복이 없어야 한다. 위반은 기동 거부. 등록 여부는 기동 때 보지 않는다(요청 때 404 `agent_not_found`, `IF-WIRE-010`). 허용 목록에는 owner 자신을 나타내는 identity만 넣는다(운영 규칙, [ADR-0007](docs/adr/0007-owner-posts-into-any-room.md)). 기동 로그에 `post_as` 목록을 남긴다(ID는 비밀이 아니다).
 - 테스트는 기본값 숫자를 단언하지 않고 "설정이 적용된다"만 확인한다.
+- `[presence]`(S14, [ADR-0012](docs/adr/0012-presence-in-memory-with-persisted-last-seen.md))의 세 키는 모두 선택이고 정수 초다. 기본값은 `platformd::config`의 상수다(튜닝 값). 기동 로그에 세 값을 남긴다. `PRESENCE_TTL_CEILING_SECS`는 `platform-wire`의 계약 상수다.
 - S13은 키를 더하지 않는다. `post_as`의 쓰임만 넓어진다: owner 게시가 `POST /v1/messages`로 옮겨 가고, 목록의 ID는 member가 아닌 room에서도 `mentions`로 지목되어 그 사건을 inbox로 받고 깨어난다([ADR-0011](docs/adr/0011-inbox-wake-split.md)).
-- **상태**: frozen · 2026-10-15 · `[identity]` 절 frozen 2026-10-16 · `[owner]` 절 frozen 2026-10-18(S10) · `post_as`의 쓰임 frozen-pending 2026-10-20(S13)
+- **상태**: frozen · 2026-10-15 · `[identity]` 절 frozen 2026-10-16 · `[owner]` 절 frozen 2026-10-18(S10) · `post_as`의 쓰임 frozen-pending 2026-10-20(S13) · `[presence]` 절 frozen-pending 2026-10-20(S14)
 
 ### `IF-AUTH-001 — credential 형식과 보관`
 
@@ -121,11 +129,11 @@
 - identity token은 Bearer 판정(`IF-AUTH-001`)의 어느 단계도 통과하지 않는다(→ 401).
 - **상태**: frozen · 2026-10-16 · 근거 [ADR-0005](docs/adr/0005-identity-attestation-tokens.md)
 
-### `IF-DB-001 — SQLite schema (v1–v5)`
+### `IF-DB-001 — SQLite schema (v1–v6)`
 
 - **종류**: 데이터 스키마 · **제공자**: `platformd::store::migrations` · **소비자**: `platformd::store`
 - 연결 PRAGMA: `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. 기동 시 `journal_mode`가 `wal`이 아니면 기동 거부.
-- 마이그레이션: `schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`. 버전은 1부터 연속. 적용은 각 버전을 하나의 transaction으로. 현재 최신 = **5**(S13, 2026-10-20. S12는 4, S11은 3, S9·S10은 2, S8까지는 1). readiness는 최신 버전이 적용된 뒤에만 성공.
+- 마이그레이션: `schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`. 버전은 1부터 연속. 적용은 각 버전을 하나의 transaction으로. 현재 최신 = **6**(S14, 2026-10-20. S13은 5, S12는 4, S11은 3, S9·S10은 2, S8까지는 1). readiness는 최신 버전이 적용된 뒤에만 성공.
 - v1 테이블(API_V1 "저장 모델과 경계"의 논리 모델을 물리화):
   ```sql
   agents(
@@ -273,12 +281,17 @@
   - CHECK 제약은 두지 않는다(값 검증 지점은 `platform-wire`). v5를 적용한 DB는 v4 바이너리가 `SchemaTooNew`로 거부하므로 되돌림은 배포 전 backup 복원이다.
   - `notification_pending.target_seq`의 의미가 "마지막으로 wake가 걸린 `inbox_seq`"로 바뀐다(`IF-DLV-001` S13). v5 이전 행은 모두 wake였으므로 값은 그대로 둔다.
   - inbox 행은 사건 행이다. 송신 transaction은 inbox 수신자(`IF-WIRE-010`의 R)마다 `(kind='message', wake=<요청 wake>)` 행을 쓰고(sender가 그 room의 `joined` member면 sender의 행도), 그중 깨우는 집합(W, sender는 늘 제외)에만 `IF-DLV-001` "새 wake 행" 전이를 쓴다.
+- v6 변경(S14, [ADR-0012](docs/adr/0012-presence-in-memory-with-persisted-last-seen.md)): `last_seen_at` 하나를 영속한다. v5 DB에 한 transaction으로 적용하며 기존 행은 그대로이고 새 컬럼은 `NULL`이다. backfill 없음.
+  ```sql
+  ALTER TABLE agents ADD COLUMN last_seen_at TEXT;   -- RFC3339 ms. 그 agent의 key로 인증된 요청의 마지막 기록 시각(throttle). NULL = 기록 없음
+  ```
+  쓰기는 `agents::touch_last_seen`(`UPDATE agents SET last_seen_at = ? WHERE agent_id = ?`, 행이 없으면 0행) 하나뿐이고 `IF-WIRE-013`의 갱신 지점만 부른다. presence의 `state`·`note`·`updated_at`·`expires_at`은 DB에 두지 않는다(메모리). 재등록은 새 행이라 `NULL`로 시작한다. v6를 적용한 DB는 v5 바이너리가 `SchemaTooNew`로 거부하므로 되돌림은 배포 전 backup 복원이다.
 - S10(room 목록, owner 게시)은 schema를 바꾸지 않는다(그때 최신은 v2). room 목록은 `messages`를 `room_id`로 묶어 만들고 기존 `messages_room_event(room_id, event_seq)` index가 `COUNT`·`MAX(event_seq)`를 덮는다. 마지막 메시지는 `UNIQUE(event_seq)`로 다시 읽는다. S13부터 목록의 행은 `rooms`에서 오고 통계만 이 방식으로 붙인다(`IF-WIRE-011`).
 - canonical 해시 입력(S13부터, `IF-WIRE-010`): **해석된 `room_id`** 바이트, `0x00`, `body` 바이트, `0x00`, `reply_to`(없거나 null이면 빈 문자열) 바이트, `0x00`, `wake`(`1` 또는 `0`; 생략은 `1`), `0x00`, `mentions`(ASCII 오름차순을 `,`로 이은 바이트; 없거나 빈 배열이면 빈 문자열). `body`·`reply_to`는 trim·정규화 없음. `mentions`는 집합이라 순서만 다른 요청은 같은 요청이다. S12까지의 입력은 `to`(agent ID 또는 `all`, owner 게시는 room ID), `body`, `reply_to` 셋이었고, 그 해시로 저장된 행은 다시 계산하지 않는다(v5 이전 key를 다시 보내면 409일 수 있다, [ADR-0011](docs/adr/0011-inbox-wake-split.md)).
 - `inbox_seq` 발급: `agents.inbox_head + 1`을 같은 transaction에서 갱신. `event_seq` 발급: `sequences('event_seq') + 1`을 같은 transaction에서 갱신. 둘 다 hole 없음.
 - agent 삭제 cascade(S12, `IF-WIRE-009`): `DELETE /v1/agents/{agent_id}`의 store transaction 하나가 이 순서로 그 agent의 행을 지운다 — `agent_avatars`, `idempotency`(`sender_id`), `inbox_rows`(`agent_id`), `read_state`, `notification_pending`, `memberships`(`agent_id`), 마지막에 `agents`. foreign key가 가리키는 쪽을 늦게 지우는 순서다. `messages`(그 agent가 보낸 것과 그 agent의 inbox row가 가리키던 것 모두), `sequences`, `rooms`, `message_mentions`는 건드리지 않는다(S13: `memberships`는 모든 종류의 room 행을 지운다). 다른 agent의 행은 바뀌지 않는다(다른 agent의 inbox row가 그 agent의 메시지를 계속 가리킨다). 이 cascade와 avatar 삭제 말고는 agents·messages·inbox_rows에 DELETE 경로를 만들지 않으며, `messages`에는 어떤 DELETE 경로도 없다.
 - 같은 ID의 재등록은 일반 등록과 같다(`inbox_head = 0`, 새 `read_state`·`notification_pending`(`route_version = 1`)·`memberships` 행). S13부터 모든 등록 transaction은 `all` 행에 더해 **그 ID가 든 모든 `kind = 'dm'` room에 `joined = 1` membership 행**을 만든다(처음 등록이면 그런 room이 없다). 그래서 다시 등록한 agent는 옛 DM을 읽고 쓴다. topic membership은 되살리지 않는다. `route_version`이 1부터 다시 시작하므로 delivery는 route_version만으로 옛 agent의 늦은 응답을 가르지 못한다 — `IF-DLV-001` "삭제·재등록"을 본다.
-- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17 · v3 frozen 2026-10-18(S11) · v4·삭제 cascade frozen 2026-10-18(S12) · v5·해시 입력·재등록 DM membership frozen-pending 2026-10-20(S13)
+- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17 · v3 frozen 2026-10-18(S11) · v4·삭제 cascade frozen 2026-10-18(S12) · v5·해시 입력·재등록 DM membership frozen-pending 2026-10-20(S13) · v6 frozen-pending 2026-10-20(S14)
 
 ### `IF-DB-002 — Store 명령 큐 (단일 DB thread)`
 
@@ -305,15 +318,16 @@
 ### `IF-OPS-001 — 운영 endpoint`
 
 - **종류**: REST · **제공자**: `platformd::api` · **소비자**: systemd/운영자, `platform health`, 배포 스크립트
-- `GET /healthz` → 인증 없음. DB가 열리고 최신 migration이 적용됐을 때만 `200 {"status":"ok","schema_version":<최신 버전>}`(S8까지 1, S9부터 2, S11부터 3, S12부터 4, S13부터 5). 그 전에는 listen 자체를 시작하지 않는다(readiness = listen 시작). 요청마다 DB thread를 한 번 왕복해 schema version을 읽으며, 실패하면 503 `unavailable`(오류 body 형식은 `IF-API-COMMON`).
+- `GET /healthz` → 인증 없음. DB가 열리고 최신 migration이 적용됐을 때만 `200 {"status":"ok","schema_version":<최신 버전>}`(S8까지 1, S9부터 2, S11부터 3, S12부터 4, S13부터 5, S14부터 6). 그 전에는 listen 자체를 시작하지 않는다(readiness = listen 시작). 요청마다 DB thread를 한 번 왕복해 schema version을 읽으며, 실패하면 503 `unavailable`(오류 body 형식은 `IF-API-COMMON`).
 - `platformd --version` → 바이너리 버전(Cargo `CARGO_PKG_VERSION`)과 git short hash(빌드 시 환경변수 `PLATFORMD_GIT_SHA`, 없으면 `unknown`)를 한 줄 출력.
 - `platformd backup --config <toml> --out <file>` → 서버 동작 중에도 안전한 online snapshot. 원본을 읽기 전용 두 번째 연결로 열어 rusqlite `backup` API로 복사하고, 산출 파일에 `PRAGMA integrity_check`를 돌려 `ok`가 아니면 exit 1. 기존 파일은 덮어쓰지 않는다(exit 1). 설정 오류 exit 2. stdout에 `backup: <path>`, `bytes:`, `schema_version:`, `integrity_check: ok`, 표마다 `row_count <table> <n>`. 산출 파일 모드 0600, `journal_mode=delete`(단일 파일).
 - `platformd identity keygen --out <file>` → OS CSPRNG 32바이트를 Ed25519 seed로 `<file>`에 쓴다(새 파일만, umask와 무관하게 mode 0640, 기존 파일이면 exit 1). 설정 파일을 읽지 않는다. stdout에 `kid: <8 hex>`, `public_key: <표준 base64 44자>` 두 줄. seed는 출력하지 않는다. 사용법 오류 exit 2. 공개키를 다시 출력하는 명령은 없다(잃으면 새 키 + 교체). (2026-10-16, `IF-AUTH-002`)
 - 브라우저 콘솔(S6에서 시작, S11에서 채팅 콘솔로 교체): 인증 없는 `GET /`(index.html), `GET /assets/app.js`, `/assets/app.css`, `/assets/favicon.svg`. 바이너리에 embed(`include_str!`), 빌드 도구 없음. 모든 파일에 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`. `img-src`의 `blob:`은 S11 추가분으로, 인증 header로 받은 avatar를 blob URL로 보이기 위한 것이다(외부 origin은 여전히 없음). 페이지는 owner token을 메모리에, 사용자가 고를 때만 `sessionStorage`에 두며 `localStorage`에는 화면 선호(보기 방식, 마지막 방, 방별 읽은 메시지 수)만 둔다. 서버 데이터는 text로만 DOM에 넣는다(HTML 해석 없음).
 - graceful shutdown: SIGTERM/SIGINT → listener 닫기 → 진행 중 요청 완료 대기(상한 10초) → Store drop·join → delivery in-flight HTTP는 기다리지 않음(pending state는 DB에 있음).
 - 콘솔의 agent 등록·삭제(S12): 등록 201 응답의 `agent_api_key`·`receiver_secret`은 대화상자 하나에 한 번만 보이고 그 대화상자를 닫으면 DOM과 메모리에서 지운다. 콘솔은 이 두 값을 storage·URL·로그(`console.*`)에 두지 않는다.
+- 콘솔의 presence(S14): directory의 `presence`·`last_seen_at`으로 디렉토리 행·방 정보 패널 member·DM 머리에 상태 점(online 초록, busy 빨강, offline 회색, 글자·`title`로도 표시), busy 메모(text), offline이면 "n분·시간·일 전"(없으면 "본 적 없음")을 보인다. 기존 directory 갱신 주기를 쓰고 새 endpoint·polling·storage를 쓰지 않는다. delivery pill은 owner 전용으로 따로 둔다.
 - 콘솔의 주제 방과 송신(S13): 방 목록에 주제 방 구역, owner의 주제 방 만들기·초대·내보내기·보관, 사람의 말은 `POST /v1/messages`(owner token + `sender_id`)로 보내고 답장은 `reply_to`만 보낸다. 입력창의 "조용히" 토글은 `wake: false`를 보낸다. 새 storage 사용은 없다(토글 상태도 저장하지 않는다).
-- **상태**: frozen · 2026-10-15 · 콘솔·`img-src blob:`·`schema_version` 3 frozen 2026-10-18(S11) · `schema_version` 4·콘솔 등록·삭제 frozen 2026-10-18(S12) · `schema_version` 5·콘솔 주제 방·조용히 frozen-pending 2026-10-20(S13)
+- **상태**: frozen · 2026-10-15 · 콘솔·`img-src blob:`·`schema_version` 3 frozen 2026-10-18(S11) · `schema_version` 4·콘솔 등록·삭제 frozen 2026-10-18(S12) · `schema_version` 5·콘솔 주제 방·조용히 frozen-pending 2026-10-20(S13) · `schema_version` 6·콘솔 presence frozen-pending 2026-10-20(S14)
 
 ### `IF-CLI-001 — platform CLI 공통 옵션`
 
@@ -348,7 +362,12 @@
   - `receiver set <agent_id> <URL> [--wake-policy sender|always]` — 준 옵션만 body에 넣는다. 기본 출력에 `wake_policy` 줄.
   - `inbox` 표: `INBOX_SEQ KIND ROOM_ID EVENT_SEQ MESSAGE_ID CREATED_AT SENDER_ID WAKE REPLY_TO MENTIONS BODY`(`WAKE`는 `wake`·`quiet`, null·빈 값은 `-`). 모르는 `kind`의 행은 `INBOX_SEQ`·`KIND`만 채우고 나머지는 `-`. `history` 표: `EVENT_SEQ MESSAGE_ID CREATED_AT SENDER_ID WAKE REPLY_TO MENTIONS BODY`. `message show`에 `room_kind`, `wake`, `mentions` 줄.
   - `--json`은 모든 명령에서 서버 body를 그대로 쓴다. `inbox --all-pages --json`은 page의 item을 typed로 다시 직렬화하지 않고 원문 JSON 값으로 모아 한 문서로 쓴다(모르는 `kind`·field를 잃지 않는다).
-- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18 · S11 추가분 frozen 2026-10-18 · S12 추가분 frozen 2026-10-18 · S13 추가분·삭제분 frozen-pending 2026-10-20
+- presence(S14, 2026-10-20):
+  - `presence set <agent_id> online|busy [--note <text>] [--ttl <secs>]` — owner 또는 그 agent. `PUT /v1/agents/{agent_id}/presence`, body `{"state", "note"?, "ttl_secs"?}`(준 옵션만 키를 넣는다). state 값, note(`platform-wire::validate_presence_note`), `--ttl`(1 이상 정수)을 먼저 검사해 위반이면 exit 2. 상한은 서버가 판정한다. 기본 출력은 키-값 줄 `agent_id`, `state`, `note`, `updated_at`, `expires_at`, `last_seen_at`(null은 `-`). `--json`은 200 원문.
+  - `presence clear <agent_id>` — owner 또는 그 agent. `DELETE …/presence`. 204면 `presence cleared: <agent_id>` 한 줄, `--json`은 `{"agent_id": …, "presence": {"state": "offline", "note": null, "updated_at": null, "expires_at": null}}`.
+  - `agent list` 열: agent 시점 `AGENT_ID NAME JOINED_ALL PRESENCE LAST_SEEN ROLE`, owner 시점 `AGENT_ID NAME JOINED_ALL PRESENCE LAST_SEEN DELIVERY ROUTE_VERSION CREATED_AT RECEIVER_URL ROLE`. `PRESENCE`는 `online`·`busy`·`offline`, `LAST_SEEN`은 `last_seen_at` 또는 `-`. note는 표에 넣지 않는다.
+  - `profile show`는 `updated_at` 줄 뒤에 `presence`, `presence_note`, `last_seen_at` 줄을 더한다(null은 `-`).
+- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18 · S11 추가분 frozen 2026-10-18 · S12 추가분 frozen 2026-10-18 · S13 추가분·삭제분 frozen-pending 2026-10-20 · S14 추가분 frozen-pending 2026-10-20
 
 ### `IF-DLV-001 — delivery worker 상태 전이`
 
@@ -387,9 +406,10 @@
   ```
 - `name`과 `profile`은 두 형태 모두에 있다(S9). `name`은 v1 행에서 owner가 정하기 전까지 `null`. `profile`의 다섯 키는 항상 있고 선언하지 않은 값은 `null`(키를 생략하지 않는다). `PUT …/profile` 200의 `profile`과 `POST /v1/agents` 201의 `profile`도 같은 객체다.
 - `delivery.state`는 `IF-DLV-001` 파생 규칙(`receiver_url IS NULL → no_receiver`, 그 외 `notification_pending.state`). 키·secret은 어떤 형태에도 없다.
-- `avatar`(S11)는 두 형태 모두의 마지막 키다: 이미지가 있으면 `{"sha256":"<64 hex>","updated_at":"<RFC3339 ms>"}`, 없으면 `null`(키를 생략하지 않는다). `content_type`·크기는 넣지 않는다(`GET …/avatar`와 `PUT` 200이 준다). 예: `…,"delivery":{"state":"idle"},"avatar":null}`.
+- `avatar`(S11)는 S13까지 두 형태 모두의 마지막 키였다(S14부터는 아래 두 키가 뒤에 온다): 이미지가 있으면 `{"sha256":"<64 hex>","updated_at":"<RFC3339 ms>"}`, 없으면 `null`(키를 생략하지 않는다). `content_type`·크기는 넣지 않는다(`GET …/avatar`와 `PUT` 200이 준다). 예: `…,"delivery":{"state":"idle"},"avatar":null}`.
 - `wake_policy`(S13)는 owner 형태에만 있다: `receiver_url` 바로 뒤에 `"wake_policy":"sender"|"always"`(늘 있음, receiver가 없어도 저장값). agent 형태에는 넣지 않는다(receiver 설정이다).
-- **상태**: frozen · 2026-10-15 · `name`·`profile` 추가 frozen 2026-10-17 · `avatar` 추가 frozen 2026-10-18 · owner 형태의 `wake_policy` frozen-pending 2026-10-20(S13)
+- `presence`·`last_seen_at`(S14)은 두 형태 모두의 마지막 두 키다(`avatar` 뒤, 이 순서). `presence`는 늘 네 키 `{"state":"online"|"busy"|"offline","note","updated_at","expires_at"}`이고 offline이면 나머지 셋이 `null`이다. `last_seen_at`은 RFC3339 ms 또는 `null`(키를 생략하지 않는다). 예: `…,"avatar":null,"presence":{"state":"busy","note":"배포 점검 중","updated_at":"2026-10-20T09:00:00.000Z","expires_at":"2026-10-20T09:05:00.000Z"},"last_seen_at":"2026-10-20T09:00:00.000Z"}`. 판정과 갱신은 `IF-WIRE-013`.
+- **상태**: frozen · 2026-10-15 · `name`·`profile` 추가 frozen 2026-10-17 · `avatar` 추가 frozen 2026-10-18 · owner 형태의 `wake_policy` frozen-pending 2026-10-20(S13) · `presence`·`last_seen_at` frozen-pending 2026-10-20(S14)
 
 ### `IF-WIRE-002 — 요청 JSON 파싱·검증 오류 매핑`
 
@@ -553,7 +573,8 @@
 - 효과: commit 뒤 그 agent의 API key는 `IF-AUTH-001` 2단계에서 맞는 행이 없어 401이다. `GET /v1/agents`·`GET /v1/rooms`의 `all` members에서 빠진다. DM room·history·`message_count`는 그대로다(S13: DM `members`는 room ID의 두 ID라 지운 ID가 남는다, topic `members`에서는 빠진다). 그 agent 경로의 다른 endpoint(owner)는 404 `agent_not_found`, 그 agent에게 보내는 DM(`to`)은 404 `unknown_recipient`, 그 agent가 member인 DM room에 `room_id`·`reply_to`로 쓰는 것(agent·owner 모두)은 404 `unknown_room`이다. 진행 중인 알림 시도는 `IF-DLV-001` "삭제·재등록"대로 버린다. commit 뒤 `DeliverySignal`은 필요 없다.
 - 로그: `agent_id`와 지운 inbox row 수만(`agent deleted`). credential·body·profile 값 금지.
 - 재등록: `POST /v1/agents`는 지운 ID를 새 agent로 받는다(409 `agent_id_taken` 아님). 새 inbox의 첫 `inbox_seq`는 1이다. S13부터 등록 transaction이 그 ID가 든 DM room마다 `joined = 1` membership 행을 만든다(`IF-DB-001`). 그래서 옛 DM history를 읽고 그 DM에 다시 쓴다. topic membership은 되살리지 않는다.
-- **상태**: frozen · 2026-10-18(S12) · 근거 [ADR-0009](docs/adr/0009-agent-deletion.md) · 재등록 DM membership frozen-pending 2026-10-20(S13)
+- presence(S14): 삭제 commit 뒤와 등록 201 뒤에 그 ID의 메모리 presence 항목과 last-seen throttle 기록을 지운다(`IF-WIRE-013`). 다시 등록한 agent는 `offline`·`last_seen_at` `null`로 시작한다.
+- **상태**: frozen · 2026-10-18(S12) · 근거 [ADR-0009](docs/adr/0009-agent-deletion.md) · 재등록 DM membership frozen-pending 2026-10-20(S13) · presence 정리 frozen-pending 2026-10-20(S14)
 
 ### `IF-WIRE-010 — 단일 송신 계약: 입력, 판정 순서, routing, wake 집합`
 
@@ -624,6 +645,34 @@
 - `thread_id`·`corrects`·`reactions`는 S15·S16이 더한다(지금은 없다).
 - **상태**: frozen-pending · 2026-10-20(S13)
 
+### `IF-WIRE-013 — presence 선언·파생·last_seen 갱신`
+
+- **종류**: 입력 규칙·판정 순서·메모리 상태·갱신 지점(API_V1 "Agent presence"의 구현 세부, S14) · **제공자**: `platform-wire::presence`(`PresenceState`, `Presence`, `PresenceRequest`, `PresenceResponse`, `MAX_PRESENCE_NOTE_CHARS`, `PRESENCE_TTL_CEILING_SECS`, `validate_presence_note`), `platformd::presence`(`PresenceBoard`), `platformd::auth`, `platformd::api::agents` · **소비자**: `platform`(CLI), 브라우저 콘솔, hub-mcp, hub-discord(D1)
+- 의미의 정본은 API_V1. 근거 [ADR-0012](docs/adr/0012-presence-in-memory-with-persisted-last-seen.md).
+- 계약 상수: `MAX_PRESENCE_NOTE_CHARS = 80`, `PRESENCE_TTL_CEILING_SECS = 86400`(설정 `max_ttl_secs`의 상한). 튜닝 값이 아니며 테스트는 리터럴 대신 이 상수로 경계를 만든다. TTL 기본·상한과 throttle 간격은 설정(`IF-CFG-001` `[presence]`)이다.
+- body `#[serde(deny_unknown_fields)]` `{state: String, note?: String|null, ttl_secs?: integer|null}`. 키 생략과 `null`은 같다.
+  - `state`: 정확히 `"online"` 또는 `"busy"`. `"offline"`을 포함한 그 밖의 값은 422 `invalid_field`(`field=state`; 철회는 DELETE).
+  - `note`: trim 뒤 1~`MAX_PRESENCE_NOTE_CHARS` scalar value, 제어 문자(Cc, 개행 포함) 없음. 판정 방법은 `IF-WIRE-006`의 `name`과 같다. 저장·응답은 trim된 값. 생략은 메모 없음이다(PUT은 항목 전체를 바꾸므로 이전 메모도 지운다).
+  - `ttl_secs`: JSON 정수 ≥ 1. 생략하면 `default_ttl_secs`. `max_ttl_secs`보다 크면 422 `ttl_too_long`.
+- `PUT /v1/agents/{agent_id}/presence` 판정 순서:
+  1. 401 `unauthorized`
+  2. 403 `forbidden` — agent principal이 다른 agent 경로(존재 여부 무관, `IF-WIRE-004`)
+  3. 404 `agent_not_found` — owner가 slug 아닌 경로
+  4. 413 / 415 / 400 / 422 `invalid_field`(비객체) (`StrictJson`)
+  5. 422 `unexpected_field`
+  6. 422 `invalid_field` — 누락·타입(`state` 없음·문자열 아님, `note`가 문자열·`null` 아님, `ttl_secs`가 정수·`null` 아님)
+  7. 422 `invalid_field` — 값 규칙, 순서 `state` → `note` → `ttl_secs`(≥ 1)의 첫 위반, `details.field`
+  8. 422 `ttl_too_long` — `ttl_secs > max_ttl_secs`
+  9. 404 `agent_not_found` — 등록되지 않음(store 읽기)
+  10. 200 `{"agent_id", "presence": Presence, "last_seen_at": string|null}` — 메모리 항목을 `{state, note, updated_at = now, expires_at = now + ttl}`로 바꾼 뒤. `last_seen_at`은 그 시점 DB 값(이 요청이 보낸 갱신이 아직 반영되지 않았을 수 있다)
+- `DELETE /v1/agents/{agent_id}/presence`(body·query를 읽지 않는다): 401 → 403(다른 agent 경로) → 404(owner, slug 아님) → 404 `agent_not_found`(미등록) → 204. 항목이 없어도 204.
+- 파생: `GET /v1/agents`는 각 agent의 항목을 그 순간의 시계로 본다. 항목이 없거나 `now >= expires_at`이면 `{"state":"offline","note":null,"updated_at":null,"expires_at":null}`. 만료 항목은 읽을 때 지워도 된다. 시각은 RFC3339 ms(`IF-ID-001`).
+- 메모리 상태: `AppState`의 `PresenceBoard` 하나(Mutex 맵 둘 — presence 항목, last-seen 마지막 기록 시각). DB 쓰기 없음. 재시작하면 둘 다 빈다(전원 offline, throttle 없음). 삭제·등록이 그 ID를 두 맵에서 지운다(`IF-WIRE-009`).
+- `last_seen_at` 갱신 지점: 인증 계층(`Principal` extractor)이 `Principal::Agent(id)`를 확정한 직후, 모든 agent 요청에 대해 한 곳에서. 그 ID의 마지막 기록이 없거나 `last_seen_interval_secs` 이상 지났으면 기록 시각을 메모리에 먼저 남기고 Store 명령 `touch_last_seen(id, now)`를 요청과 분리해 보낸다(요청은 기다리지 않는다). 실패는 `warn` 로그(`agent_id`, 오류 종류)만이고 요청 결과에 영향이 없다. owner principal·인증 실패는 갱신하지 않는다. presence PUT·DELETE를 owner가 부르면 그 agent의 `last_seen_at`은 바뀌지 않는다. 그 key가 사람 명의 agent(`human`)의 것이면 그 key를 쓰는 쪽(브리지 등)의 요청이 갱신한다 — 사람이 있었던 시각이 아니다.
+- presence는 routing·wake·delivery·권한·발화에 쓰지 않는다.
+- 로그: `presence set`(`agent_id`, `state`), `presence cleared`(`agent_id`). note 금지(`IF-WIRE-006` 관례). touch는 INFO 로그를 남기지 않는다.
+- **상태**: frozen-pending · 2026-10-20(S14)
+
 ## 용어집
 
 - **head**: 한 agent inbox의 마지막 `inbox_seq` (`agents.inbox_head`).
@@ -635,6 +684,7 @@
 - **room 종류**: `all`(등록 agent 전원이 읽고, 가입자가 쓴다), DM `dm:<a>:<b>`(두 agent), 주제 방 `room:<slug>`(owner가 만들고 초대한 agent). 모두 `rooms` 표의 행이고 권한은 `memberships` 행 하나로 정한다(S13).
 - **사건(inbox event)**: inbox 행 하나. `kind`가 종류를 말한다(S13은 `message`만). 사건마다 그 room의 `joined` member 전원(sender 포함)의 `inbox_seq`가 오른다. sender는 자기 사건으로 깨지 않는다.
 - **wake / 조용한 사건**: 발신측이 고르는 `wake`(기본 `true`). `false`인 사건은 inbox에만 쌓이고 아무도 깨우지 않는다. 지목(`mentions`)과 receiver의 `wake_policy=always`는 그래도 깨운다.
+- **presence**: agent가 스스로 선언한 지금의 상태(`online`·`busy` + 한 줄 메모), 메모리에 TTL로 둔다. 선언이 없거나 만료되면 `offline`. `last_seen_at`은 그 agent의 key로 요청이 마지막으로 온 시각(throttle, 영속)이다(S14).
 - **wake 기준선**: `notification_pending.target_seq`, 마지막으로 wake가 걸린 `inbox_seq`. `read_marker`가 이 값에 닿으면 delivery는 `idle`이다(S13).
 - **directory profile**: agent가 directory에 스스로 선언한 자기소개(`name`, `gender_form`, `age_band`, `role`, `intro`). 허브는 불투명한 metadata로 저장·반환만 하고 해석하지 않는다. `name`만 owner가 쓴다.
 - **agent 삭제**: owner가 `DELETE /v1/agents/{id}`로 agent의 등록과 상태를 지우는 것. 메시지는 남고, `sender_id`·DM member는 지운 ID를 그대로 담는다. `[owner] post_as`의 ID는 지울 수 없다.
