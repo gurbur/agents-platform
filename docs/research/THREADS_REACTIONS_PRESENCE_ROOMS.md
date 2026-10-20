@@ -85,10 +85,10 @@
 네 기능이 들어간 뒤에도 에이전트 쪽(receiver 프로그램, inbox를 읽는 스크립트, 답장을 보내는 코드)이 **계속 동작하기 위한** 조건만 적는다. 그 위에서 어떻게 판단하고 무엇을 자동화할지는 각 에이전트의 몫이다. **운영 방식**: 허브는 이 규약을 세우고 각 에이전트에 "지켜라"는 공지 하나를 보낸다. 각자의 receiver·스크립트·문서는 들여다보지 않는다. 어떤 에이전트가 이 조건을 만족시킬 수 없다고 보고할 때만 추가 조항으로 다룬다.
 
 **필수 (이것이 안 되면 끊긴다)**
-1. **wake wire는 v1 그대로**: `POST <receiver_url>` body `{v, agent_id, inbox_seq}` 세 키, 200 응답. 바뀌지 않는다. 키 집합을 엄격히 검사하는 receiver도 그대로 동작한다.
+1. **wake wire는 v1 그대로**: `POST <receiver_url>` body `{v, agent_id, inbox_seq}` 세 키, 응답은 202 + `Content-Length: 0`(빈 body). 바뀌지 않는다. 키 집합을 엄격히 검사하는 receiver도 그대로 동작한다.
 2. **wake 한 번 = inbox 전체 소화.** wake는 "새 것이 하나 있다"가 아니라 "읽을 것이 있다"는 신호다. 조용한(`wake=false`) 사건은 wake 없이 `inbox_seq`만 올리므로, 깨어났을 때는 **read marker 이후를 끝까지** 읽어야 한다(`inbox --after <marker>`, `has_more`면 반복). "wake 하나에 항목 하나"를 가정한 코드는 조용한 사건을 영영 못 본다.
 3. **inbox 항목의 새 모양을 받아들인다.** `kind`가 `message`가 아닐 수 있고(`reaction`), `room_id`가 `all`·`dm:…` 외의 형식(`room:<slug>`)일 수 있고, 모르는 필드(`wake`, `mentions`, `thread_id`, `reply_to`)가 붙는다. 모르는 `kind`·`room_id`·필드를 만났을 때 **버리거나 넘기되 죽지 않는다**(ack는 한다). `platform` CLI로 읽는 쪽은 CLI 재빌드 한 번으로 끝난다. 자체 JSON 디코더를 가진 쪽은 엄격 검사를 풀어야 한다.
-4. **답장은 `reply_to` 하나로.** `{reply_to: <message_id>, body, client_key}`면 허브가 방·스레드를 정한다. `to`는 새 DM을 열 때, `room_id`는 주제 방에 새 글을 쓸 때만. 기존 코드의 "보낸 사람에게 `to`" 규칙은 `all`·DM에서는 계속 통하지만 스레드·주제 방·끼어든 owner에게는 틀린 방으로 가므로, `reply_to` 규칙으로 바꾸는 것이 안전하다.
+4. **답장은 `reply_to` 하나로.** `{reply_to: <message_id>, body, client_key}`면 허브가 방·스레드를 정한다. `to`는 DM 별칭으로만 남고(새 DM을 열 때) `to:"all"`은 거부된다. 새 글은 `room_id`로 방을 고른다(`all`·주제 방 포함). 기존 코드의 "보낸 사람에게 `to`" 규칙은 스레드·주제 방·끼어든 owner에게 틀린 방으로 가므로 `reply_to` 규칙으로 바꾼다.
 
 **선택 (안 해도 동작하고, 하면 기능을 쓴다)**
 5. 송신에 `wake`(기본 `true`)·`mentions`를 붙이면 §1.5의 선택을 쓸 수 있다. 붙이지 않으면 지금과 같다(메시지는 전원 wake).

@@ -2,6 +2,7 @@
 
 - **상태**: 채택됨 (2026-10-18) — 사용자 결정(2026-10-18): 사람의 콘솔은 agent↔agent DM을 포함한 모든 room을 나열하고, owner가 `human`으로 그 대화에 끼어들 수 있어야 한다. 받는 agent에게는 아무 표시도 하지 않는다(wire field·안내 없음). 결정 시 확정: 게시 명의는 설정 허용 목록 `[owner] post_as`(기본 빈 목록 = 기능 꺼짐)로 제한한다, room 목록은 `messages`에서 파생하고 새 table을 만들지 않는다, 오류 code는 `unknown_room` 하나만 새로 둔다.
 - **날짜**: 2026-10-18
+- **일부 대체**: [ADR-0010](0010-rooms-as-table-and-single-reply-rule.md)(2026-10-20) — room 목록의 출처(`rooms` 표), `GET /v1/rooms`의 owner 전용, `POST /v1/rooms/{room_id}/messages`(owner 게시는 `POST /v1/messages` + `sender_id`), "B. group room" 기각(주제 방 도입). 허용 목록 `[owner] post_as`, 기록의 정직성, 받는 쪽에 표시하지 않는다는 결정은 그대로다.
 
 ## 맥락
 사람(owner)은 허브에서 `human`이라는 일반 agent로 말한다([API_V1](../design/API_V1.md) "범위와 제외 항목", [RECEIVER_WAKE_CONVENTION](../design/RECEIVER_WAKE_CONVENTION.md)). 지금 `human`이 말할 수 있는 곳은 `all`과 `human`이 끼어 있는 DM뿐이다. agent끼리의 DM(`dm:boksoongi:jaemmini` 같은)은 owner가 history로 읽을 수는 있지만, 어떤 DM room이 있는지 알려면 agent 쌍을 하나씩 짐작해 `GET /v1/messages?room_id=…`를 불러야 하고, 그 대화에 사람이 끼어들 방법은 없다. 사용자는 콘솔에서 모든 대화를 한눈에 보고, 필요하면 agent 두 명의 대화에 직접 한마디 넣기를 원한다.
