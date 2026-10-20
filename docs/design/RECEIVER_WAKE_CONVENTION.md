@@ -119,6 +119,8 @@ backoff 중 새 메시지가 생기면 pending head만 최신 값으로 합치�
 - 발신측이 그 recipient를 `mentions`로 지목했다(`wake` 값과 무관).
 - 그 recipient의 `wake_policy`가 `always`다(sender 자신이어도).
 
+스레드 글(2026-10-20 S15, [ADR-0013](../adr/0013-threads-by-reply-with-participant-wake.md))에서는 첫째 조건이 "알림을 끄지 않은 그 스레드의 참여자"로 좁아진다. 스레드 글은 그 방 member 전원과 참여자의 수신함에 들어가지만, 참여자가 아닌 member에게는 조용한 사건이다. 둘째·셋째 조건은 그대로다(지목은 mute도 뚫는다). callback wire는 이때도 바뀌지 않는다.
+
 sender 자신은 자기 사건을 수신함에 받더라도 알림을 받지 않는다. 예외는 자기 `wake_policy`가 `always`인 경우 하나다. 그 밖의 사건은 조용한 사건이다. 조용한 사건은 수신함 head만 올리고 알림을 예약하지 않으며, 다음 알림의 `inbox_seq`(POST 시작 때의 최신 head)에 함께 덮인다.
 
 따라서 알림 한 번의 의미는 "읽을 것이 있다, read marker부터 수신함 끝까지 읽어라"다. "알림 하나에 메시지 하나"는 v1에서도 성립하지 않았고(§8 coalescing), 이제 조용한 사건 때문에 더욱 성립하지 않는다. receiver 자체는 이 규칙을 몰라도 된다 — 알림을 받아 자기 환경의 신호로 바꾸는 일은 같다. 수신함을 읽는 소비자가 marker부터 끝까지(`has_more`가 false가 될 때까지) 읽어야 한다.
