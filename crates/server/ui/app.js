@@ -13,6 +13,12 @@
 // two one-time credentials of a registration live only in the text of the
 // credential dialog while it is open and are wiped when it closes; they
 // never reach storage, the URL or the console log.
+//
+// Slice S13 adds topic rooms (create, invite, remove, archive) and moves the
+// owner's posting to the one send endpoint (API.messages, POST with
+// `sender_id`). A reply sends `reply_to` only and lands in the original's
+// room. The "조용히" toggle sends `wake: false`; it is per room visit and
+// never stored.
 
 const TOKEN_STORAGE_KEY = 'agents-platform.owner-token';
 const PREF_STYLE = 'agents-console-style';
@@ -57,7 +63,8 @@ const API = Object.freeze({
   rooms: () => '/v1/rooms',
   messages: () => '/v1/messages',
   message: (messageId) => `/v1/messages/${encodeURIComponent(messageId)}`,
-  roomPost: (roomId) => `/v1/rooms/${encodeURIComponent(roomId)}/messages`,
+  roomMember: (roomId, agentId) => `/v1/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(agentId)}`,
+  roomArchive: (roomId) => `/v1/rooms/${encodeURIComponent(roomId)}/archive`,
   profile: (agentId) => `/v1/agents/${encodeURIComponent(agentId)}/profile`,
   avatar: (agentId) => `/v1/agents/${encodeURIComponent(agentId)}/avatar`,
   receiver: (agentId) => `/v1/agents/${encodeURIComponent(agentId)}/receiver`,
@@ -119,6 +126,11 @@ const S = {
   delBusy: false,
   pendingSend: null,
   sendError: null,
+  quiet: false,
+  roomBusy: false,
+  roomError: null,
+  mk: null,
+  mkBusy: false,
   timers: [],
 };
 
@@ -154,6 +166,7 @@ const ICONS = {
   close: [['path', { d: 'M6 6l12 12M18 6 6 18' }]],
   back: [['path', { d: 'M15 18l-6-6 6-6' }]],
   logout: [['path', { d: 'M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3' }], ['path', { d: 'M10 17l-5-5 5-5M5 12h11' }]],
+  topic: [['path', { d: 'M3 5h12v8H8l-5 3z' }], ['path', { d: 'M18 9h3v11l-4-3h-6v-1' }]],
 };
 
 function icon(name) {
@@ -212,6 +225,10 @@ function clock(date) {
 }
 
 const shortClock = (date) => clock(date).replace(/^오[전후] /, '');
+const stamp = (iso) => {
+  const date = new Date(iso);
+  return `${date.getFullYear()}.${date.getMonth() + 1}.${date.getDate()} ${clock(date)}`;
+};
 const dayKey = (date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 const dayLabel = (date) => date.toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
 
@@ -417,8 +434,15 @@ function allRooms() {
 const currentRoom = () => allRooms().find((room) => room.room_id === S.room) || null;
 
 function roomKind(room) {
-  if (room.kind === 'all') return 'all';
+  if (room.kind === 'all' || room.kind === 'topic') return room.kind;
   return S.me && room.members.includes(S.me) ? 'dm' : 'pair';
+}
+
+const isArchived = (room) => Boolean(room && room.archived_at);
+
+// The owner writes as "나" into any room that is not archived.
+function canWrite() {
+  return Boolean(S.me) && !isArchived(currentRoom());
 }
 
 const peerOf = (room) => room.members.find((id) => id !== S.me) || room.members[0];
@@ -426,6 +450,7 @@ const peerOf = (room) => room.members.find((id) => id !== S.me) || room.members[
 function roomTitle(room) {
   const kind = roomKind(room);
   if (kind === 'all') return 'all';
+  if (kind === 'topic') return room.title || room.room_id;
   if (kind === 'dm') return nameOf(peerOf(room));
   return room.members.map(nameOf).join(' ↔ ');
 }
@@ -433,6 +458,7 @@ function roomTitle(room) {
 function roomIcon(room, size) {
   const kind = roomKind(room);
   if (kind === 'all') return h('span', { class: 'hashbox' }, icon('hash'));
+  if (kind === 'topic') return h('span', { class: 'hashbox' }, icon('topic'));
   if (kind === 'dm') return av(peerOf(room), size);
   return h('span', { class: 'pair' }, av(room.members[0], 20), av(room.members[1], 20));
 }
@@ -458,8 +484,10 @@ function markSeen(room) {
 function renderRooms() {
   const query = $('roomQ').value.trim();
   const rooms = allRooms().filter((room) => !query || roomTitle(room).includes(query));
+  const topics = rooms.filter((room) => roomKind(room) === 'topic');
   const sections = [
     ['채널', rooms.filter((room) => roomKind(room) === 'all')],
+    ['주제 방', topics.filter((room) => !isArchived(room)).concat(topics.filter(isArchived))],
     ['내 DM', rooms.filter((room) => roomKind(room) === 'dm')],
     ['에이전트끼리', rooms.filter((room) => roomKind(room) === 'pair')],
   ];
@@ -475,9 +503,10 @@ function renderRooms() {
 
 function roomRow(room) {
   const unread = unreadOf(room);
-  return h('button', { class: 'room', data: { act: 'room', id: room.room_id }, 'aria-current': String(room.room_id === S.room) },
+  const archived = isArchived(room);
+  return h('button', { class: `room${archived ? ' archived' : ''}`, data: { act: 'room', id: room.room_id }, 'aria-current': String(room.room_id === S.room) },
     h('span', { class: 'ic' }, roomIcon(room, 32)),
-    h('span', { class: 'nm', text: roomTitle(room) }),
+    h('span', { class: 'nm' }, roomTitle(room), archived ? h('span', { class: 'tag', text: '보관됨' }) : null),
     h('span', { class: 'tm', text: relative(room.last_message_at) }),
     h('span', { class: 'sn', text: snippetText(room) }),
     unread > 0 ? h('span', { class: 'badge', text: String(unread) }) : h('span'));
@@ -527,11 +556,16 @@ function renderTop() {
     return;
   }
   const kind = roomKind(room);
-  const sub = kind === 'all'
-    ? `멤버 ${room.members.length}명 · 모두에게 전달`
-    : kind === 'dm' ? `@${peerOf(room)} · 나와의 DM` : `에이전트끼리 · ${room.members.join(' ↔ ')}`;
+  const subs = {
+    all: `멤버 ${room.members.length}명 · 모두에게 전달`,
+    topic: isArchived(room) ? `${room.room_id} · 보관됨 · 읽기만` : `${room.room_id} · 멤버 ${room.members.length}명`,
+    dm: `@${peerOf(room)} · 나와의 DM`,
+    pair: `에이전트끼리 · ${room.members.join(' ↔ ')}`,
+  };
+  const sub = subs[kind];
+  const glyph = { all: 'hash', topic: 'topic' }[kind];
   $('ttl').replaceChildren(
-    kind === 'all' ? icon('hash') : roomIcon(room, 28),
+    glyph ? icon(glyph) : roomIcon(room, 28),
     h('b', { text: roomTitle(room) }),
     h('span', { class: 'sub', text: sub }));
   $('infoBtn').classList.toggle('on', !app.classList.contains('info-off'));
@@ -609,7 +643,7 @@ function textBody(message) {
 }
 
 function actions(message) {
-  if (!S.me) return null;
+  if (!canWrite()) return null;
   return h('div', { class: 'actions' },
     h('button', { data: { act: 'reply', k: message.message_id } }, icon('reply'), '답장'));
 }
@@ -854,7 +888,7 @@ function swipeOffset(dx) {
 }
 
 function onSwipeDown(event) {
-  if (event.pointerType !== 'touch' || !S.me) return;
+  if (event.pointerType !== 'touch' || !canWrite()) return;
   // A second finger (pinch) ends an undecided swipe.
   if (!event.isPrimary) {
     if (swipe && !swipe.claimed) swipe = null;
@@ -969,17 +1003,33 @@ function bindSwipe() {
 
 // ---------------------------------------------------------------- composer
 
+// Writing into a room "나" is not a member of (an agent pair, a topic room
+// without "나") is a barge-in: the room's members get it, "나" gets no reply.
+function bargesIn(room) {
+  const kind = roomKind(room);
+  return kind === 'pair' || (kind === 'topic' && !room.members.includes(S.me));
+}
+
 function renderComposer() {
   const room = currentRoom();
+  const writable = canWrite();
   const strips = [];
   if (!S.me) {
     strips.push(h('div', { class: 'strip note' }, h('span', { class: 'dot' }),
       h('span', { text: '보낼 명의가 없습니다. 설정 [owner] post_as가 비어 있어 읽기만 합니다.' })));
-  } else if (room && roomKind(room) === 'pair') {
+  } else if (isArchived(room)) {
+    strips.push(h('div', { class: 'strip note' }, h('span', { class: 'dot' }),
+      h('span', { text: '보관된 방은 읽기만 됩니다. 보내기·초대·내보내기가 막혀 있습니다.' })));
+  } else if (room && bargesIn(room)) {
     strips.push(h('div', { class: 'strip' }, h('span', { class: 'dot' }),
       h('span', null, h('b', { text: S.me }), '으로 끼어들어 말합니다')));
   }
-  const target = S.replyTo && (findMessage(S.replyTo) || S.quotes.get(S.replyTo));
+  if (writable && S.quiet) {
+    strips.push(h('div', { class: 'strip' }, h('span', { class: 'dot' }),
+      h('span', null, h('b', { text: '조용히' }), ' 보냅니다 — 아무도 깨우지 않고 inbox에만 남깁니다'),
+      h('button', { class: 'x', data: { act: 'quiet' }, 'aria-label': '조용히 끄기' }, icon('close'))));
+  }
+  const target = writable && S.replyTo && (findMessage(S.replyTo) || S.quotes.get(S.replyTo));
   if (target && target.sender_id) {
     strips.push(h('div', { class: 'strip' },
       h('span', null, h('b', { text: nameOf(target.sender_id) }), '에게 답장'),
@@ -992,15 +1042,19 @@ function renderComposer() {
   }
   $('strips').replaceChildren(...strips);
   const input = $('input');
-  input.disabled = !S.me;
-  input.placeholder = S.me ? '메시지 보내기' : '보낼 명의가 없습니다';
+  input.disabled = !writable;
+  if (!S.me) input.placeholder = '보낼 명의가 없습니다';
+  else input.placeholder = writable ? '메시지 보내기' : '보관된 방은 읽기만 됩니다';
+  $('quiet').disabled = !writable;
+  $('quiet').setAttribute('aria-pressed', String(S.quiet));
   updateSendButton();
 }
 
 function updateSendButton() {
-  const ready = Boolean(S.me) && !S.sending && Boolean($('input').value.trim());
+  const writable = canWrite();
+  const ready = writable && !S.sending && Boolean($('input').value.trim());
   $('send').classList.toggle('ready', ready);
-  $('send').disabled = !S.me || S.sending;
+  $('send').disabled = !writable || S.sending;
 }
 
 function grow() {
@@ -1014,20 +1068,26 @@ async function send() {
   const room = currentRoom();
   const box = $('input');
   const text = box.value.trim();
-  if (!text || !S.me || !room || S.sending) return;
+  if (!text || !room || !canWrite() || S.sending) return;
   const replyTo = S.replyTo;
-  // A retry of the same text into the same room keeps its key, so a lost
-  // response cannot post the message twice.
+  const quiet = S.quiet;
+  // A retry of the same request keeps its key, so a lost response cannot
+  // post the message twice (the hub compares room, body, reply and wake).
   const pending = S.pendingSend;
-  const same = pending && pending.room === room.room_id && pending.text === text && pending.replyTo === replyTo;
+  const same = pending && pending.room === room.room_id && pending.text === text
+    && pending.replyTo === replyTo && pending.quiet === quiet;
   const clientKey = same ? pending.key : `console-${ulid()}`;
-  S.pendingSend = { room: room.room_id, text, replyTo, key: clientKey };
+  S.pendingSend = { room: room.room_id, text, replyTo, quiet, key: clientKey };
   S.sending = true;
   updateSendButton();
+  // Exactly one destination: a reply names only the original (the hub puts
+  // it in that message's room), a new message names the room.
   const body = { sender_id: S.me, body: text, client_key: clientKey };
   if (replyTo) body.reply_to = replyTo;
+  else body.room_id = room.room_id;
+  if (quiet) body.wake = false;
   try {
-    const message = await request('POST', API.roomPost(room.room_id), { json: body });
+    const message = await request('POST', API.messages(), { json: body });
     S.pendingSend = null;
     S.sendError = null;
     S.replyTo = null;
@@ -1058,7 +1118,7 @@ async function send() {
 
 function infoAgentId(room) {
   const kind = roomKind(room);
-  if (kind === 'all') return S.member;
+  if (kind === 'all' || kind === 'topic') return S.member;
   if (kind === 'dm') return peerOf(room);
   return S.tab[room.room_id] || room.members[0];
 }
@@ -1080,9 +1140,11 @@ function renderInfo() {
     }
     if (room.members.length === 0) block.append(h('p', { class: 'muted flush', text: '가입한 에이전트가 없습니다' }));
     nodes.push(block);
-  } else if (kind === 'all') {
+  } else if ((kind === 'all' || kind === 'topic') && S.member) {
     nodes.push(h('button', { class: 'linkback', data: { act: 'member', id: '' } }, icon('back'), '멤버'));
     nodes.push(...agentBlock(S.member));
+  } else if (kind === 'topic') {
+    nodes.push(...topicBlocks(room));
   } else if (kind === 'dm') {
     nodes.push(...agentBlock(peerOf(room)));
   } else {
@@ -1093,6 +1155,44 @@ function renderInfo() {
     nodes.push(...agentBlock(current));
   }
   $('infoBody').replaceChildren(...nodes);
+}
+
+// A topic room's panel: what it is, its members (each removable), an
+// invite picked from the directory, and archiving. An archived room keeps
+// the list but disables every control.
+function topicBlocks(room) {
+  const archived = isArchived(room);
+  const locked = archived || S.roomBusy;
+  const about = h('div', { class: 'blk' },
+    h('div', { class: 'prof' }, h('span', { class: 'hashbox' }, icon('topic')),
+      h('div', null, h('div', { class: 'nm', text: roomTitle(room) }), h('div', { class: 'id', text: room.room_id }))),
+    h('dl', { class: 'kv' },
+      h('dt', { text: '만든 때' }), h('dd', { text: stamp(room.created_at) }),
+      h('dt', { text: '상태' }), h('dd', { text: archived ? `보관됨 · ${stamp(room.archived_at)}` : '열림' })),
+    archived ? h('p', { class: 'warnbox', text: '보관된 방은 읽기만 됩니다. 보내기·초대·내보내기·보관 해제는 할 수 없습니다.' }) : null);
+  const members = h('div', { class: 'blk' }, h('h3', { text: `멤버 ${room.members.length}` }));
+  for (const id of room.members) {
+    const agent = agentOf(id);
+    const detail = id === S.me ? `나 · ${id}` : (agent && agent.profile.role) || id;
+    members.append(h('div', { class: 'member-row' },
+      h('button', { class: 'member', data: { act: 'member', id } }, av(id, 32),
+        h('span', { class: 'who' }, nameOf(id), h('small', { text: detail }))),
+      h('button', { class: 'btn sm ghost-bad', data: { act: 'kick', id }, disabled: locked, text: '내보내기' })));
+  }
+  if (room.members.length === 0) members.append(h('p', { class: 'muted flush', text: '아직 member가 없습니다. 아래에서 초대합니다.' }));
+  const candidates = Array.from(S.agents.values()).filter((agent) => !room.members.includes(agent.agent_id));
+  members.append(h('div', { class: 'invite' },
+    h('select', { id: 'inviteSel', 'aria-label': '초대할 에이전트', disabled: locked || candidates.length === 0 },
+      candidates.length === 0
+        ? h('option', { value: '', text: '초대할 에이전트가 없습니다' })
+        : candidates.map((agent) => h('option', { value: agent.agent_id, text: `${agent.name || agent.agent_id} (${agent.agent_id})` }))),
+    h('button', { class: 'btn sm', data: { act: 'invite' }, disabled: locked || candidates.length === 0, text: '초대' })));
+  const close = h('div', { class: 'blk' }, h('div', { class: 'toggle-row' },
+    h('span', null, '보관', h('small', { text: archived ? '보관한 방입니다. 되돌릴 수 없습니다.' : '읽기만 되는 방으로 닫습니다. 되돌릴 수 없습니다.' })),
+    h('button', { class: 'btn sm ghost-bad', data: { act: 'archive' }, disabled: locked, text: archived ? '보관됨' : '보관' })));
+  const nodes = [about, members, close];
+  if (S.roomError) nodes.push(h('div', { class: 'blk' }, h('div', { class: 'err', role: 'alert', text: failureText(S.roomError) })));
+  return nodes;
 }
 
 // Poll-driven renders skip the panel while the user is typing into it.
@@ -1237,6 +1337,12 @@ function inboxBlock(agent) {
   if (state.error) block.append(h('div', { class: 'err', text: failureText(state.error) }));
   const list = h('div');
   for (const item of state.items) {
+    // An event kind this page does not know yet is listed, never parsed.
+    if (item.kind !== 'message') {
+      list.append(h('div', { class: 'ibx' }, h('span', { class: 'num', text: `#${item.inbox_seq}` }),
+        h('div', { class: 'hd' }, h('b', { text: '알 수 없는 사건' }), h('span', { text: String(item.kind) }))));
+      continue;
+    }
     const summary = allRooms().find((room) => room.room_id === item.room_id);
     list.append(h('div', { class: 'ibx' },
       h('span', { class: 'num', text: `#${item.inbox_seq}` }),
@@ -1382,6 +1488,133 @@ function toggleJoin(id) {
 
 function retryDelivery(id) {
   ownerAction(id, () => request('POST', API.retry(id)));
+}
+
+// -------------------------------------------------------------- topic rooms
+
+// A confirmation in the page's own dialog; resolves true only for the
+// confirm button (Escape, cancel and logout resolve false).
+function ask(title, text, go) {
+  const dialog = $('ask');
+  $('askTitle').textContent = title;
+  $('askText').textContent = text;
+  $('askGo').textContent = go;
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise((resolve) => {
+    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'ok'), { once: true });
+  });
+}
+
+// Runs an owner write on the open topic room and shows its error in the panel.
+async function roomAction(work) {
+  S.roomError = null;
+  S.roomBusy = true;
+  renderInfo();
+  try {
+    await work();
+  } catch (error) {
+    S.roomError = asFailure(error);
+  }
+  S.roomBusy = false;
+  await refreshRooms();
+  renderInfo();
+}
+
+function inviteMember(room) {
+  const id = $('inviteSel').value;
+  if (!id || isArchived(room)) return;
+  roomAction(() => request('PUT', API.roomMember(room.room_id, id)));
+}
+
+async function removeMember(room, id) {
+  if (isArchived(room)) return;
+  const confirmed = await ask('멤버 내보내기',
+    `${nameOf(id)}(${id})를 ${roomTitle(room)}에서 내보낼까요? 이 방을 더는 읽거나 쓰지 못하고 새 글도 받지 않습니다. 이미 받은 inbox 항목은 남습니다. 다시 초대할 수 있습니다.`,
+    '내보내기');
+  if (!confirmed || S.room !== room.room_id) return;
+  roomAction(() => request('DELETE', API.roomMember(room.room_id, id)));
+}
+
+async function archiveRoom(room) {
+  if (isArchived(room)) return;
+  const confirmed = await ask('주제 방 보관',
+    `${roomTitle(room)}(${room.room_id})를 보관할까요? 보관한 방은 읽기만 되고 보내기·초대·내보내기가 막힙니다. 되돌릴 수 없습니다.`,
+    '보관');
+  if (!confirmed || S.room !== room.room_id) return;
+  roomAction(async () => {
+    await request('POST', API.roomArchive(room.room_id));
+    S.replyTo = null;
+    S.quiet = false;
+  });
+}
+
+// "나" (the first post_as identity) is listed first and preselected.
+function openMake() {
+  $('mkForm').reset();
+  S.mk = null;
+  $('mkSlug').disabled = false;
+  $('mkTitle').disabled = false;
+  showFormError('mkError', null);
+  const agents = Array.from(S.agents.values())
+    .sort((a, b) => Number(b.agent_id === S.me) - Number(a.agent_id === S.me));
+  const picks = agents.map((agent) => h('label', { class: 'pick' },
+    h('input', { type: 'checkbox', value: agent.agent_id, checked: agent.agent_id === S.me }),
+    av(agent.agent_id, 28),
+    h('span', { class: 'who' }, agent.name || agent.agent_id, ' ', h('span', { class: 'id', text: agent.agent_id })),
+    agent.agent_id === S.me ? h('span', { class: 'tag', text: '나' }) : null));
+  if (picks.length === 0) picks.push(h('p', { class: 'muted flush', text: '등록된 에이전트가 없습니다' }));
+  $('mkPicks').replaceChildren(...picks);
+  $('mk').showModal();
+  $('mkSlug').focus();
+}
+
+// Creates the room, then invites each pick. When an invite fails the room
+// already exists: the form keeps it, and submitting again only sends the
+// invites still missing.
+async function submitMake() {
+  if (S.mkBusy) return;
+  const roomId = `room:${$('mkSlug').value.trim()}`;
+  const title = $('mkTitle').value.trim();
+  const picks = Array.from($('mkPicks').querySelectorAll('input:checked'), (input) => input.value);
+  S.mkBusy = true;
+  $('mkGo').disabled = true;
+  showFormError('mkError', null);
+  try {
+    if (!S.mk) {
+      const body = { room_id: roomId };
+      if (title) body.title = title;
+      await request('POST', API.rooms(), { json: body });
+      S.mk = { roomId, invited: new Set() };
+      $('mkSlug').disabled = true;
+      $('mkTitle').disabled = true;
+    }
+    for (const id of picks) {
+      if (S.mk.invited.has(id)) continue;
+      await request('PUT', API.roomMember(S.mk.roomId, id));
+      S.mk.invited.add(id);
+    }
+  } catch (error) {
+    const created = S.mk ? ' (방은 만들었습니다. 다시 누르면 남은 초대만 보냅니다.)' : '';
+    showFormError('mkError', `${failureText(asFailure(error))}${created}`);
+    return;
+  } finally {
+    S.mkBusy = false;
+    $('mkGo').disabled = false;
+  }
+  const created = S.mk.roomId;
+  S.mk = null;
+  $('mk').close();
+  await refreshRooms();
+  openRoom(created);
+}
+
+// A dialog closed half way (the room made, an invite failed) still shows
+// the new room in the list.
+function onMakeClosed() {
+  if (!S.mk) return;
+  S.mk = null;
+  refreshRooms();
 }
 
 // --------------------------------------------------------------- directory
@@ -1533,7 +1766,8 @@ function openDm(id) {
   const roomId = dmRoomId(S.me, id);
   if (!allRooms().some((room) => room.room_id === roomId)) {
     S.extraRooms.push({
-      room_id: roomId, kind: 'dm', members: [S.me, id].sort(),
+      room_id: roomId, kind: 'dm', title: null, members: [S.me, id].sort(),
+      created_by: S.me, created_at: new Date().toISOString(), archived_at: null,
       last_event_seq: null, last_message_at: null, last_sender_id: null, message_count: 0,
     });
   }
@@ -1568,6 +1802,8 @@ async function refreshRooms() {
   } catch (_) {
     return;
   }
+  const before = currentRoom();
+  const wasArchived = isArchived(before);
   S.rooms = list.rooms;
   const known = new Set(S.rooms.map((room) => room.room_id));
   S.extraRooms = S.extraRooms.filter((room) => !known.has(room.room_id));
@@ -1575,6 +1811,12 @@ async function refreshRooms() {
   if (room && !document.hidden) markSeen(room);
   renderRooms();
   renderTop();
+  if (room && isArchived(room) !== wasArchived) {
+    // Archived elsewhere (the CLI): the composer and reply actions close.
+    renderComposer();
+    rerenderFeed();
+  }
+  if (room && roomKind(room) === 'topic') renderInfoPassively();
   loadSnippets();
   if (room && room.last_event_seq && seqNum(room.last_event_seq) > seqNum(newestSeq())) pollFeed();
 }
@@ -1618,6 +1860,8 @@ async function openRoom(id, enter = true) {
   S.receiverEdit = null;
   S.actionError = null;
   S.sendError = null;
+  S.quiet = false;
+  S.roomError = null;
   S.infoTab = 'settings';
   resetRoomState();
   prefSet(PREF_ROOM, id);
@@ -1743,6 +1987,9 @@ function logout(message) {
   S.inbox.clear();
   S.room = null;
   S.me = null;
+  S.quiet = false;
+  S.roomError = null;
+  S.mk = null;
   resetRoomState();
   showGate(message || '');
 }
@@ -1797,6 +2044,27 @@ function onClick(event) {
       break;
     case 'del-close':
       $('del').close();
+      break;
+    case 'mk-open':
+      openMake();
+      break;
+    case 'mk-close':
+      $('mk').close();
+      break;
+    case 'quiet':
+      if (!canWrite()) break;
+      S.quiet = !S.quiet;
+      renderComposer();
+      $('input').focus();
+      break;
+    case 'invite':
+      if (room) inviteMember(room);
+      break;
+    case 'kick':
+      if (room) removeMember(room, id);
+      break;
+    case 'archive':
+      if (room) archiveRoom(room);
       break;
     case 'more': {
       const text = target.previousElementSibling;
@@ -1962,6 +2230,11 @@ function init() {
     confirmDelete();
   });
   $('delInput').addEventListener('input', onDeleteInput);
+  $('mkForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    submitMake();
+  });
+  $('mk').addEventListener('close', onMakeClosed);
   $('cred').addEventListener('close', onCredentialsClosed);
   $('loginForm').addEventListener('submit', (event) => {
     event.preventDefault();

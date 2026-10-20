@@ -296,6 +296,21 @@ fn calls() -> Vec<Call> {
             json_body(json!({"agent_id": "agent-new", "name": "New"})),
         ),
         call("rooms", Method::GET, "/v1/rooms", "/v1/rooms", None),
+        // S13: the owner's topic room management.
+        call(
+            "rooms",
+            Method::POST,
+            "/v1/rooms",
+            "/v1/rooms",
+            json_body(json!({"room_id": "room:console", "title": "Console"})),
+        ),
+        call(
+            "roomMember",
+            Method::PUT,
+            "/v1/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(agentId)}",
+            "/v1/rooms/room%3Aconsole/members/human",
+            None,
+        ),
         call(
             "messages",
             Method::GET,
@@ -303,18 +318,39 @@ fn calls() -> Vec<Call> {
             "/v1/messages?room_id=all",
             None,
         ),
+        // S13: owner posting is the one send endpoint with `sender_id`.
         call(
-            "roomPost",
+            "messages",
             Method::POST,
-            "/v1/rooms/${encodeURIComponent(roomId)}/messages",
-            "/v1/rooms/dm%3Aagent-a%3Ahuman/messages",
-            json_body(json!({"sender_id": "human", "body": "hi", "client_key": "console-1"})),
+            "/v1/messages",
+            "/v1/messages",
+            json_body(json!({
+                "sender_id": "human",
+                "room_id": "room:console",
+                "body": "hi",
+                "client_key": "console-1",
+                "wake": false
+            })),
         ),
         call(
             "message",
             Method::GET,
             "/v1/messages/${encodeURIComponent(messageId)}",
             "/v1/messages/msg-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+            None,
+        ),
+        call(
+            "roomMember",
+            Method::DELETE,
+            "/v1/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(agentId)}",
+            "/v1/rooms/room%3Aconsole/members/human",
+            None,
+        ),
+        call(
+            "roomArchive",
+            Method::POST,
+            "/v1/rooms/${encodeURIComponent(roomId)}/archive",
+            "/v1/rooms/room%3Aconsole/archive",
             None,
         ),
         call(
@@ -393,10 +429,10 @@ fn calls() -> Vec<Call> {
 
 /// The page names exactly these endpoints and methods, and the owner gets a
 /// success from each (in this order, so the avatar exists to fetch and
-/// delete and the registered agent to delete). The console never calls the
-/// read-marker endpoint.
+/// delete, the topic room exists to join, post into and archive, and the
+/// registered agent to delete). The console never calls the read-marker
+/// endpoint, nor the owner-posting route S13 removed.
 #[tokio::test]
-#[ignore = "S13 console follow-up: app.js still calls the removed POST /v1/rooms/{room_id}/messages; the console task updates the page and this endpoint list together"]
 async fn every_endpoint_the_page_calls_answers_the_owner() {
     let calls = calls();
     let literals: BTreeSet<&str> = calls.iter().map(|call| call.literal).collect();
@@ -407,6 +443,12 @@ async fn every_endpoint_the_page_calls_answers_the_owner() {
         .collect();
     assert_eq!(request_pairs(APP_JS), pairs);
     assert!(!APP_JS.contains("read-marker"));
+    for literal in endpoint_literals(APP_JS) {
+        assert!(
+            !(literal.starts_with("/v1/rooms/") && literal.ends_with("/messages")),
+            "removed route {literal}"
+        );
+    }
 
     let fx = Fixture::new();
     let server = RunningServer::start(&fx.load_config_with_owner(&["human"])).await;

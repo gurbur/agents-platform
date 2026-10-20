@@ -28,6 +28,7 @@
       <span class="owner" id="ownerPill">소유자</span>
     </div>
     <label class="field"><svg class="svg" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="roomQ" placeholder="방 찾기" autocomplete="off"></label>
+    <div class="side-tools"><button class="btn sm" data-act="mk-open"><svg class="svg" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>주제 방 만들기</button></div>
     <nav class="rooms" id="rooms" aria-label="방"></nav>
     <div class="me" id="me"></div>
   </aside>
@@ -48,6 +49,7 @@
       <div id="strips"></div>
       <div class="box">
         <textarea id="input" rows="1" placeholder="메시지 보내기"></textarea>
+        <button class="quiet" id="quiet" data-act="quiet" aria-pressed="false" title="켜면 이 방의 다음 글부터 아무도 깨우지 않고 inbox에만 남깁니다"><svg class="svg" viewBox="0 0 24 24"><path d="M18 16v-5a6 6 0 0 0-9.7-4.7M6.2 9.4A6 6 0 0 0 6 11v5l-2 2h12"/><path d="M10 21h4M3 3l18 18"/></svg><span>조용히</span></button>
         <button class="send" id="send" data-act="send" aria-label="보내기"><svg class="svg" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
       </div>
       <div class="hint">Enter 보내기 · Shift+Enter 줄바꿈</div>
@@ -98,6 +100,29 @@
       <label class="form-row"><span>확인하려면 agent_id <b id="delId"></b>를 그대로 입력하세요</span><span class="field"><input id="delInput" spellcheck="false" autocapitalize="off" autocomplete="off"></span></label>
       <p class="err flush" id="delError" role="alert" hidden></p>
       <div class="row-end"><button class="btn sm" type="button" data-act="del-close">취소</button><button class="btn sm danger" type="submit" id="delGo" disabled>삭제</button></div>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="mk" class="narrow" tabindex="-1">
+  <form id="mkForm" autocomplete="off">
+    <div class="dlg-head"><b>주제 방 만들기</b><button class="btn icon" type="button" data-act="mk-close" aria-label="닫기"><svg class="svg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="dlg-body">
+      <label class="form-row"><span>room_id</span><span class="field"><span class="prefix">room:</span><input id="mkSlug" placeholder="launch" spellcheck="false" autocapitalize="off" autocomplete="off" required></span><small>소문자나 숫자로 시작하는 a-z·0-9·_·- 64자 이하. 만든 뒤 바꿀 수 없습니다.</small></label>
+      <label class="form-row"><span>이름 <em>선택</em></span><span class="field"><input id="mkTitle" placeholder="출시 준비" autocomplete="off"></span><small>방 목록에 보이는 이름(64자 이하). 비우면 room_id로 보입니다.</small></label>
+      <div class="form-row"><span>처음 초대할 에이전트</span><div class="picks" id="mkPicks"></div><small>만든 뒤에도 정보 패널에서 초대하고 내보낼 수 있습니다.</small></div>
+      <p class="err flush" id="mkError" role="alert" hidden></p>
+      <div class="row-end"><button class="btn sm" type="button" data-act="mk-close">취소</button><button class="btn sm primary" type="submit" id="mkGo">만들기</button></div>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="ask" class="narrow" tabindex="-1">
+  <form method="dialog">
+    <div class="dlg-head"><b id="askTitle"></b></div>
+    <div class="dlg-body">
+      <p class="muted flush" id="askText"></p>
+      <div class="row-end"><button class="btn sm" value="cancel">취소</button><button class="btn sm danger" value="ok" id="askGo"></button></div>
     </div>
   </form>
 </dialog>
