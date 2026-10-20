@@ -37,7 +37,7 @@
 | `IF-RCV-BODY` | `{"v":1,"agent_id":..,"inbox_seq":".."}` ≤1024B, HTTP/1.1, 명시적 Content-Length, 압축·chunked 금지 | §6 | frozen |
 | `IF-RCV-RESPONSE` | 202 + `Content-Length: 0` + 빈 body만 성공; 그 외 분류 | §7, §10 | frozen |
 | `IF-RCV-RETRY` | connect 2s/전체 5s, 1~300s 지수 backoff+jitter, Retry-After, 300s redrive, in-flight 1, coalescing, route_version 격리 | §8, §9, §11 | frozen |
-| `IF-RCV-WAKESET` | 누구를 언제 깨우는가(S13): 모든 사건은 member inbox에(member인 sender 포함), wake 집합 = sender를 뺀 inbox 수신자 중 `wake=true`·지목됨·`wake_policy=always`, wake는 "marker부터 끝까지 읽어라", 조용한 사건은 `inbox_seq`만 올림. **`IF-RCV-BODY`·`IF-RCV-RESPONSE`는 바뀌지 않는다** | §3, §5, §8.1 | frozen-pending · 2026-10-20(S13) |
+| `IF-RCV-WAKESET` | 누구를 언제 깨우는가(S13): 모든 사건은 member inbox에(member인 sender 포함), wake 집합 = sender를 뺀 inbox 수신자 중 `wake=true`·지목됨·`wake_policy=always` + 자기 `wake_policy=always`인 sender(유일한 예외), wake는 "marker부터 끝까지 읽어라", 조용한 사건은 `inbox_seq`만 올림. **`IF-RCV-BODY`·`IF-RCV-RESPONSE`는 바뀌지 않는다** | §3, §5, §8.1 | frozen-pending · 2026-10-20(S13) |
 
 ## B-2. Identity token wire (정본: `docs/design/IDENTITY_ATTESTATION.md`)
 
@@ -359,7 +359,7 @@
 - `last_error` 코드: `connect`, `timeout`, `network`, `http_NNN`(모든 상태를 그대로), `protocol_mismatch`, `internal`.
 - 삭제·재등록(S12): 시도 결과를 기록할 때(`apply_outcome`) 그 agent의 행이 없거나, 있더라도 `agents.receiver_secret`이 시도를 시작할 때의 secret과 다르면 결과를 버린다(`Applied::Ignored`, 행을 쓰지 않음, 오류 아님). 같은 ID로 다시 등록한 agent는 `route_version` 1과 새 secret으로 시작하므로 route_version 비교만으로는 옛 agent의 늦은 응답을 가르지 못한다. rotate도 secret을 바꾸지만 그때는 route_version이 이미 다르다.
 - wake 집합과 기준선(S13, [ADR-0011](docs/adr/0011-inbox-wake-split.md)):
-  - 송신 transaction은 inbox 수신자 R마다 inbox 행을 쓰지만, delivery 전이("새 wake 행", 전의 "새 inbox row")는 깨우는 집합 W(`IF-WIRE-010`)에 든 agent에게만 쓴다. W = R − sender 중 요청 `wake = true`, `mentions`에 있음, `agents.wake_policy = 'always'` 중 하나라도 맞는 agent. sender는 R에 있어도(자기 행) 어떤 경우에도 W에 없다.
+  - 송신 transaction은 inbox 수신자 R마다 inbox 행을 쓰지만, delivery 전이("새 wake 행", 전의 "새 inbox row")는 깨우는 집합 W(`IF-WIRE-010`)에 든 agent에게만 쓴다. W = R − sender 중 요청 `wake = true`, `mentions`에 있음, `agents.wake_policy = 'always'` 중 하나라도 맞는 agent. sender는 R에 있어도(자기 행) W에 없다. 유일한 예외: sender가 R에 있고 자기 `wake_policy = 'always'`면 W에 든다.
   - `notification_pending.target_seq`는 **마지막으로 wake가 걸린 `inbox_seq`**(wake 기준선)다. "새 wake 행"만 그 값을 올린다. 조용한 행은 `agents.inbox_head`만 올리고 이 행을 쓰지 않는다.
   - "미확인"은 `read_marker < target_seq`다(전에는 `read_marker < inbox_head`). marker-at-head 우선 규칙, route 변경, 시도 시작, 202 처리, 300초 redrive, 수동 retry가 모두 이 판정을 쓴다. 따라서 `idle`은 "receiver가 있고 갚을 wake가 없다"이며 `inbox_head > read_marker`여도 `idle`일 수 있다.
   - POST body의 `inbox_seq`(= `posted_seq`)는 시도를 시작할 때의 `agents.inbox_head`다(≥ `target_seq`, 조용한 행을 덮는다). 202 뒤 `target_seq > posted_seq`면(in-flight 중 새 wake 행) 곧 다시 시도하고, 조용한 행만 늘었으면 다시 시도하지 않는다.
@@ -560,6 +560,7 @@
 - **종류**: 입력 규칙·판정 순서·저장 효과(API_V1 "Message 송신과 durable commit"의 구현 세부, S13) · **제공자**: `platform-wire`(`SendMessageRequest`, `Message`, `MessageResponse`, `MAX_MENTIONS`), `platformd::api::messages`, `platformd::store::queries::messages::commit_send` · **소비자**: `platform`(CLI), 브라우저 콘솔, hub-mcp, hub-discord, agent 스크립트
 - 의미의 정본은 API_V1과 PLATFORM_MESSAGING_SPEC "방 routing". 여기서는 표현·순서·저장만 정한다. 근거 [ADR-0010](docs/adr/0010-rooms-as-table-and-single-reply-rule.md), [ADR-0011](docs/adr/0011-inbox-wake-split.md).
 - body는 `#[serde(deny_unknown_fields)]` `{room_id?: String|null, reply_to?: String|null, to?: String|null, body: String, client_key: String, wake?: bool, mentions?: [String], sender_id?: String}`. 키 생략과 `null`은 같다(`wake: null`은 타입 오류다). `mentions: []`는 생략과 같다.
+- 직렬화 규칙: 허브와 `platform-wire`를 쓰는 클라이언트는 `None`인 선택 field의 키를 생략해 보낸다(`skip_serializing_if = "Option::is_none"`). 수신 측은 생략과 `null`을 같게 본다.
 - 대상(destination)은 `room_id`·`reply_to`·`to` 중 `null`이 아닌 것이 **정확히 하나**다.
   - `room_id`: 그 room에 새 글. 형식은 `IF-ID-001`.
   - `reply_to`: 그 글이 있는 room에 답글(답장 규칙 하나). 메시지의 `reply_to`에 저장된다.
@@ -589,7 +590,7 @@
   18. 201 — 아래 쓰기를 한 transaction에서. commit 뒤 W가 비어 있지 않을 때만 `DeliverySignal`
 - 쓰기(18): (a) room 행이 없던 DM이면 `rooms` 행(`kind='dm'`, `created_by` = sender_id, `created_at` = 메시지 `created_at`)과 두 member의 `memberships` 행(`joined = 1`). (b) `event_seq` 발급, `messages` 행(`wake`). (c) `message_mentions` 행(지목마다). (d) R(아래)의 agent마다 ASCII 오름차순으로 `inbox_seq` 발급과 `inbox_rows` 행(`kind='message'`, `wake` = 요청 값). (e) W(아래)의 agent마다 `IF-DLV-001` "새 wake 행" 전이. (f) idempotency 행.
 - **R (inbox 수신자)** = 해석된 room의 `joined = 1` member 전원 ∪ (`mentions` ∩ 등록된 `[owner].post_as` − room member). sender가 그 room의 `joined` member면 R에 든다(자기 행). owner 게시에서 sender가 member가 아니면 들지 않는다.
-- **W (깨우는 집합)** = R − sender 중 요청 `wake`가 `true`(생략 포함)이거나, `mentions`에 있거나, `agents.wake_policy = 'always'`인 agent.
+- **W (깨우는 집합)** = R − sender 중 요청 `wake`가 `true`(생략 포함)이거나, `mentions`에 있거나, `agents.wake_policy = 'always'`인 agent, 그리고 sender가 R에 있고 자기 `wake_policy = 'always'`면 sender. `wake_policy = 'sender'`인 sender는 자기 글로 깨지 않는다.
 - 응답(201·200)은 `Message`(`IF-WIRE-012`) + `deduplicated`. `mentions`는 ASCII 오름차순.
 - 로그: `message_id`, `room_id`, `sender_id`, `event_seq`, R 수, W 수, `wake`, mentions 수. body와 mentions 값 금지.
 - **상태**: frozen-pending · 2026-10-20(S13)

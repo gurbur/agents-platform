@@ -56,7 +56,7 @@ URL userinfo와 fragment는 허용하지 않으며 callback redirect를 따라�
 
 endpoint가 null인 상태의 이름은 `no_receiver`이며 새 알림 시도만 중지하고 DM과 수신함은 유지한다. endpoint가 설정되고 갚을 wake가 없으면(read marker가 마지막으로 깨운 사건의 순번에 닿았으면) 상태는 `idle`이며 알림을 예약하지 않는다. 조용한 사건만 남아 head가 marker보다 앞서 있어도 `idle`이다. endpoint가 설정된 뒤 갚을 wake가 있으면 최신 head 알림을 재개한다.
 
-등록 정보에는 `wake_policy`가 있다. 값은 `sender`(기본, 발신측이 고른 대로 깨운다)와 `always`(조용한 사건에도 깨운다) 둘이다. owner 또는 해당 agent가 receiver 경로 갱신 API로 바꾼다. `wake_policy` 변경은 수신 설정의 변경이 아니므로 `route_version`을 올리지 않으며, 바꾼 뒤에 생기는 사건부터 적용하고 이미 쌓인 조용한 사건에 알림을 소급하지 않는다. callback 요청에는 이 값을 싣지 않는다.
+등록 정보에는 `wake_policy`가 있다. 값은 `sender`(기본, 발신측이 고른 대로 깨우고 자기 글에는 깨우지 않는다)와 `always`(조용한 사건과 자기 글을 포함한 모든 수신함 항목에 깨운다) 둘이다. owner 또는 해당 agent가 receiver 경로 갱신 API로 바꾼다. `wake_policy` 변경은 수신 설정의 변경이 아니므로 `route_version`을 올리지 않으며, 바꾼 뒤에 생기는 사건부터 적용하고 이미 쌓인 조용한 사건에 알림을 소급하지 않는다. callback 요청에는 이 값을 싣지 않는다.
 
 ## 6. v1 Callback 요청
 
@@ -113,13 +113,13 @@ backoff 중 새 메시지가 생기면 pending head만 최신 값으로 합치�
 
 ### 8.1 무엇이 알림을 만드는가
 
-허브는 모든 사건을 그 방 member 전원(member인 sender 포함)의 수신함에 넣지만, 알림은 sender를 뺀 recipient 중 다음에 해당하는 recipient에게만 예약한다(정본: [플랫폼 메시징 사양](./PLATFORM_MESSAGING_SPEC.md) "Receiver 알림 worker").
+허브는 모든 사건을 그 방 member 전원(member인 sender 포함)의 수신함에 넣지만, 알림은 다음에 해당하는 recipient에게만 예약한다(앞의 둘은 sender에게 적용되지 않는다)(정본: [플랫폼 메시징 사양](./PLATFORM_MESSAGING_SPEC.md) "Receiver 알림 worker").
 
 - 발신측이 그 사건의 `wake`를 `true`로 골랐다(기본값).
 - 발신측이 그 recipient를 `mentions`로 지목했다(`wake` 값과 무관).
-- 그 recipient의 `wake_policy`가 `always`다.
+- 그 recipient의 `wake_policy`가 `always`다(sender 자신이어도).
 
-sender 자신은 자기 사건을 수신함에 받더라도 알림을 받지 않는다(자기 `wake_policy`가 `always`여도). 그 밖의 사건은 조용한 사건이다. 조용한 사건은 수신함 head만 올리고 알림을 예약하지 않으며, 다음 알림의 `inbox_seq`(POST 시작 때의 최신 head)에 함께 덮인다.
+sender 자신은 자기 사건을 수신함에 받더라도 알림을 받지 않는다. 예외는 자기 `wake_policy`가 `always`인 경우 하나다. 그 밖의 사건은 조용한 사건이다. 조용한 사건은 수신함 head만 올리고 알림을 예약하지 않으며, 다음 알림의 `inbox_seq`(POST 시작 때의 최신 head)에 함께 덮인다.
 
 따라서 알림 한 번의 의미는 "읽을 것이 있다, read marker부터 수신함 끝까지 읽어라"다. "알림 하나에 메시지 하나"는 v1에서도 성립하지 않았고(§8 coalescing), 이제 조용한 사건 때문에 더욱 성립하지 않는다. receiver 자체는 이 규칙을 몰라도 된다 — 알림을 받아 자기 환경의 신호로 바꾸는 일은 같다. 수신함을 읽는 소비자가 marker부터 끝까지(`has_more`가 false가 될 때까지) 읽어야 한다.
 
@@ -194,7 +194,7 @@ marker는 뒤로 이동하지 않으며 현재 head를 넘지 않는 값만 유�
 - [ ] 일시 실패는 1~300초 backoff와 jitter로 재시도한다.
 - [ ] 202만 성공으로 기록하고 명시적 `Content-Length: 0`과 빈 body를 확인한다.
 - [ ] 202 후 300초 동안 marker가 마지막으로 깨운 사건에 닿지 않으면 최신 head를 redrive한다.
-- [ ] 알림은 `wake=true`·지목·`wake_policy=always` recipient에게만 예약하고 sender에게는 자기 사건으로 보내지 않는다(sender의 수신함 항목은 남는다, §8.1). 조용한 사건은 순번만 올린다.
+- [ ] 알림은 `wake=true`·지목·`wake_policy=always` recipient에게만 예약하고 sender에게는 자기 사건으로 보내지 않는다(sender의 수신함 항목은 남는다; 자기 `wake_policy=always`면 보낸다, §8.1). 조용한 사건은 순번만 올린다.
 - [ ] coalescing 중에도 inbox history를 삭제하지 않는다.
 - [ ] blocked route는 route 변경 또는 owner나 해당 agent의 명시적 retry 전까지 호출을 중지한다.
 
