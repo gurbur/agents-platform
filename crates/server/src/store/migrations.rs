@@ -9,7 +9,7 @@ use super::StoreError;
 use crate::clock;
 
 /// Latest schema version this binary knows. `/healthz` reports it.
-pub const LATEST_SCHEMA_VERSION: u32 = 4;
+pub const LATEST_SCHEMA_VERSION: u32 = 5;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
@@ -24,6 +24,10 @@ struct Migration {
     /// around the version's transaction and `PRAGMA foreign_key_check` must
     /// be empty before it commits (SQLite's table-rebuild procedure).
     rebuilds_tables: bool,
+    /// A query run in the version's transaction right before it commits:
+    /// any row it returns rolls the version back and refuses startup.
+    /// `PRAGMA foreign_key_check` must then be empty as well.
+    post_check: Option<&'static str>,
 }
 
 /// Versions start at 1 and are contiguous; each is applied in one transaction.
@@ -32,21 +36,31 @@ const MIGRATIONS: &[Migration] = &[
         version: 1,
         sql: V1_SCHEMA,
         rebuilds_tables: false,
+        post_check: None,
     },
     Migration {
         version: 2,
         sql: V2_SCHEMA,
         rebuilds_tables: false,
+        post_check: None,
     },
     Migration {
         version: 3,
         sql: V3_SCHEMA,
         rebuilds_tables: false,
+        post_check: None,
     },
     Migration {
         version: 4,
         sql: V4_SCHEMA,
         rebuilds_tables: true,
+        post_check: None,
+    },
+    Migration {
+        version: 5,
+        sql: V5_SCHEMA,
+        rebuilds_tables: false,
+        post_check: Some(V5_POST_CHECK),
     },
 ];
 
@@ -172,6 +186,57 @@ ALTER TABLE messages_v4 RENAME TO messages;
 CREATE INDEX messages_room_event ON messages(room_id, event_seq);
 ";
 
+/// v5 (S13): rooms as a table with `all` and every DM that has a message,
+/// a joined membership for each registered DM member, and event columns
+/// on messages, inbox rows and agents (ADR-0010, ADR-0011). One transaction,
+/// no table rebuild; every v4 row stays. `agent_id` never contains `:`, so
+/// the prefix and suffix comparisons find DM members exactly (`LIKE` would
+/// treat `_` as a wildcard).
+const V5_SCHEMA: &str = "
+CREATE TABLE rooms (
+    room_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    title TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    archived_at TEXT
+);
+INSERT INTO rooms (room_id, kind, title, created_by, created_at, archived_at)
+  VALUES ('all', 'all', NULL, 'owner',
+          COALESCE((SELECT MIN(created_at) FROM messages WHERE room_id = 'all'),
+                   strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+          NULL);
+INSERT INTO rooms (room_id, kind, title, created_by, created_at, archived_at)
+  SELECT m.room_id, 'dm', NULL, m.sender_id, m.created_at, NULL
+  FROM messages m
+  WHERE substr(m.room_id, 1, 3) = 'dm:'
+    AND m.event_seq = (SELECT MIN(event_seq) FROM messages WHERE room_id = m.room_id);
+INSERT INTO memberships (room_id, agent_id, joined, epoch, effective_event_seq)
+  SELECT r.room_id, a.agent_id, 1, 1, (SELECT value FROM sequences WHERE name = 'event_seq')
+  FROM rooms r JOIN agents a
+    ON substr(r.room_id, 1, length(a.agent_id) + 4) = 'dm:' || a.agent_id || ':'
+    OR substr(r.room_id, -(length(a.agent_id) + 1)) = ':' || a.agent_id
+  WHERE r.kind = 'dm';
+CREATE INDEX memberships_agent ON memberships(agent_id);
+
+ALTER TABLE messages ADD COLUMN wake INTEGER NOT NULL DEFAULT 1;
+CREATE TABLE message_mentions (
+    message_id TEXT NOT NULL REFERENCES messages(message_id),
+    agent_id TEXT NOT NULL,
+    PRIMARY KEY (message_id, agent_id)
+);
+ALTER TABLE inbox_rows ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';
+ALTER TABLE inbox_rows ADD COLUMN wake INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE agents ADD COLUMN wake_policy TEXT NOT NULL DEFAULT 'sender';
+";
+
+/// No message or membership may name a room without a `rooms` row.
+const V5_POST_CHECK: &str = "
+SELECT room_id FROM messages WHERE room_id NOT IN (SELECT room_id FROM rooms)
+UNION ALL
+SELECT room_id FROM memberships WHERE room_id NOT IN (SELECT room_id FROM rooms)
+LIMIT 1";
+
 /// Opens the database file and applies and verifies the connection PRAGMAs.
 /// Refuses to continue unless the journal mode is WAL.
 pub fn open_connection(path: &Path) -> Result<Connection, StoreError> {
@@ -258,7 +323,17 @@ fn apply_one(conn: &mut Connection, migration: &Migration) -> Result<(), StoreEr
         "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
         params![migration.version, clock::now_rfc3339_ms()],
     )?;
-    if migration.rebuilds_tables {
+    if let Some(check) = migration.post_check {
+        let offending: Option<String> = tx.query_row(check, [], |row| row.get(0)).optional()?;
+        if let Some(room_id) = offending {
+            // Dropping `tx` rolls the version back.
+            return Err(StoreError::PostCheck {
+                version: migration.version,
+                detail: format!("room_id '{room_id}' has no rooms row"),
+            });
+        }
+    }
+    if migration.rebuilds_tables || migration.post_check.is_some() {
         let violations = foreign_key_violations(&tx)?;
         if violations > 0 {
             // Dropping `tx` rolls the version back.

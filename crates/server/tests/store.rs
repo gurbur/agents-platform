@@ -99,9 +99,10 @@ async fn migrations_create_all_tables() {
         .await
         .unwrap();
 
-    // v2 adds columns only; v3 adds `agent_avatars` (S11).
+    // v2 adds columns only; v3 adds `agent_avatars` (S11); v5 adds `rooms`
+    // and `message_mentions` (S13).
     let mut expected: Vec<&str> = V1_TABLES.to_vec();
-    expected.push("agent_avatars");
+    expected.extend(["agent_avatars", "rooms", "message_mentions"]);
     expected.sort_unstable();
     assert_eq!(tables, expected);
     close(store, thread).await;
@@ -124,7 +125,12 @@ async fn v2_adds_nullable_profile_columns_to_agents() {
         .await
         .unwrap();
 
-    let profile: Vec<&(String, String, bool)> = columns.iter().skip(7).collect();
+    // v5 appends `wake_policy` after the six v2 columns (S13).
+    let profile: Vec<&(String, String, bool)> = columns.iter().skip(7).take(6).collect();
+    assert_eq!(
+        columns.last().map(|(name, _, _)| name.as_str()),
+        Some("wake_policy")
+    );
     let expected = [
         "name",
         "gender_form",

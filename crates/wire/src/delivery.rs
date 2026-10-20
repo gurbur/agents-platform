@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentId, DeliveryState, Seq};
+use crate::{AgentId, DeliveryState, Seq, WakePolicy};
 
 /// The only wake body version defined by v1.
 pub const WAKE_VERSION: u32 = 1;
@@ -19,13 +19,16 @@ pub const MAX_WAKE_BODY_BYTES: usize = 1024;
 pub struct DeliveryStatus {
     pub read_marker: Seq,
     pub inbox_head_seq: Seq,
-    /// The head while `read_marker < inbox_head_seq`, else `null`.
+    /// The last woken `inbox_seq` while it is unacknowledged
+    /// (`read_marker < target_seq`), else `null`. Quiet rows may keep
+    /// `inbox_head_seq` ahead of `read_marker` while this is `null`.
     pub pending_seq: Option<Seq>,
     /// The `inbox_seq` of the last POST answered with a valid 202. Not a
     /// read marker and not necessarily the head.
     pub last_accepted_seq: Option<Seq>,
     pub route_version: i64,
     pub receiver_url_present: bool,
+    pub wake_policy: WakePolicy,
     pub state: DeliveryState,
     pub last_attempt_at: Option<String>,
     /// A code-level summary such as `http_503`, `timeout` or
@@ -43,7 +46,8 @@ pub struct DeliveryRetryResponse {
 }
 
 /// The callback body `{"v":1,"agent_id":"..","inbox_seq":".."}`. Exactly
-/// these three members; `inbox_seq` is a decimal string.
+/// these three members; `inbox_seq` is a decimal string. S13 left it as it
+/// was: quiet events only move the head the next wake reports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WakeNotification {
@@ -101,6 +105,7 @@ mod tests {
             last_accepted_seq: None,
             route_version: 1,
             receiver_url_present: false,
+            wake_policy: WakePolicy::Sender,
             state: DeliveryState::NoReceiver,
             last_attempt_at: None,
             last_error: None,
@@ -114,6 +119,7 @@ mod tests {
                 "last_accepted_seq": null,
                 "route_version": 1,
                 "receiver_url_present": false,
+                "wake_policy": "sender",
                 "state": "no_receiver",
                 "last_attempt_at": null,
                 "last_error": null

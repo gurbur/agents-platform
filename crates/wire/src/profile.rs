@@ -368,7 +368,7 @@ impl<T: Serialize> Serialize for FieldPatch<T> {
 
 /// Used with `#[serde(default)]`: only called when the key is present, so a
 /// missing key stays `Keep`. Any JSON type but `T` and `null` is an error.
-fn present_patch<'de, D, T>(deserializer: D) -> Result<FieldPatch<T>, D::Error>
+pub(crate) fn present_patch<'de, D, T>(deserializer: D) -> Result<FieldPatch<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,

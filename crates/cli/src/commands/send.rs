@@ -1,9 +1,11 @@
-//! `send` → `POST /v1/messages`.
+//! `send` → `POST /v1/messages` (`IF-CLI-001` S13): exactly one of
+//! `--room`, `--to` and `--reply-to`; `--quiet`, `--mention` and `--as`
+//! fill the rest of the one send body.
 
 use std::path::PathBuf;
 
 use clap::{ArgGroup, Args};
-use platform_wire::{MessageId, MessageResponse, Recipient, SendMessageRequest};
+use platform_wire::{AgentId, MessageId, MessageResponse, RoomId, SendMessageRequest};
 use reqwest::Method;
 
 use super::{Context, read_text};
@@ -11,11 +13,20 @@ use crate::error::CliError;
 use crate::output;
 
 #[derive(Debug, Args)]
+#[command(group(ArgGroup::new("destination").required(true).args(["room", "to", "reply_to"])))]
 #[command(group(ArgGroup::new("body_source").required(true).args(["body", "body_file"])))]
 pub struct SendArgs {
-    /// `all` or the recipient agent_id
-    #[arg(long, value_name = "all|AGENT_ID")]
-    to: Recipient,
+    /// A new message in this room: `all`, `dm:<a>:<b>` or `room:<slug>`
+    #[arg(long, value_name = "ROOM_ID")]
+    room: Option<RoomId>,
+
+    /// A DM to this agent
+    #[arg(long, value_name = "AGENT_ID")]
+    to: Option<AgentId>,
+
+    /// A reply; it lands in the room of that message
+    #[arg(long, value_name = "MESSAGE_ID")]
+    reply_to: Option<MessageId>,
 
     /// Message body, sent byte for byte
     #[arg(long, value_name = "TEXT")]
@@ -25,13 +36,21 @@ pub struct SendArgs {
     #[arg(long, value_name = "PATH")]
     body_file: Option<PathBuf>,
 
+    /// Wake no one (`"wake": false`); mentioned agents still wake
+    #[arg(long)]
+    quiet: bool,
+
+    /// Name an agent who is woken whatever `--quiet` says (repeatable)
+    #[arg(long = "mention", value_name = "AGENT_ID")]
+    mentions: Vec<AgentId>,
+
+    /// Post as this allowlisted agent (owner token; `[owner] post_as`)
+    #[arg(long = "as", value_name = "AGENT_ID")]
+    sender: Option<AgentId>,
+
     /// Idempotency key; a new ULID when omitted. Reuse it to retry safely.
     #[arg(long, value_name = "KEY")]
     client_key: Option<String>,
-
-    /// Message this one replies to (same room)
-    #[arg(long, value_name = "MESSAGE_ID")]
-    reply_to: Option<MessageId>,
 }
 
 pub async fn run(args: SendArgs, context: &Context) -> Result<(), CliError> {
@@ -45,11 +64,18 @@ pub async fn run(args: SendArgs, context: &Context) -> Result<(), CliError> {
     let client_key = args
         .client_key
         .unwrap_or_else(|| ulid::Ulid::generate().to_string());
+    // Only the given options become keys: no `wake` without `--quiet`, no
+    // `mentions` without `--mention` (the server's defaults apply).
     let request = SendMessageRequest {
-        to: args.to.to_string(),
+        room_id: args.room.map(String::from),
+        reply_to: args.reply_to.map(String::from),
+        to: args.to.map(String::from),
         body,
         client_key: client_key.clone(),
-        reply_to: args.reply_to.map(String::from),
+        wake: args.quiet.then_some(false),
+        mentions: (!args.mentions.is_empty())
+            .then(|| args.mentions.into_iter().map(String::from).collect()),
+        sender_id: args.sender.map(String::from),
     };
     let response = context
         .client

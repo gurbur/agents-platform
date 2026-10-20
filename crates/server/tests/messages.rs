@@ -124,10 +124,11 @@ async fn a_commit_schedules_each_recipient_notification_atomically() {
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await;
+    // S13: the sender's own rows (all and DM) never wake it (ADR-0011).
     assert_eq!(
         rows,
         [
-            ("agent-a".to_owned(), "pending".to_owned(), 1, 1, true),
+            ("agent-a".to_owned(), "idle".to_owned(), 0, 2, false),
             ("agent-b".to_owned(), "pending".to_owned(), 2, 2, true),
         ]
     );
@@ -141,7 +142,7 @@ async fn a_commit_schedules_each_recipient_notification_atomically() {
 // ---- Scenario 2: DM ------------------------------------------------------------
 
 #[tokio::test]
-async fn dm_goes_to_the_recipient_inbox_only_in_a_canonical_room() {
+async fn dm_goes_to_both_members_inboxes_in_a_canonical_room() {
     let (fx, server, api) = start().await;
     let a = api.register("agent-a", None).await;
     let b = api.register("agent-b", None).await;
@@ -156,15 +157,16 @@ async fn dm_goes_to_the_recipient_inbox_only_in_a_canonical_room() {
         "both directions share the room"
     );
     let rows = inbox_rows(&fx).await;
+    // S13: the sender is a joined member and gets its own row (ADR-0011).
     assert_eq!(
         recipients_of(&rows, from_b["message_id"].as_str().unwrap()),
-        ["agent-a"]
+        ["agent-a", "agent-b"]
     );
     assert_eq!(
         recipients_of(&rows, from_a["message_id"].as_str().unwrap()),
-        ["agent-b"]
+        ["agent-a", "agent-b"]
     );
-    assert_eq!(rows.len(), 2, "no row for the sender or bystanders");
+    assert_eq!(rows.len(), 4, "no row for bystanders");
 
     let history = api
         .get("/v1/messages?room_id=dm:agent-a:agent-b", &a.api_key)
@@ -213,7 +215,7 @@ async fn repeated_client_key_returns_the_original_or_conflicts() {
         .post(
             "/v1/messages",
             &a.api_key,
-            json!({"to": "all", "body": "hello", "client_key": "k-1", "reply_to": null}),
+            json!({"room_id": "all", "body": "hello", "client_key": "k-1", "reply_to": null}),
         )
         .await;
     assert_eq!(
@@ -231,7 +233,7 @@ async fn repeated_client_key_returns_the_original_or_conflicts() {
         .post(
             "/v1/messages",
             &a.api_key,
-            json!({"to": "all", "body": "hello", "client_key": "k-1",
+            json!({"body": "hello", "client_key": "k-1",
                    "reply_to": original["message_id"]}),
         )
         .await;
@@ -268,7 +270,7 @@ async fn retry_after_leaving_all_still_returns_the_original() {
 
     api.send_message(&a.api_key, "all", "after leaving", "k-2")
         .await
-        .assert_error(403, "not_all_member");
+        .assert_error(403, "not_room_member");
     server.shutdown().await.unwrap();
 }
 
@@ -424,39 +426,42 @@ async fn event_and_inbox_sequences_have_no_holes_under_concurrent_sends() {
 // ---- reply_to --------------------------------------------------------------------------
 
 #[tokio::test]
-async fn reply_to_must_exist_in_the_same_room() {
+async fn reply_to_alone_lands_in_the_room_of_an_existing_message() {
     let (_fx, server, api) = start().await;
     let a = api.register("agent-a", None).await;
     let b = api.register("agent-b", None).await;
     let in_all = api.sent(&a.api_key, "all", "question", "k-1").await;
     let in_dm = api.sent(&a.api_key, "agent-b", "private", "k-2").await;
 
-    let send_reply = |to: &'static str, reply_to: Value, key: &'static str| {
+    // S13: `reply_to` alone picks the room (ADR-0010).
+    let send_reply = |reply_to: Value, key: &'static str| {
         api.post(
             "/v1/messages",
             &b.api_key,
-            json!({"to": to, "body": "answer", "client_key": key, "reply_to": reply_to}),
+            json!({"body": "answer", "client_key": key, "reply_to": reply_to}),
         )
     };
 
-    let reply = send_reply("all", in_all["message_id"].clone(), "r-1").await;
+    let reply = send_reply(in_all["message_id"].clone(), "r-1").await;
     assert_eq!(reply.status.as_u16(), 201, "{}", reply.body);
     assert_eq!(reply.body["reply_to"], in_all["message_id"]);
+    assert_eq!(reply.body["room_id"], "all");
 
-    let dm_reply = send_reply("agent-a", in_dm["message_id"].clone(), "r-2").await;
-    assert_eq!(
-        dm_reply.status.as_u16(),
-        201,
-        "the reverse DM is the same room"
-    );
+    let dm_reply = send_reply(in_dm["message_id"].clone(), "r-2").await;
+    assert_eq!(dm_reply.status.as_u16(), 201, "{}", dm_reply.body);
+    assert_eq!(dm_reply.body["room_id"], "dm:agent-a:agent-b");
 
-    send_reply("all", in_dm["message_id"].clone(), "r-3")
-        .await
-        .assert_error(422, "reply_to_room_mismatch");
-    send_reply("all", json!("msg-01J00000000000000000000000"), "r-4")
+    api.post(
+        "/v1/messages",
+        &b.api_key,
+        json!({"to": "agent-a", "body": "answer", "client_key": "r-3", "reply_to": in_dm["message_id"]}),
+    )
+    .await
+    .assert_error(422, "invalid_destination");
+    send_reply(json!("msg-01J00000000000000000000000"), "r-4")
         .await
         .assert_error(404, "reply_to_not_found");
-    let malformed = send_reply("all", json!("not-a-message-id"), "r-5").await;
+    let malformed = send_reply(json!("not-a-message-id"), "r-5").await;
     malformed.assert_error(422, "invalid_field");
     assert_eq!(malformed.error_field(), Some("reply_to"));
     server.shutdown().await.unwrap();
@@ -465,14 +470,14 @@ async fn reply_to_must_exist_in_the_same_room() {
 // ---- Validation order and limits ----------------------------------------------------------
 
 #[tokio::test]
-async fn only_agents_may_send() {
+async fn the_owner_sends_only_with_a_sender_id() {
     let (_fx, server, api) = start().await;
     api.register("agent-a", None).await;
 
-    api.send_message(OWNER_TOKEN, "all", "owner", "k-1")
-        .await
-        .assert_error(403, "forbidden");
-    // Authentication runs before the body is examined.
+    // S13: the owner calls the same endpoint with `sender_id` (IF-WIRE-010).
+    let owner = api.send_message(OWNER_TOKEN, "all", "owner", "k-1").await;
+    owner.assert_error(422, "invalid_field");
+    assert_eq!(owner.error_field(), Some("sender_id"));
     api.send_raw(
         Method::POST,
         "/v1/messages",
@@ -481,7 +486,7 @@ async fn only_agents_may_send() {
         Some(b"{".to_vec()),
     )
     .await
-    .assert_error(403, "forbidden");
+    .assert_error(415, "unsupported_media_type");
     api.send_message("pak_unknown", "all", "who", "k-1")
         .await
         .assert_error(401, "unauthorized");
@@ -497,7 +502,7 @@ async fn request_shape_errors_use_the_wire_codes() {
         .post(
             "/v1/messages",
             &a.api_key,
-            json!({"to": "all", "body": "x", "client_key": "k", "sender_id": "agent-b"}),
+            json!({"room_id": "all", "body": "x", "client_key": "k", "sender_id": "agent-b"}),
         )
         .await;
     forged.assert_error(422, "unexpected_field");
@@ -507,7 +512,7 @@ async fn request_shape_errors_use_the_wire_codes() {
         .post(
             "/v1/messages",
             &a.api_key,
-            json!({"to": "all", "body": "x"}),
+            json!({"room_id": "all", "body": "x"}),
         )
         .await;
     missing_key.assert_error(422, "invalid_field");
@@ -522,8 +527,15 @@ async fn request_shape_errors_use_the_wire_codes() {
     let longest = "k".repeat(MAX_CLIENT_KEY_BYTES);
     api.sent(&a.api_key, "all", "x", &longest).await;
 
-    for to in ["", "owner", "ALL", "dm:agent-a:agent-b"] {
-        let reply = api.send_message(&a.api_key, to, "x", "k-to").await;
+    // S13: `to` is an agent id only; `all` and room ids are refused.
+    for to in ["", "owner", "ALL", "all", "dm:agent-a:agent-b"] {
+        let reply = api
+            .post(
+                "/v1/messages",
+                &a.api_key,
+                json!({"to": to, "body": "x", "client_key": "k-to"}),
+            )
+            .await;
         reply.assert_error(422, "invalid_field");
         assert_eq!(reply.error_field(), Some("to"), "{to:?}");
     }

@@ -148,9 +148,9 @@ async fn receiver_and_all_membership() {
     assert_eq!(value(&left, "joined_all"), "false");
     assert_server_error(
         &server
-            .cli(&key_b, &["send", "--to", "all", "--body", "x"])
+            .cli(&key_b, &["send", "--room", "all", "--body", "x"])
             .await,
-        "not_all_member",
+        "not_room_member",
     );
     let joined = json(
         &server
@@ -159,7 +159,7 @@ async fn receiver_and_all_membership() {
     );
     assert_eq!(joined["joined_all"], true);
     ok(&server
-        .cli(&key_b, &["send", "--to", "all", "--body", "back"])
+        .cli(&key_b, &["send", "--room", "all", "--body", "back"])
         .await);
 
     assert_server_error(
@@ -180,7 +180,7 @@ async fn send_body_sources_client_keys_and_deduplication() {
             &key_a,
             &[
                 "send",
-                "--to",
+                "--room",
                 "all",
                 "--body",
                 "hello",
@@ -199,7 +199,7 @@ async fn send_body_sources_client_keys_and_deduplication() {
             &key_a,
             &[
                 "send",
-                "--to",
+                "--room",
                 "all",
                 "--body",
                 "hello",
@@ -219,7 +219,7 @@ async fn send_body_sources_client_keys_and_deduplication() {
                 &key_a,
                 &[
                     "send",
-                    "--to",
+                    "--room",
                     "all",
                     "--body",
                     "hello",
@@ -238,7 +238,7 @@ async fn send_body_sources_client_keys_and_deduplication() {
                 &key_a,
                 &[
                     "send",
-                    "--to",
+                    "--room",
                     "all",
                     "--body",
                     "other",
@@ -257,7 +257,7 @@ async fn send_body_sources_client_keys_and_deduplication() {
     assert_eq!(value(&generated, "client_key").len(), 26, "{generated}");
 
     let generated_json = server
-        .cli(&key_a, &["send", "--to", "all", "--body", "j", "--json"])
+        .cli(&key_a, &["send", "--room", "all", "--body", "j", "--json"])
         .await;
     assert_eq!(json(&generated_json)["deduplicated"], false);
     let key_line = stderr(&generated_json);
@@ -275,7 +275,7 @@ async fn send_body_sources_client_keys_and_deduplication() {
             &key_a,
             &[
                 "send",
-                "--to",
+                "--room",
                 "all",
                 "--body-file",
                 body_path.to_str().unwrap(),
@@ -289,15 +289,7 @@ async fn send_body_sources_client_keys_and_deduplication() {
     let from_stdin = server
         .cli_with_stdin(
             &key_a,
-            &[
-                "send",
-                "--to",
-                "all",
-                "--body-file",
-                "-",
-                "--reply-to",
-                &message_id,
-            ],
+            &["send", "--body-file", "-", "--reply-to", &message_id],
             "from stdin".as_bytes(),
         )
         .await;
@@ -313,12 +305,12 @@ async fn send_body_sources_client_keys_and_deduplication() {
     );
     assert_eq!(shown["body"], "from stdin");
 
-    let no_body = server.cli(&key_a, &["send", "--to", "all"]).await;
+    let no_body = server.cli(&key_a, &["send", "--room", "all"]).await;
     assert_eq!(no_body.status.code(), Some(2), "{}", stderr(&no_body));
     let both = server
         .cli(
             &key_a,
-            &["send", "--to", "all", "--body", "x", "--body-file", "-"],
+            &["send", "--room", "all", "--body", "x", "--body-file", "-"],
         )
         .await;
     assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
@@ -333,7 +325,7 @@ async fn inbox_read_marker_history_and_message_show() {
     let mut ids = Vec::new();
     for body in ["one", "line1\nline2", "three"] {
         let out = ok(&server
-            .cli(&key_a, &["send", "--to", "all", "--body", body])
+            .cli(&key_a, &["send", "--room", "all", "--body", body])
             .await);
         ids.push(value(&out, "message_id"));
     }
@@ -452,7 +444,7 @@ async fn inbox_all_pages_reads_one_snapshot() {
     let before_traversal = ["m1", "m2", "m3", "m4", "m5"];
     for body in before_traversal {
         ok(&server
-            .cli(&key_a, &["send", "--to", "all", "--body", body])
+            .cli(&key_a, &["send", "--room", "all", "--body", body])
             .await);
     }
     let upstream = server.addr;

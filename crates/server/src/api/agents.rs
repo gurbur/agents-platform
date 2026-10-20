@@ -15,7 +15,7 @@ use platform_wire::{
     AgentEntry, AgentId, AgentList, DeliverySummary, MembershipRequest, MembershipResponse,
     OwnerAgentEntry, ProfileFieldError, ProfileResponse, ReceiverResponse, RegisterAgentRequest,
     RegisterAgentResponse, RotateTokensResponse, Seq, UpdateProfileRequest, UpdateReceiverRequest,
-    codes, validate_name,
+    WakePolicy, codes, validate_name,
 };
 use tracing::info;
 
@@ -210,6 +210,7 @@ fn owner_entry(record: AgentRecord) -> OwnerAgentEntry {
         joined_all: record.joined_all,
         profile: record.profile,
         receiver_url: record.receiver_url,
+        wake_policy: record.wake_policy,
         route_version: record.route_version,
         created_at: record.created_at,
         delivery: DeliverySummary {
@@ -273,30 +274,53 @@ async fn update_profile(
 }
 
 /// `PATCH /v1/agents/{agent_id}/receiver`: owner or the agent itself.
+/// `receiver_url`, `wake_policy` or both; an omitted key keeps its value
+/// and `{}` is 422 (`IF-WIRE-004`). Only a URL change moves the route.
 async fn update_receiver(
     ManagedAgent(agent_id): ManagedAgent,
     State(state): State<AppState>,
     StrictJson(request): StrictJson<UpdateReceiverRequest>,
 ) -> Result<Json<ReceiverResponse>, ApiError> {
-    let receiver_url = request
-        .receiver_url
-        .as_deref()
-        .map(receiver_url::normalize)
+    let UpdateReceiverRequest {
+        receiver_url,
+        wake_policy,
+    } = request;
+    if receiver_url.is_keep() && wake_policy.is_none() {
+        return Err(ApiError::unprocessable(
+            codes::INVALID_FIELD,
+            "send receiver_url, wake_policy or both",
+        ));
+    }
+    let receiver_url = receiver_url.try_map(|url| receiver_url::normalize(&url))?;
+    let wake_policy = wake_policy
+        .map(|raw| {
+            raw.parse::<WakePolicy>().map_err(|_| {
+                ApiError::invalid_field("wake_policy", "wake_policy must be sender or always")
+            })
+        })
         .transpose()?;
 
     let target = agent_id.clone();
     let route = state
         .store
-        .transaction(move |tx| agent_queries::update_receiver(tx, &target, receiver_url))
+        .transaction(move |tx| {
+            agent_queries::update_receiver(tx, &target, receiver_url, wake_policy)
+        })
         .await?
         .ok_or_else(ApiError::agent_not_found)?;
-    // A new route may have scheduled a notification.
-    state.delivery.notify();
+    if route.route_changed {
+        // A new route may have scheduled a notification.
+        state.delivery.notify();
+    }
+    if let Some(wake_policy) = wake_policy {
+        info!(agent_id = %agent_id, wake_policy = %wake_policy, "receiver wake_policy set");
+    }
 
     Ok(Json(ReceiverResponse {
         agent_id,
         receiver_url: route.receiver_url,
         route_version: route.route_version,
+        wake_policy: route.wake_policy,
         state: route.delivery_state,
     }))
 }

@@ -9,7 +9,7 @@
 use std::fmt;
 use std::time::SystemTime;
 
-use platform_wire::{AgentId, DeliveryRetryResponse, DeliveryStatus, Seq};
+use platform_wire::{AgentId, DeliveryRetryResponse, DeliveryStatus, Seq, WakePolicy};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
 use super::agents::stored_agent_id;
@@ -28,6 +28,7 @@ struct DeliveryRecord {
     receiver_secret: String,
     /// `agents.route_version`, the route's current version.
     route_version: i64,
+    wake_policy: WakePolicy,
 }
 
 /// A pending agent as the worker schedules it.
@@ -61,7 +62,8 @@ impl fmt::Debug for Attempt {
 const RECORD_SQL: &str =
     "SELECT n.route_version, n.state, n.target_seq, n.last_accepted_seq, n.attempt,
             n.next_due_at, n.redrive_due_at, n.last_attempt_at, n.last_error,
-            a.inbox_head, s.read_marker, a.receiver_url, a.receiver_secret, a.route_version
+            a.inbox_head, s.read_marker, a.receiver_url, a.receiver_secret, a.route_version,
+            a.wake_policy
      FROM notification_pending n
      JOIN agents a ON a.agent_id = n.agent_id
      JOIN read_state s ON s.agent_id = n.agent_id
@@ -77,10 +79,11 @@ pub fn status(conn: &Connection, agent_id: &AgentId) -> Result<Option<DeliverySt
     Ok(Some(DeliveryStatus {
         read_marker: record.cursor.read_marker,
         inbox_head_seq: record.cursor.inbox_head,
-        pending_seq: record.cursor.pending_seq(),
+        pending_seq: notification.pending_seq(record.cursor),
         last_accepted_seq: notification.last_accepted_seq,
         route_version: record.route_version,
         receiver_url_present: present,
+        wake_policy: record.wake_policy,
         state: transitions::display_state(present, notification.state),
         last_attempt_at: notification.last_attempt_at,
         last_error: notification.last_error,
@@ -103,12 +106,13 @@ pub fn retry(
     Ok(Some(DeliveryRetryResponse {
         state,
         route_version: record.route_version,
-        pending_seq: record.cursor.pending_seq(),
+        pending_seq: record.notification.pending_seq(record.cursor),
         last_accepted_seq: record.notification.last_accepted_seq,
     }))
 }
 
-/// S2 hook: `agent_id` just received an inbox row (its head moved).
+/// Send hook: `agent_id` just received an inbox row it is woken for (it
+/// is in the wake set W, `IF-DLV-001` S13). Quiet rows never call this.
 pub fn record_new_inbox_row(
     tx: &Transaction,
     agent_id: &AgentId,
@@ -307,6 +311,7 @@ struct RawRecord {
     receiver_url: Option<String>,
     receiver_secret: String,
     agent_route_version: i64,
+    wake_policy: String,
 }
 
 impl RawRecord {
@@ -326,6 +331,7 @@ impl RawRecord {
             receiver_url: row.get(11)?,
             receiver_secret: row.get(12)?,
             agent_route_version: row.get(13)?,
+            wake_policy: row.get(14)?,
         })
     }
 
@@ -338,6 +344,12 @@ impl RawRecord {
         })?;
         let attempt = u32::try_from(self.attempt).map_err(|_| {
             StoreError::Invariant("notification_pending.attempt is out of range".to_owned())
+        })?;
+        let wake_policy = self.wake_policy.parse().map_err(|_| {
+            StoreError::Invariant(format!(
+                "agents.wake_policy '{}' is unknown",
+                self.wake_policy
+            ))
         })?;
         let last_accepted_seq = self
             .last_accepted_seq
@@ -362,6 +374,7 @@ impl RawRecord {
             receiver_url: self.receiver_url,
             receiver_secret: self.receiver_secret,
             route_version: self.agent_route_version,
+            wake_policy,
         })
     }
 }

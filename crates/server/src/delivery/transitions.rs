@@ -3,9 +3,11 @@
 //! `now` and the jitter sample, and `store::queries::delivery` loads and
 //! saves the row inside the caller's transaction.
 //!
-//! Every transition ends in the same invariant: with a receiver set, a
-//! `read_marker` at the head means `idle` (`IF-DLV-001`, PLATFORM spec
-//! "delivery 상태의 우선순위").
+//! `target_seq` is the last woken `inbox_seq` (S13, `IF-DLV-001` "wake
+//! 집합과 기준선"): only a new wake row raises it, quiet rows move the head
+//! alone. Every transition ends in the same invariant: with a receiver set,
+//! a `read_marker` at or past `target_seq` means `idle`, even with quiet
+//! rows above the marker (PLATFORM spec "delivery 상태의 우선순위").
 
 use std::time::{Duration, SystemTime};
 
@@ -64,13 +66,9 @@ pub struct InboxCursor {
 }
 
 impl InboxCursor {
-    pub fn has_unread(self) -> bool {
-        self.read_marker < self.inbox_head
-    }
-
-    /// `pending_seq` as displayed: the head while anything is unread.
-    pub fn pending_seq(self) -> Option<Seq> {
-        self.has_unread().then_some(self.inbox_head)
+    /// Whether a wake is owed: the marker is below the last woken row.
+    pub fn owes_wake(self, target_seq: Seq) -> bool {
+        self.read_marker < target_seq
     }
 }
 
@@ -162,8 +160,14 @@ impl Notification {
         due_time(self.next_due_at.as_deref(), self.redrive_due_at.as_deref())
     }
 
-    /// Row "새 inbox row": coalesce into the head; schedule now unless a
-    /// deadline already exists (a backoff deadline is never reset).
+    /// `pending_seq` as displayed: the last woken row while it is owed.
+    pub fn pending_seq(&self, cursor: InboxCursor) -> Option<Seq> {
+        cursor.owes_wake(self.target_seq).then_some(self.target_seq)
+    }
+
+    /// Row "새 wake 행" (called for the wake set W only): the new row is the
+    /// head, which becomes the owed wake; schedule now unless a deadline
+    /// already exists (a backoff deadline is never reset).
     pub fn on_new_inbox_row(&mut self, cursor: InboxCursor, now: SystemTime) {
         self.target_seq = cursor.inbox_head;
         if self.state == StoredState::Blocked {
@@ -175,17 +179,17 @@ impl Notification {
         }
     }
 
-    /// Row "read marker PUT": a marker at the head means nothing is left to
-    /// announce, even when blocked.
+    /// Row "read marker PUT": a marker at the owed wake means nothing is
+    /// left to announce, even when blocked.
     pub fn on_read_marker(&mut self, cursor: InboxCursor) {
-        if !cursor.has_unread() {
+        if !cursor.owes_wake(self.target_seq) {
             self.become_idle();
         }
     }
 
     /// Row "receiver PATCH로 URL 변경 / rotate": adopt the new route, forget
-    /// the old route's failures and, with a URL and unread rows, schedule
-    /// now. A blocked route is released.
+    /// the old route's failures and, with a URL and an owed wake, schedule
+    /// now. A blocked route is released. Quiet rows owe nothing.
     pub fn on_route_change(
         &mut self,
         route_version: i64,
@@ -200,12 +204,11 @@ impl Notification {
             self.next_due_at = None;
             return;
         }
-        if !cursor.has_unread() {
+        if !cursor.owes_wake(self.target_seq) {
             self.become_idle();
             return;
         }
         self.state = StoredState::Pending;
-        self.target_seq = cursor.inbox_head;
         self.next_due_at = Some(stamp(now));
     }
 
@@ -219,14 +222,13 @@ impl Notification {
         if !receiver_url_present {
             return DeliveryState::NoReceiver;
         }
-        if !cursor.has_unread() {
+        if !cursor.owes_wake(self.target_seq) {
             self.become_idle();
             return DeliveryState::Idle;
         }
-        self.target_seq = cursor.inbox_head;
         if self.state != StoredState::Pending {
-            // Blocked (or an idle row that somehow has unread rows): release
-            // and schedule now. A pending row keeps its due time.
+            // Blocked (or an idle row that somehow owes a wake): release and
+            // schedule now. A pending row keeps its due time.
             self.state = StoredState::Pending;
             self.attempt = 0;
             self.next_due_at = Some(stamp(now));
@@ -236,12 +238,13 @@ impl Notification {
 
     /// Rows "POST 시작" and "`redrive_due_at` 도달". The caller has checked
     /// that a URL is set and that no attempt is in flight. Returns the
-    /// `posted_seq` when an attempt should start now.
+    /// `posted_seq` when an attempt should start now: the head at this
+    /// moment, which covers the owed wake and any quiet rows after it.
     pub fn begin_attempt(&mut self, cursor: InboxCursor, now: SystemTime) -> Option<Seq> {
         if self.state != StoredState::Pending {
             return None;
         }
-        if !cursor.has_unread() {
+        if !cursor.owes_wake(self.target_seq) {
             self.become_idle();
             return None;
         }
@@ -250,11 +253,10 @@ impl Notification {
         }
         if self.next_due_at.is_none() {
             // Only `redrive_due_at` made this due.
-            self.target_seq = cursor.inbox_head;
             self.next_due_at = Some(stamp(now));
         }
         self.last_attempt_at = Some(stamp(now));
-        Some(self.target_seq)
+        Some(cursor.inbox_head)
     }
 
     /// Rows "응답 도착": the outcome of the attempt described by `posted`.
@@ -278,8 +280,9 @@ impl Notification {
                 self.last_error = None;
                 self.redrive_due_at = Some(stamp(now + policy.redrive_after));
                 self.state = StoredState::Pending;
-                if cursor.inbox_head > posted_seq {
-                    self.target_seq = cursor.inbox_head;
+                // Only a wake row that arrived during the flight is news;
+                // quiet rows wait for the next wake or the redrive.
+                if self.target_seq > posted_seq {
                     self.next_due_at = Some(stamp(now));
                 } else {
                     self.next_due_at = None;
@@ -299,7 +302,7 @@ impl Notification {
                 self.last_error = Some(error.clone());
             }
         }
-        if !cursor.has_unread() {
+        if !cursor.owes_wake(self.target_seq) {
             self.become_idle();
         }
         Applied::Recorded(self.state)
@@ -744,6 +747,8 @@ mod tests {
             &policy(),
             0.0,
         );
+        // Head 2 is a wake row (S13: the target is the last woken row).
+        stuck.on_new_inbox_row(cursor(2, 0), t(1));
         assert_eq!(
             stuck.manual_retry(true, cursor(2, 0), t(9)),
             DeliveryState::Pending
@@ -762,6 +767,7 @@ mod tests {
             &policy(),
             0.0,
         );
+        backing_off.on_new_inbox_row(cursor(2, 0), t(0));
         let due = backing_off.due_at();
         assert_eq!(
             backing_off.manual_retry(true, cursor(2, 0), t(0)),
@@ -770,6 +776,99 @@ mod tests {
         assert_eq!(backing_off.due_at(), due, "pending keeps its due time");
         assert_eq!(backing_off.attempt, 1);
         assert_eq!(backing_off.target_seq, seq(2));
+    }
+
+    // ---- S13: target_seq is the last woken row (IF-DLV-001 "wake 집합과 기준선") ----
+
+    /// A row woken at inbox_seq 1; later rows only move the head.
+    fn woken_at_one() -> Notification {
+        let mut row = idle();
+        row.on_new_inbox_row(cursor(1, 0), t(0));
+        row
+    }
+
+    #[test]
+    fn an_attempt_posts_the_head_including_quiet_rows() {
+        let mut row = woken_at_one();
+        assert_eq!(row.begin_attempt(cursor(3, 0), t(0)), Some(seq(3)));
+        assert_eq!(row.target_seq, seq(1), "the owed wake does not move");
+    }
+
+    #[test]
+    fn a_marker_at_the_woken_row_is_idle_with_quiet_rows_after_it() {
+        let mut row = woken_at_one();
+        row.on_read_marker(cursor(3, 1));
+        assert_eq!(row.state, StoredState::Idle);
+        assert_eq!(row.begin_attempt(cursor(3, 1), t(1)), None);
+    }
+
+    #[test]
+    fn quiet_rows_during_a_flight_do_not_repost_after_the_202() {
+        let mut row = in_flight(1);
+        row.apply_outcome(
+            posted(1, 1),
+            &AttemptOutcome::Accepted,
+            cursor(2, 0),
+            t(1),
+            &policy(),
+            0.0,
+        );
+        assert_eq!(row.next_due_at, None, "only a quiet row arrived");
+        assert_eq!(row.redrive_due_at, Some(stamp(t(31))));
+        assert_eq!(row.state, StoredState::Pending, "1 is still owed");
+    }
+
+    #[test]
+    fn a_wake_row_during_a_flight_reposts_after_the_202() {
+        let mut row = in_flight(1);
+        row.on_new_inbox_row(cursor(3, 0), t(1));
+        row.apply_outcome(
+            posted(1, 1),
+            &AttemptOutcome::Accepted,
+            cursor(3, 0),
+            t(2),
+            &policy(),
+            0.0,
+        );
+        assert_eq!(row.next_due_at, Some(stamp(t(2))));
+        assert_eq!(row.begin_attempt(cursor(3, 0), t(2)), Some(seq(3)));
+    }
+
+    #[test]
+    fn redrive_posts_the_head_and_keeps_the_owed_wake() {
+        let mut row = in_flight(1);
+        row.apply_outcome(
+            posted(1, 1),
+            &AttemptOutcome::Accepted,
+            cursor(1, 0),
+            t(0),
+            &policy(),
+            0.0,
+        );
+        assert_eq!(row.begin_attempt(cursor(4, 0), t(30)), Some(seq(4)));
+        assert_eq!(row.target_seq, seq(1));
+    }
+
+    #[test]
+    fn only_quiet_rows_owe_nothing_on_route_change_or_manual_retry() {
+        let mut row = idle();
+        row.on_route_change(2, true, cursor(3, 0), t(0));
+        assert_eq!(row.state, StoredState::Idle);
+        assert_eq!(row.due_at(), None);
+        assert_eq!(
+            row.manual_retry(true, cursor(3, 0), t(1)),
+            DeliveryState::Idle
+        );
+        assert_eq!(row.state, StoredState::Idle);
+    }
+
+    #[test]
+    fn route_change_with_an_owed_wake_schedules_now_without_moving_it() {
+        let mut row = woken_at_one();
+        row.on_route_change(2, true, cursor(3, 0), t(5));
+        assert_eq!(row.state, StoredState::Pending);
+        assert_eq!(row.target_seq, seq(1));
+        assert_eq!(row.due_at(), Some(t(5)));
     }
 
     #[test]

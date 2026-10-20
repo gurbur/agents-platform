@@ -133,7 +133,9 @@ fn classify(err: serde_path_to_error::Error<serde_json::Error>) -> ApiError {
     if path == "." {
         return not_an_object();
     }
-    ApiError::invalid_field(&path, format!("invalid value for field `{path}`"))
+    // `mentions[0]` names the field `mentions`: requests are flat objects.
+    let field = path.split(['.', '[']).next().unwrap_or(&path);
+    ApiError::invalid_field(field, format!("invalid value for field `{field}`"))
 }
 
 /// The text between `prefix` and the next backtick, if `message` starts so.

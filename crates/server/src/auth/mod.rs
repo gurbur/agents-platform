@@ -11,7 +11,7 @@ use axum::extract::{FromRef, FromRequestParts};
 use axum::http::HeaderMap;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
-use platform_wire::{AgentId, RoomId};
+use platform_wire::AgentId;
 use subtle::ConstantTimeEq;
 
 use crate::api::ApiError;
@@ -52,15 +52,6 @@ impl Principal {
             Principal::Owner => Ok(()),
             Principal::Agent(own) if own.as_str() == agent_id => Ok(()),
             Principal::Agent(_) => Err(ApiError::forbidden()),
-        }
-    }
-
-    /// History access: the owner reads every room, an agent reads `all` and
-    /// the DMs it takes part in.
-    pub fn can_read_room(&self, room: &RoomId) -> bool {
-        match self {
-            Principal::Owner => true,
-            Principal::Agent(own) => room.is_readable_by(own),
         }
     }
 }
@@ -168,15 +159,5 @@ mod tests {
         assert!(Principal::Owner.require_agent().is_err());
         assert!(agent.require_owner_or_self("agent-a").is_ok());
         assert!(agent.require_owner_or_self("agent-b").is_err());
-    }
-
-    #[test]
-    fn room_access_follows_participation() {
-        let room = |raw: &str| raw.parse::<RoomId>().unwrap();
-        let agent = Principal::Agent("agent-b".parse().unwrap());
-        assert!(agent.can_read_room(&room("all")));
-        assert!(agent.can_read_room(&room("dm:agent-a:agent-b")));
-        assert!(!agent.can_read_room(&room("dm:agent-a:agent-c")));
-        assert!(Principal::Owner.can_read_room(&room("dm:agent-a:agent-c")));
     }
 }

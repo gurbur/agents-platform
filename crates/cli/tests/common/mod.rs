@@ -224,9 +224,17 @@ pub fn raw_exchange(upstream: SocketAddr, request_head: &str, body: &[u8]) -> Ve
     response
 }
 
-/// `POST /v1/messages` straight to the server, bypassing the CLI.
+/// `POST /v1/messages` straight to the server, bypassing the CLI. `to` is a
+/// room id (`all`, `dm:…`, `room:…`, sent as `room_id`) or an agent id
+/// (sent as `to`); S13 refuses `"to": "all"`.
 pub fn post_message(upstream: SocketAddr, token: &str, to: &str, body: &str, client_key: &str) {
-    let payload = serde_json::json!({"to": to, "body": body, "client_key": client_key}).to_string();
+    let destination = if to == "all" || to.contains(':') {
+        "room_id"
+    } else {
+        "to"
+    };
+    let payload =
+        serde_json::json!({destination: to, "body": body, "client_key": client_key}).to_string();
     let head = format!(
         "POST /v1/messages HTTP/1.1\r\nhost: {upstream}\r\nauthorization: Bearer {token}\r\n\
          content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -313,4 +321,85 @@ fn forward(client: TcpStream, upstream: SocketAddr, hook: &mut Option<Hook>) -> 
     let mut client = reader.into_inner();
     client.write_all(&response).unwrap();
     target
+}
+
+/// One request a [`CaptureServer`] received.
+#[derive(Debug, Clone)]
+pub struct Captured {
+    pub method: String,
+    pub target: String,
+    pub body: Vec<u8>,
+}
+
+impl Captured {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::from_slice(&self.body).expect("request body is JSON")
+    }
+}
+
+/// A scripted HTTP/1.1 server: answers the n-th request with the n-th
+/// `(status, JSON body)` (the last one repeats) and records every request.
+pub struct CaptureServer {
+    pub url: String,
+    captured: Arc<Mutex<Vec<Captured>>>,
+}
+
+impl CaptureServer {
+    pub fn start(responses: Vec<(u16, serde_json::Value)>) -> Self {
+        assert!(!responses.is_empty());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&captured);
+        std::thread::spawn(move || {
+            for (index, stream) in listener.incoming().enumerate() {
+                let Ok(stream) = stream else { return };
+                let (status, body) = responses[index.min(responses.len() - 1)].clone();
+                let request = answer(stream, status, &body);
+                recorded.lock().unwrap().push(request);
+            }
+        });
+        Self { url, captured }
+    }
+
+    pub fn captured(&self) -> Vec<Captured> {
+        self.captured.lock().unwrap().clone()
+    }
+}
+
+fn answer(stream: TcpStream, status: u16, body: &serde_json::Value) -> Captured {
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line).unwrap();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_owned();
+    let target = parts.next().unwrap_or_default().to_owned();
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" || line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            content_length = value.trim().parse().unwrap();
+        }
+    }
+    let mut request_body = vec![0u8; content_length];
+    reader.read_exact(&mut request_body).unwrap();
+    let payload = body.to_string();
+    let response = format!(
+        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\nx-request-id: req-01J00000000000000000000000\r\n\
+         content-length: {}\r\nconnection: close\r\n\r\n{payload}",
+        payload.len()
+    );
+    let mut stream = reader.into_inner();
+    stream.write_all(response.as_bytes()).unwrap();
+    Captured {
+        method,
+        target,
+        body: request_body,
+    }
 }

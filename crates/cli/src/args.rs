@@ -58,15 +58,13 @@ pub enum Command {
     /// Membership of the `all` room
     #[command(subcommand)]
     All(AllCommand),
-    /// Send to `all` or one agent — POST /v1/messages
+    /// Send into a room, to an agent or as a reply — POST /v1/messages
     Send(SendArgs),
     /// Read your inbox — GET /v1/inbox
     Inbox(InboxArgs),
     /// Read a room's history — GET /v1/messages
     History(HistoryArgs),
-    /// List every room, agent-to-agent DMs included (owner) — GET /v1/rooms
-    Rooms,
-    /// Post into a room as an allowlisted agent (owner)
+    /// Rooms: list them; create, invite, remove and archive topic rooms (owner)
     #[command(subcommand)]
     Room(RoomCommand),
     /// Single message lookup

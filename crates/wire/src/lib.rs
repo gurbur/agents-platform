@@ -1,4 +1,7 @@
-//! Wire types shared by `platformd` and the `platform` CLI.
+//! Wire types of agents-platform; other repositories (hub-mcp, hub-discord) depend on this crate by path (ADR-0010).
+//!
+//! The one definition of the HTTP wire shared by `platformd`, the
+//! `platform` CLI and those consumers.
 //!
 //! This crate is the single validation point for identifiers and sequence
 //! representations (`IF-ID-001`). It deliberately depends only on serde,
@@ -21,7 +24,7 @@ pub use agent_id::{AgentId, AgentIdError};
 pub use agents::{
     AgentEntry, AgentList, DeliveryState, DeliverySummary, MembershipRequest, MembershipResponse,
     OwnerAgentEntry, ReceiverResponse, RegisterAgentRequest, RegisterAgentResponse,
-    RotateTokensResponse, UpdateReceiverRequest,
+    RotateTokensResponse, UpdateReceiverRequest, WakePolicy,
 };
 pub use avatar::{
     AVATAR_MAX_BYTES, Avatar, AvatarContentType, AvatarError, AvatarResponse, AvatarSummary,
@@ -31,15 +34,18 @@ pub use delivery::{DeliveryRetryResponse, DeliveryStatus, WakeNotification};
 pub use error::{ErrorBody, ErrorDetail, codes};
 pub use health::HealthStatus;
 pub use identity::{IdentityRequestError, IdentityTokenRequest, IdentityTokenResponse};
-pub use inbox::{InboxItem, InboxPage, ReadMarkerRequest, ReadMarkerResponse};
+pub use inbox::{InboxEvent, InboxItem, InboxPage, ReadMarkerRequest, ReadMarkerResponse};
 pub use messages::{
-    HistoryCursor, HistoryPage, Message, MessageId, MessageIdError, MessageResponse, Recipient,
-    RecipientError, RoomId, RoomIdError, SendMessageRequest,
+    HistoryCursor, HistoryPage, MAX_MENTIONS, Message, MessageId, MessageIdError, MessageResponse,
+    RoomId, RoomIdError, RoomSlug, RoomSlugError, SendMessageRequest,
 };
 pub use profile::{
     AgeBand, AgentProfile, FieldPatch, GenderForm, MAX_INTRO_CHARS, MAX_NAME_CHARS, MAX_ROLE_CHARS,
     ProfileField, ProfileFieldError, ProfileFieldProblem, ProfileResponse, ProfileUpdate,
     UnknownValue, UpdateProfileRequest, validate_name,
 };
-pub use rooms::{ROOMS_SOFT_CAP, RoomKind, RoomList, RoomPostRequest, RoomSummary};
+pub use rooms::{
+    CreateRoomRequest, MAX_ROOM_TITLE_CHARS, OWNER_CREATOR, ROOMS_SOFT_CAP, RoomKind, RoomList,
+    RoomSummary, RoomTitleError, validate_room_title,
+};
 pub use seq::{Seq, SeqError};

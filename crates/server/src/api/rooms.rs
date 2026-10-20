@@ -1,153 +1,191 @@
-//! `GET /v1/rooms` and `POST /v1/rooms/{room_id}/messages` (`IF-API-ROOMS`):
-//! the owner lists every room and posts into any room as an agent named in
-//! `[owner] post_as`.
+//! Rooms (`IF-API-ROOMS`, `IF-WIRE-011`): `GET /v1/rooms` for both
+//! principals, and the owner's topic room management — `POST /v1/rooms`,
+//! `PUT·DELETE /v1/rooms/{room_id}/members/{agent_id}` and
+//! `POST /v1/rooms/{room_id}/archive`. Owner posting is `POST /v1/messages`
+//! (S13); `POST /v1/rooms/{room_id}/messages` no longer exists.
 //!
-//! Post order (`IF-WIRE-007`): authentication → owner only (a parts
-//! extractor, so before the body) → `StrictJson` → `client_key` → decoded
-//! `body` size → `reply_to` format → `room_id` format → allowlist →
-//! transaction (sender registered → idempotency → room members →
-//! `reply_to`).
+//! Order: authentication → owner only (a parts extractor, before any body)
+//! → path and body format (422) → the store's room, archive and agent
+//! checks. Logs carry the room, the agent and the action, never a title.
 
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use platform_wire::{
-    AgentId, MessageResponse, ROOMS_SOFT_CAP, RoomId, RoomIdError, RoomList, RoomPostRequest,
+    AgentId, CreateRoomRequest, ROOMS_SOFT_CAP, RoomId, RoomKind, RoomList, RoomSummary, codes,
+    validate_room_title,
 };
 use tracing::info;
 
 use super::agents::OwnerOnly;
 use super::json::StrictJson;
-use super::messages::{
-    check_body_size, check_client_key, new_message_id, parse_reply_to, rejection_error,
-};
 use super::query::QueryParams;
 use super::{ApiError, AppState};
+use crate::auth::Principal;
 use crate::clock;
-use crate::store::queries::messages::{self as message_queries, RoomPostCommand, SendOutcome};
-use crate::store::queries::rooms as room_queries;
+use crate::store::queries::rooms::{self as room_queries, RoomRejection, Viewer};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/v1/rooms", get(list))
-        .route("/v1/rooms/{room_id}/messages", post(post_message))
+        .route("/v1/rooms", get(list).post(create))
+        .route(
+            "/v1/rooms/{room_id}/members/{agent_id}",
+            put(invite).delete(remove),
+        )
+        .route("/v1/rooms/{room_id}/archive", post(archive))
 }
 
-/// `GET /v1/rooms`: every room with a message plus `all`, newest first.
+/// `GET /v1/rooms`: every room for the owner, the rooms an agent has a
+/// membership row of (a left `all` included) for an agent.
 async fn list(
-    _owner: OwnerOnly,
+    principal: Principal,
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
 ) -> Result<Json<RoomList>, ApiError> {
     QueryParams::parse(query.as_deref(), &[])?;
+    let viewer = match principal {
+        Principal::Owner => Viewer::Owner,
+        Principal::Agent(agent_id) => Viewer::Agent(agent_id),
+    };
     let rooms = state
         .store
-        .run(|conn| room_queries::list_rooms(conn, ROOMS_SOFT_CAP))
+        .run(move |conn| room_queries::list(conn, &viewer, ROOMS_SOFT_CAP))
         .await?;
     Ok(Json(RoomList { rooms }))
 }
 
-/// `POST /v1/rooms/{room_id}/messages`: one durable commit with the same
-/// writes as `POST /v1/messages`.
-async fn post_message(
+/// `POST /v1/rooms`: a topic room with no members yet.
+async fn create(
+    _owner: OwnerOnly,
+    State(state): State<AppState>,
+    StrictJson(request): StrictJson<CreateRoomRequest>,
+) -> Result<(StatusCode, Json<RoomSummary>), ApiError> {
+    let room = parse_topic(&request.room_id)?;
+    let title = request
+        .title
+        .as_deref()
+        .map(validate_room_title)
+        .transpose()
+        .map_err(|err| ApiError::invalid_field("title", err.to_string()))?;
+
+    let target = room.clone();
+    let created = state
+        .store
+        .transaction(move |tx| {
+            room_queries::create_topic(tx, &target, title.as_deref(), &clock::now_rfc3339_ms())
+        })
+        .await?
+        .map_err(rejection_error)?;
+    info!(room_id = %room, "topic room created");
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// `PUT /v1/rooms/{room_id}/members/{agent_id}`: body and query unread.
+async fn invite(
+    _owner: OwnerOnly,
+    State(state): State<AppState>,
+    Path((raw_room_id, raw_agent_id)): Path<(String, String)>,
+) -> Result<Json<RoomSummary>, ApiError> {
+    let (room, agent) = parse_member_path(&raw_room_id, &raw_agent_id)?;
+    let (target_room, target_agent) = (room.clone(), agent.clone());
+    let summary = state
+        .store
+        .transaction(move |tx| room_queries::invite(tx, &target_room, &target_agent))
+        .await?
+        .map_err(rejection_error)?;
+    info!(room_id = %room, agent_id = %agent, "room member invited");
+    Ok(Json(summary))
+}
+
+/// `DELETE /v1/rooms/{room_id}/members/{agent_id}`: 204 whether or not the
+/// agent was a member.
+async fn remove(
+    _owner: OwnerOnly,
+    State(state): State<AppState>,
+    Path((raw_room_id, raw_agent_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let (room, agent) = parse_member_path(&raw_room_id, &raw_agent_id)?;
+    let (target_room, target_agent) = (room.clone(), agent.clone());
+    state
+        .store
+        .transaction(move |tx| room_queries::remove(tx, &target_room, &target_agent))
+        .await?
+        .map_err(rejection_error)?;
+    info!(room_id = %room, agent_id = %agent, "room member removed");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /v1/rooms/{room_id}/archive`: body and query unread; a second
+/// call keeps the first `archived_at`.
+async fn archive(
     _owner: OwnerOnly,
     State(state): State<AppState>,
     Path(raw_room_id): Path<String>,
-    StrictJson(request): StrictJson<RoomPostRequest>,
-) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
-    let RoomPostRequest {
-        sender_id,
-        body,
-        client_key,
-        reply_to,
-    } = request;
-    check_client_key(&client_key)?;
-    check_body_size(&body)?;
-    let reply_to = parse_reply_to(reply_to)?;
-    let room: RoomId = raw_room_id
-        .parse()
-        .map_err(|err: RoomIdError| ApiError::invalid_field("room_id", err.to_string()))?;
-    let sender = allowed_sender(&state.post_as, &sender_id)?;
-
-    let outcome = state
+) -> Result<Json<RoomSummary>, ApiError> {
+    let room = parse_topic(&raw_room_id)?;
+    let target = room.clone();
+    let summary = state
         .store
-        .transaction(move |tx| {
-            // Generated on the DB thread so `created_at` follows `event_seq` order.
-            let command = RoomPostCommand {
-                sender,
-                client_key,
-                room,
-                body,
-                reply_to,
-                message_id: new_message_id(),
-                created_at: clock::now_rfc3339_ms(),
-            };
-            message_queries::commit_room_post(tx, &command)
-        })
-        .await?;
-
-    match outcome {
-        SendOutcome::Created {
-            message,
-            recipients,
-        } => {
-            state.delivery.notify();
-            info!(
-                message_id = %message.message_id,
-                room_id = %message.room_id,
-                sender_id = %message.sender_id,
-                event_seq = %message.event_seq,
-                recipients,
-                "owner post committed"
-            );
-            let body = MessageResponse {
-                message,
-                deduplicated: false,
-            };
-            Ok((StatusCode::CREATED, Json(body)))
-        }
-        SendOutcome::Deduplicated(message) => {
-            info!(
-                message_id = %message.message_id,
-                sender_id = %message.sender_id,
-                "repeated client_key returned the original message"
-            );
-            let body = MessageResponse {
-                message,
-                deduplicated: true,
-            };
-            Ok((StatusCode::OK, Json(body)))
-        }
-        SendOutcome::Rejected(rejection) => Err(rejection_error(rejection)),
-    }
+        .transaction(move |tx| room_queries::archive(tx, &target, &clock::now_rfc3339_ms()))
+        .await?
+        .map_err(rejection_error)?;
+    info!(room_id = %room, "topic room archived");
+    Ok(Json(summary))
 }
 
-/// The allowlisted agent named by `sender_id`, compared verbatim; 403
-/// `forbidden` naming the field otherwise, including when the list is empty.
-fn allowed_sender(post_as: &[AgentId], sender_id: &str) -> Result<AgentId, ApiError> {
-    post_as
-        .iter()
-        .find(|allowed| allowed.as_str() == sender_id)
-        .cloned()
-        .ok_or_else(|| ApiError::forbidden().with_detail("field", "sender_id"))
+/// 422 `invalid_field` (`room_id`) unless `raw` is a `room:<slug>` id.
+fn parse_topic(raw: &str) -> Result<RoomId, ApiError> {
+    let room: RoomId = raw.parse().map_err(|err: platform_wire::RoomIdError| {
+        ApiError::invalid_field("room_id", err.to_string())
+    })?;
+    if room.kind() != RoomKind::Topic {
+        return Err(ApiError::invalid_field(
+            "room_id",
+            "only topic rooms (`room:<slug>`) are managed here",
+        ));
+    }
+    Ok(room)
+}
+
+/// The room format first (422), then the agent path (404 for a non-slug).
+fn parse_member_path(raw_room_id: &str, raw_agent_id: &str) -> Result<(RoomId, AgentId), ApiError> {
+    let room = parse_topic(raw_room_id)?;
+    let agent = raw_agent_id
+        .parse()
+        .map_err(|_| ApiError::agent_not_found())?;
+    Ok((room, agent))
+}
+
+fn rejection_error(rejection: RoomRejection) -> ApiError {
+    match rejection {
+        RoomRejection::UnknownRoom => ApiError::not_found(codes::UNKNOWN_ROOM, "no such room"),
+        RoomRejection::NotTopic => ApiError::invalid_field(
+            "room_id",
+            "only topic rooms (`room:<slug>`) are managed here",
+        ),
+        RoomRejection::RoomArchived => ApiError::conflict(
+            codes::ROOM_ARCHIVED,
+            "the room is archived and only readable",
+        ),
+        RoomRejection::UnknownAgent => ApiError::agent_not_found(),
+        RoomRejection::RoomIdTaken => {
+            ApiError::conflict(codes::ROOM_ID_TAKEN, "a room with this room_id exists")
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_wire::codes;
 
     #[test]
-    fn only_allowlisted_senders_pass_verbatim() {
-        let post_as: Vec<AgentId> = vec!["human".parse().unwrap()];
-        assert_eq!(allowed_sender(&post_as, "human").unwrap().as_str(), "human");
-        for refused in ["Human", " human", "agent-a", ""] {
-            let err = allowed_sender(&post_as, refused).unwrap_err();
-            assert_eq!(err.status(), StatusCode::FORBIDDEN, "{refused:?}");
-            assert_eq!(err.code(), codes::FORBIDDEN);
-            assert_eq!(err.details()["field"], "sender_id");
+    fn only_topic_ids_are_managed() {
+        assert!(parse_topic("room:launch").is_ok());
+        for raw in ["all", "dm:agent-a:agent-b", "room:Launch", "launch"] {
+            let err = parse_topic(raw).unwrap_err();
+            assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY, "{raw}");
+            assert!(err.names_field("room_id"));
         }
-        assert!(allowed_sender(&[], "human").is_err(), "empty = off");
     }
 }

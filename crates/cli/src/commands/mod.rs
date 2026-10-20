@@ -56,7 +56,6 @@ pub async fn run(command: Command, context: &Context) -> Result<(), CliError> {
         Command::Delivery(args) => delivery::run(args, context).await,
         Command::Identity(command) => identity::run(command, context).await,
         Command::Profile(command) => profile::run(command, context).await,
-        Command::Rooms => rooms::list(context).await,
         Command::Room(command) => rooms::run(command, context).await,
         Command::Health => health::run(context).await,
     }

@@ -6,9 +6,9 @@ use std::fmt::Display;
 use std::io::Write;
 
 use platform_wire::{
-    AgentEntry, AgentProfile, AvatarResponse, DeliveryRetryResponse, DeliveryState, DeliveryStatus,
-    HealthStatus, HistoryCursor, HistoryPage, IdentityTokenResponse, InboxItem, InboxPage,
-    MembershipResponse, Message, MessageResponse, OwnerAgentEntry, ProfileResponse,
+    AgentEntry, AgentId, AgentProfile, AvatarResponse, DeliveryRetryResponse, DeliveryState,
+    DeliveryStatus, HealthStatus, HistoryCursor, HistoryPage, IdentityTokenResponse, InboxItem,
+    InboxPage, MembershipResponse, Message, MessageResponse, OwnerAgentEntry, ProfileResponse,
     ReadMarkerResponse, ReceiverResponse, RegisterAgentResponse, RoomSummary, RotateTokensResponse,
     Seq,
 };
@@ -65,6 +65,20 @@ pub fn escape_body(body: &str) -> String {
 
 fn or_none<T: Display>(value: Option<T>) -> String {
     value.map_or_else(|| NONE.to_owned(), |value| value.to_string())
+}
+
+/// Agent ids joined by `,`, or `-` for none.
+fn id_list(ids: &[AgentId]) -> String {
+    if ids.is_empty() {
+        return NONE.to_owned();
+    }
+    let ids: Vec<&str> = ids.iter().map(AgentId::as_str).collect();
+    ids.join(",")
+}
+
+/// The sender's `wake` in a table cell.
+fn wake_cell(wake: bool) -> &'static str {
+    if wake { "wake" } else { "quiet" }
 }
 
 fn state_name(state: DeliveryState) -> &'static str {
@@ -294,6 +308,7 @@ pub fn receiver(route: &ReceiverResponse) -> String {
         ("agent_id", route.agent_id.to_string()),
         ("receiver_url", or_none(route.receiver_url.as_deref())),
         ("route_version", route.route_version.to_string()),
+        ("wake_policy", route.wake_policy.to_string()),
         ("state", state_name(route.state).to_owned()),
     ])
 }
@@ -310,32 +325,44 @@ pub fn membership(membership: &MembershipResponse) -> String {
     ])
 }
 
-/// `rooms`: one row per room in the server's order (newest first).
+/// `room list`: one row per room in the server's order.
 pub fn rooms(rooms: &[RoomSummary]) -> String {
     let mut table = Table::new(vec![
         "ROOM",
         "KIND",
+        "TITLE",
         "MEMBERS",
         "LAST_AT",
         "LAST_SENDER",
         "COUNT",
+        "ARCHIVED_AT",
     ]);
     for room in rooms {
-        let members: Vec<&str> = room.members.iter().map(|id| id.as_str()).collect();
         table.push(vec![
             room.room_id.to_string(),
             room.kind.as_str().to_owned(),
-            if members.is_empty() {
-                NONE.to_owned()
-            } else {
-                members.join(",")
-            },
+            one_line(room.title.as_deref()),
+            id_list(&room.members),
             or_none(room.last_message_at.as_deref()),
             or_none(room.last_sender_id.as_ref()),
             room.message_count.to_string(),
+            or_none(room.archived_at.as_deref()),
         ]);
     }
     table.render()
+}
+
+/// `room create|invite|archive`: one room as key-value lines.
+pub fn room(room: &RoomSummary) -> String {
+    key_values(&[
+        ("room_id", room.room_id.to_string()),
+        ("kind", room.kind.as_str().to_owned()),
+        ("title", one_line(room.title.as_deref())),
+        ("members", id_list(&room.members)),
+        ("created_by", room.created_by.clone()),
+        ("created_at", room.created_at.clone()),
+        ("archived_at", or_none(room.archived_at.as_deref())),
+    ])
 }
 
 /// The commit result plus the `client_key` to reuse for a retry.
@@ -345,8 +372,11 @@ pub fn sent(response: &MessageResponse, client_key: &str) -> String {
         ("message_id", message.message_id.to_string()),
         ("event_seq", message.event_seq.to_string()),
         ("room_id", message.room_id.to_string()),
+        ("room_kind", message.room_kind.as_str().to_owned()),
         ("sender_id", message.sender_id.to_string()),
         ("reply_to", or_none(message.reply_to.as_ref())),
+        ("wake", message.wake.to_string()),
+        ("mentions", id_list(&message.mentions)),
         ("created_at", message.created_at.clone()),
         ("client_key", client_key.to_owned()),
     ]);
@@ -356,26 +386,39 @@ pub fn sent(response: &MessageResponse, client_key: &str) -> String {
     text
 }
 
+/// One row per inbox event. An event of a kind this CLI does not know
+/// shows only its sequence and kind.
 fn inbox_table(items: &[InboxItem]) -> String {
     let mut table = Table::new(vec![
         "INBOX_SEQ",
+        "KIND",
         "ROOM_ID",
         "EVENT_SEQ",
         "MESSAGE_ID",
         "CREATED_AT",
         "SENDER_ID",
+        "WAKE",
+        "REPLY_TO",
+        "MENTIONS",
         "BODY",
     ]);
     for item in items {
-        table.push(vec![
-            item.inbox_seq.to_string(),
-            item.room_id.to_string(),
-            item.event_seq.to_string(),
-            item.message_id.to_string(),
-            item.created_at.clone(),
-            item.sender_id.to_string(),
-            escape_body(&item.body),
-        ]);
+        let mut row = vec![item.inbox_seq.to_string(), item.kind().to_owned()];
+        match item.as_message() {
+            Some(message) => row.extend([
+                message.room_id.to_string(),
+                message.event_seq.to_string(),
+                message.message_id.to_string(),
+                message.created_at.clone(),
+                message.sender_id.to_string(),
+                wake_cell(message.wake).to_owned(),
+                or_none(message.reply_to.as_ref()),
+                id_list(&message.mentions),
+                escape_body(&message.body),
+            ]),
+            None => row.extend(std::iter::repeat_n(NONE.to_owned(), 9)),
+        }
+        table.push(row);
     }
     table.render()
 }
@@ -422,6 +465,9 @@ pub fn history_page(page: &HistoryPage) -> String {
         "MESSAGE_ID",
         "CREATED_AT",
         "SENDER_ID",
+        "WAKE",
+        "REPLY_TO",
+        "MENTIONS",
         "BODY",
     ]);
     for message in &page.items {
@@ -430,6 +476,9 @@ pub fn history_page(page: &HistoryPage) -> String {
             message.message_id.to_string(),
             message.created_at.clone(),
             message.sender_id.to_string(),
+            wake_cell(message.wake).to_owned(),
+            or_none(message.reply_to.as_ref()),
+            id_list(&message.mentions),
             escape_body(&message.body),
         ]);
     }
@@ -451,8 +500,11 @@ pub fn message(message: &Message) -> String {
         ("message_id", message.message_id.to_string()),
         ("event_seq", message.event_seq.to_string()),
         ("room_id", message.room_id.to_string()),
+        ("room_kind", message.room_kind.as_str().to_owned()),
         ("sender_id", message.sender_id.to_string()),
         ("reply_to", or_none(message.reply_to.as_ref())),
+        ("wake", message.wake.to_string()),
+        ("mentions", id_list(&message.mentions)),
         ("created_at", message.created_at.clone()),
         ("body", escape_body(&message.body)),
     ])

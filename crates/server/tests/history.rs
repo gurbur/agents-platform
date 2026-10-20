@@ -288,8 +288,10 @@ async fn agents_read_all_and_their_own_dms_and_the_owner_reads_everything() {
         let dm = page(&api, token, "room_id=dm:agent-a:agent-c").await;
         assert_eq!(dm["items"][0]["message_id"], dm_ac["message_id"]);
     }
-    let owner_view = page(&api, OWNER_TOKEN, "room_id=dm:agent-b:agent-c").await;
-    assert_eq!(item_seqs(&owner_view), Vec::<i64>::new());
+    // S13: a DM nobody wrote to has no room yet (IF-WIRE-005).
+    api.get("/v1/messages?room_id=dm:agent-b:agent-c", OWNER_TOKEN)
+        .await
+        .assert_error(404, "unknown_room");
 
     // Leaving `all` does not hide its history.
     api.put(

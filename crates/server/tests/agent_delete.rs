@@ -232,9 +232,9 @@ async fn deletion_removes_the_agents_state_and_keeps_history() {
         .await
         .assert_error(404, "unknown_recipient");
     api.post(
-        "/v1/rooms/dm:agent-a:agent-z/messages",
+        "/v1/messages",
         OWNER_TOKEN,
-        json!({"sender_id": "human", "body": "hi", "client_key": "h-1"}),
+        json!({"sender_id": "human", "room_id": "dm:agent-a:agent-z", "body": "hi", "client_key": "h-1"}),
     )
     .await
     .assert_error(404, "unknown_room");
@@ -242,7 +242,7 @@ async fn deletion_removes_the_agents_state_and_keeps_history() {
         .post(
             "/v1/messages",
             &a.api_key,
-            json!({"to": "all", "body": "re", "client_key": "a-4", "reply_to": z_all["message_id"]}),
+            json!({"body": "re", "client_key": "a-4", "reply_to": z_all["message_id"]}),
         )
         .await;
     assert_eq!(reply.status.as_u16(), 201, "{}", reply.body);
@@ -280,9 +280,12 @@ async fn a_deleted_id_registers_again_as_a_new_agent() {
 
     api.sent(&a.api_key, "agent-z", "new hello", "a-3").await;
     let inbox = api.get("/v1/inbox", &new.api_key).await;
-    assert_eq!(inbox.body["items"].as_array().unwrap().len(), 1);
+    // S13: the new agent's own DM is its first event (ADR-0011).
+    assert_eq!(inbox.body["items"].as_array().unwrap().len(), 2);
     assert_eq!(inbox.body["items"][0]["inbox_seq"], "1");
-    assert_eq!(inbox.body["items"][0]["body"], "new hello");
+    assert_eq!(inbox.body["items"][0]["body"], "old hello");
+    assert_eq!(inbox.body["items"][1]["inbox_seq"], "2");
+    assert_eq!(inbox.body["items"][1]["body"], "new hello");
 
     // The old DM history is visible to the new member of that room.
     let history = api

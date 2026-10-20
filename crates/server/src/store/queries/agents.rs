@@ -6,8 +6,8 @@ use std::str::FromStr;
 use std::time::SystemTime;
 
 use platform_wire::{
-    AgeBand, AgentId, AgentProfile, AvatarSummary, DeliveryState, GenderForm, ProfileField,
-    ProfileUpdate,
+    AgeBand, AgentId, AgentProfile, AvatarSummary, DeliveryState, FieldPatch, GenderForm,
+    ProfileField, ProfileUpdate, WakePolicy,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -15,7 +15,7 @@ use super::delivery as delivery_queries;
 use crate::delivery::transitions::{self, StoredState};
 use crate::store::StoreError;
 
-/// The only room with memberships in v1.
+/// The room every registration joins.
 pub const ALL_ROOM: &str = "all";
 
 /// `route_version` and `membership_epoch` of a freshly registered agent.
@@ -60,6 +60,7 @@ pub struct AgentRecord {
     pub profile: AgentProfile,
     pub joined_all: bool,
     pub receiver_url: Option<String>,
+    pub wake_policy: WakePolicy,
     pub route_version: i64,
     pub created_at: String,
     pub delivery_state: DeliveryState,
@@ -86,7 +87,10 @@ pub struct ProfileChange {
 pub struct ReceiverRoute {
     pub receiver_url: Option<String>,
     pub route_version: i64,
+    pub wake_policy: WakePolicy,
     pub delivery_state: DeliveryState,
+    /// Whether `route_version` moved (the delivery transition ran).
+    pub route_changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,8 +101,10 @@ pub struct AllMembership {
 }
 
 /// Inserts the agent with its `all` membership (joined, effective at the
-/// current `event_seq`), a zero read marker and an idle notification row,
-/// all in the caller's transaction.
+/// current `event_seq`), a joined membership of every DM room its id is in
+/// (a re-registered id reads and writes its old DMs again; topic rooms need
+/// a new invitation, `IF-WIRE-009`), a zero read marker and an idle
+/// notification row, all in the caller's transaction.
 pub fn register(tx: &Transaction, agent: &NewAgent) -> Result<Registration, StoreError> {
     // The IMMEDIATE transaction holds the write lock, so check-then-insert
     // cannot race another registration.
@@ -126,6 +132,16 @@ pub fn register(tx: &Transaction, agent: &NewAgent) -> Result<Registration, Stor
         "INSERT INTO memberships (room_id, agent_id, joined, epoch, effective_event_seq)
          VALUES (?1, ?2, 1, ?3, ?4)",
         params![ALL_ROOM, id, INITIAL_MEMBERSHIP_EPOCH, event_seq],
+    )?;
+    // An agent_id has no ':', so prefix and suffix comparisons are exact
+    // (`LIKE` would read `_` as a wildcard).
+    tx.execute(
+        "INSERT INTO memberships (room_id, agent_id, joined, epoch, effective_event_seq)
+         SELECT room_id, ?1, 1, ?2, ?3 FROM rooms
+         WHERE kind = 'dm'
+           AND (substr(room_id, 1, length(?1) + 4) = 'dm:' || ?1 || ':'
+                OR substr(room_id, -(length(?1) + 1)) = ':' || ?1)",
+        params![id, INITIAL_MEMBERSHIP_EPOCH, event_seq],
     )?;
     tx.execute(
         "INSERT INTO read_state (agent_id, read_marker) VALUES (?1, 0)",
@@ -156,7 +172,7 @@ pub fn list(conn: &Connection) -> Result<Vec<AgentRecord>, StoreError> {
     let mut statement = conn.prepare(
         "SELECT a.agent_id, m.joined, a.receiver_url, a.route_version, a.created_at, n.state,
                 a.name, a.gender_form, a.age_band, a.role, a.intro, a.profile_updated_at,
-                v.sha256, v.updated_at
+                v.sha256, v.updated_at, a.wake_policy
          FROM agents a
          JOIN memberships m ON m.agent_id = a.agent_id AND m.room_id = ?1
          JOIN notification_pending n ON n.agent_id = a.agent_id
@@ -173,12 +189,22 @@ pub fn list(conn: &Connection) -> Result<Vec<AgentRecord>, StoreError> {
             row.get::<_, String>(5)?,
             StoredProfile::from_row(row, 6)?,
             avatar_summary(row.get(12)?, row.get(13)?),
+            row.get::<_, String>(14)?,
         ))
     })?;
     let mut records = Vec::new();
     for row in rows {
-        let (agent_id, joined_all, receiver_url, route_version, created_at, state, stored, avatar) =
-            row?;
+        let (
+            agent_id,
+            joined_all,
+            receiver_url,
+            route_version,
+            created_at,
+            state,
+            stored,
+            avatar,
+            wake_policy,
+        ) = row?;
         let delivery_state = display_state(receiver_url.as_deref(), &state)?;
         let ProfileRecord { name, profile } = stored.into_record()?;
         records.push(AgentRecord {
@@ -187,6 +213,7 @@ pub fn list(conn: &Connection) -> Result<Vec<AgentRecord>, StoreError> {
             profile,
             joined_all,
             receiver_url,
+            wake_policy: stored_wake_policy(&wake_policy)?,
             route_version,
             created_at,
             delivery_state,
@@ -355,28 +382,41 @@ pub fn find_by_api_key_hash(
     found.map(stored_agent_id).transpose()
 }
 
-/// Sets the receiver URL. `route_version` grows only when the value changes,
-/// including null ↔ URL, and a change applies the route-change delivery
-/// transition in the same transaction. `None` when the agent does not exist.
+/// Applies a receiver PATCH: `receiver_url` (kept when `Keep`) and
+/// `wake_policy` (kept when `None`). `route_version` grows only when the URL
+/// value changes, including null ↔ URL, and only then runs the route-change
+/// delivery transition; a `wake_policy` change is not a route change and
+/// wakes nothing retroactively (`IF-WIRE-004`, `IF-DLV-001`). `None` when
+/// the agent does not exist.
 pub fn update_receiver(
     tx: &Transaction,
     agent_id: &AgentId,
-    receiver_url: Option<String>,
+    receiver_url: FieldPatch<String>,
+    wake_policy: Option<WakePolicy>,
 ) -> Result<Option<ReceiverRoute>, StoreError> {
-    let current: Option<(Option<String>, i64)> = tx
+    let current: Option<(Option<String>, i64, String)> = tx
         .query_row(
-            "SELECT receiver_url, route_version FROM agents WHERE agent_id = ?1",
+            "SELECT receiver_url, route_version, wake_policy FROM agents WHERE agent_id = ?1",
             params![agent_id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((stored_url, stored_version)) = current else {
+    let Some((stored_url, stored_version, stored_policy)) = current else {
         return Ok(None);
     };
 
-    let route_version = if stored_url == receiver_url {
-        stored_version
-    } else {
+    let stored_policy = stored_wake_policy(&stored_policy)?;
+    let next_policy = wake_policy.unwrap_or(stored_policy);
+    if next_policy != stored_policy {
+        tx.execute(
+            "UPDATE agents SET wake_policy = ?1 WHERE agent_id = ?2",
+            params![next_policy.as_str(), agent_id.as_str()],
+        )?;
+    }
+
+    let receiver_url = receiver_url.apply_to(stored_url.clone());
+    let route_changed = stored_url != receiver_url;
+    let route_version = if route_changed {
         let bumped = tx.query_row(
             "UPDATE agents SET receiver_url = ?1, route_version = route_version + 1
              WHERE agent_id = ?2 RETURNING route_version",
@@ -385,6 +425,8 @@ pub fn update_receiver(
         )?;
         delivery_queries::record_route_change(tx, agent_id, SystemTime::now())?;
         bumped
+    } else {
+        stored_version
     };
 
     let state = stored_notification_state(tx, agent_id)?;
@@ -392,8 +434,16 @@ pub fn update_receiver(
     Ok(Some(ReceiverRoute {
         receiver_url,
         route_version,
+        wake_policy: next_policy,
         delivery_state,
+        route_changed,
     }))
+}
+
+fn stored_wake_policy(stored: &str) -> Result<WakePolicy, StoreError> {
+    stored
+        .parse()
+        .map_err(|_| StoreError::Invariant(format!("agents.wake_policy '{stored}' is unknown")))
 }
 
 /// Joins or leaves `all`. A change bumps `epoch` and makes the new state
@@ -455,7 +505,8 @@ pub struct DeletedAgent {
 
 /// Tables holding rows keyed to an agent, each with its key column, in the
 /// order [`delete`] empties them: referencing tables first, `agents` last
-/// (`IF-DB-001` "agent 삭제 cascade"). `messages` is not among them.
+/// (`IF-DB-001` "agent 삭제 cascade"). `memberships` covers every room
+/// kind. `messages`, `rooms` and `message_mentions` are not among them.
 const AGENT_STATE_TABLES: [(&str, &str); 7] = [
     ("agent_avatars", "agent_id"),
     ("idempotency", "sender_id"),

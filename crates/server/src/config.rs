@@ -85,9 +85,9 @@ pub struct Config {
 /// `[owner]` after validation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OwnerConfig {
-    /// Agents the owner may name as `sender_id` of
-    /// `POST /v1/rooms/{room_id}/messages`. Empty (the default) turns owner
-    /// posting off.
+    /// Agents the owner may name as `sender_id` of `POST /v1/messages`;
+    /// they may also be mentioned in any room (S13). Empty (the default)
+    /// turns owner posting off.
     pub post_as: Vec<AgentId>,
 }
 

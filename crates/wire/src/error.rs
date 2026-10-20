@@ -43,13 +43,14 @@ impl ErrorBody {
 pub mod codes {
     pub const UNAUTHORIZED: &str = "unauthorized";
     pub const FORBIDDEN: &str = "forbidden";
-    pub const NOT_ALL_MEMBER: &str = "not_all_member";
+    /// No joined membership of the room to write to; for an agent also a
+    /// room that does not exist (S13, `IF-WIRE-003`).
+    pub const NOT_ROOM_MEMBER: &str = "not_room_member";
     pub const INVALID_AGENT_ID: &str = "invalid_agent_id";
     pub const AGENT_ID_TAKEN: &str = "agent_id_taken";
     pub const UNKNOWN_RECIPIENT: &str = "unknown_recipient";
     pub const SELF_DM_NOT_SUPPORTED: &str = "self_dm_not_supported";
     pub const IDEMPOTENCY_CONFLICT: &str = "idempotency_conflict";
-    pub const REPLY_TO_ROOM_MISMATCH: &str = "reply_to_room_mismatch";
     pub const MUTUALLY_EXCLUSIVE_CURSORS: &str = "mutually_exclusive_cursors";
     pub const READ_MARKER_AHEAD: &str = "read_marker_ahead";
     pub const BODY_TOO_LARGE: &str = "body_too_large";
@@ -66,9 +67,14 @@ pub mod codes {
     pub const INTERNAL: &str = "internal";
     pub const REPLY_TO_NOT_FOUND: &str = "reply_to_not_found";
     pub const MESSAGE_NOT_FOUND: &str = "message_not_found";
-    /// `POST /v1/rooms/{room_id}/messages` into a DM whose member is not
-    /// registered (API_V1 "Room 목록과 owner 게시", `IF-WIRE-007`).
+    /// No such room: the owner's history, send and room management, or a
+    /// DM whose member is not registered (S13, `IF-WIRE-003`).
     pub const UNKNOWN_ROOM: &str = "unknown_room";
+    /// S13 room and send codes (`IF-WIRE-003`, `IF-WIRE-010`, `IF-WIRE-011`).
+    pub const ROOM_ARCHIVED: &str = "room_archived";
+    pub const ROOM_ID_TAKEN: &str = "room_id_taken";
+    pub const INVALID_DESTINATION: &str = "invalid_destination";
+    pub const MENTION_NOT_MEMBER: &str = "mention_not_member";
     /// Directory avatar codes (API_V1 "Directory avatar", `IF-WIRE-008`).
     pub const AVATAR_TOO_LARGE: &str = "avatar_too_large";
     pub const AVATAR_NOT_FOUND: &str = "avatar_not_found";

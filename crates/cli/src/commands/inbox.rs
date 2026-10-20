@@ -5,6 +5,7 @@ use clap::{Args, Subcommand};
 use platform_wire::{AgentId, InboxItem, InboxPage, ReadMarkerRequest, ReadMarkerResponse, Seq};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
+use serde_json::Value;
 
 use super::Context;
 use crate::client::Query;
@@ -70,13 +71,14 @@ pub enum InboxCommand {
     },
 }
 
-/// `--all-pages --json` output: every item of one snapshot in one document.
+/// `--all-pages --json` output: every item of one snapshot in one document,
+/// each exactly as the server sent it (unknown kinds and fields included).
 #[derive(Serialize)]
 struct Snapshot {
     agent_id: AgentId,
     read_marker: Seq,
     snapshot_head_seq: Seq,
-    items: Vec<InboxItem>,
+    items: Vec<Value>,
 }
 
 pub async fn run(args: InboxArgs, context: &Context) -> Result<(), CliError> {
@@ -107,49 +109,77 @@ async fn read(through_seq: Seq, context: &Context) -> Result<(), CliError> {
 /// committed during the traversal are left for the next snapshot.
 async fn all_pages(first_page: PageArgs, context: &Context) -> Result<(), CliError> {
     let first = fetch(&first_page, context).await?;
-    let mut snapshot = Snapshot {
-        agent_id: first.agent_id,
-        read_marker: first.read_marker,
-        snapshot_head_seq: first.snapshot_head_seq,
-        items: first.items,
-    };
-    let mut after_seq = first.next_after_seq;
-    let mut has_more = first.has_more;
+    let mut items = first.items;
+    let mut raw_items = first.raw_items;
+    let page = first.page;
+    let mut after_seq = page.next_after_seq;
+    let mut has_more = page.has_more;
     while has_more {
         let next_page = PageArgs {
             after_seq: Some(after_seq),
-            until_seq: Some(snapshot.snapshot_head_seq),
+            until_seq: Some(page.snapshot_head_seq),
             limit: first_page.limit,
         };
-        let page = fetch(&next_page, context).await?;
-        if page.has_more && page.next_after_seq <= after_seq {
+        let next = fetch(&next_page, context).await?;
+        if next.page.has_more && next.page.next_after_seq <= after_seq {
             return Err(CliError::UnexpectedResponse {
                 status: StatusCode::OK,
                 detail: format!("inbox page after {after_seq} has more rows but did not advance"),
             });
         }
-        snapshot.items.extend(page.items);
-        after_seq = page.next_after_seq;
-        has_more = page.has_more;
+        items.extend(next.items);
+        raw_items.extend(next.raw_items);
+        after_seq = next.page.next_after_seq;
+        has_more = next.page.has_more;
     }
 
     if context.json {
-        // Serializing wire DTOs with plain fields cannot fail.
+        let snapshot = Snapshot {
+            agent_id: page.agent_id,
+            read_marker: page.read_marker,
+            snapshot_head_seq: page.snapshot_head_seq,
+            items: raw_items,
+        };
+        // Wire ids and JSON values serialize without failure.
         let body = serde_json::to_vec(&snapshot).expect("snapshot serializes");
         return output::emit_raw(&body);
     }
     output::emit(&output::inbox_snapshot(
-        snapshot.agent_id.as_str(),
-        snapshot.read_marker,
-        snapshot.snapshot_head_seq,
-        &snapshot.items,
+        page.agent_id.as_str(),
+        page.read_marker,
+        page.snapshot_head_seq,
+        &items,
     ))
 }
 
-async fn fetch(page: &PageArgs, context: &Context) -> Result<InboxPage, CliError> {
+/// One fetched page: its typed fields (items moved out) and its items both
+/// typed and as raw JSON values.
+struct FetchedPage {
+    page: InboxPage,
+    items: Vec<InboxItem>,
+    raw_items: Vec<Value>,
+}
+
+async fn fetch(page: &PageArgs, context: &Context) -> Result<FetchedPage, CliError> {
     let response = context
         .client
         .get::<InboxPage>(INBOX_PATH, &page.query())
         .await?;
-    Ok(response.value)
+    let raw: Value =
+        serde_json::from_slice(&response.raw).map_err(|err| CliError::UnexpectedResponse {
+            status: StatusCode::OK,
+            detail: format!("cannot decode body: {err}"),
+        })?;
+    let raw_items = raw
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut page = response.value;
+    let items = std::mem::take(&mut page.items);
+    Ok(FetchedPage {
+        page,
+        items,
+        raw_items,
+    })
 }

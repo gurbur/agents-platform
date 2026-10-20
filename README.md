@@ -156,12 +156,12 @@ Pi에서 `platformd backup`(서비스 동작 중 가능, 읽기 전용 연결의
 ### 5. 스모크
 
 ```sh
-python3 -I deploy/mock-receiver.py <Mac의 Tailscale IP> 8799          # 다른 터미널, receiver 시나리오용
+python3 -I deploy/mock-receiver.py <Mac의 Tailscale IP> 8799 | tee receiver.log   # 다른 터미널, receiver 시나리오용
 deploy/smoke.sh http://<Pi의 Tailscale IP>:7340 <owner-token-file> \
-  --receiver-url http://<Mac의 Tailscale IP>:8799/notify
+  --post-as human --receiver-url http://<Mac의 Tailscale IP>:8799/notify --receiver-log receiver.log
 ```
 
-`platform` CLI(`PATH` 또는 `--platform <path>`)와 curl로 health, 등록, directory credential 비노출, `all` fanout, DM, unknown·self DM 오류, idempotency, inbox paging snapshot, read marker, owner 조회 no-ack, delivery 상태, rotate 뒤 401, (선택) receiver 202를 실행하고 PASS/FAIL/SKIP 표를 출력합니다. 하나라도 FAIL이면 exit 1. agent는 매번 `smoke-<ulid>`로 새로 만들고 끝에 삭제합니다(S12, 메시지는 history에 남습니다). agent 삭제 시나리오(16)는 삭제 뒤 401·404, history와 room 보존, 같은 ID 재등록의 새 inbox를 확인하고, `--post-as`가 있으면 그 ID의 삭제가 409 `agent_protected`인지도 봅니다. `all` 시나리오는 그 시점에 가입한 실제 agent에게도 fanout된다는 점에 유의합니다.
+`platform` CLI(`PATH` 또는 `--platform <path>`)와 curl로 health, 등록, directory credential 비노출, `all` fanout, DM, unknown·self DM 오류, idempotency, inbox paging snapshot, read marker, owner 조회 no-ack, delivery 상태, rotate 뒤 401, (선택) receiver 202를 실행하고 PASS/FAIL/SKIP 표를 출력합니다. 하나라도 FAIL이면 exit 1. agent는 매번 `smoke-<ulid>`로 새로 만들고 끝에 삭제합니다(S12, 메시지는 history에 남습니다). agent 삭제 시나리오(16)는 삭제 뒤 401·404, history와 room 보존, 같은 ID 재등록의 새 inbox를 확인하고, `--post-as`가 있으면 그 ID의 삭제가 409 `agent_protected`인지도 봅니다. `all` 시나리오는 그 시점에 가입한 실제 agent에게도 fanout된다는 점에 유의합니다. S13 시나리오는 주제 방(17: 생성·초대·제거·보관과 권한), `reply_to` 하나로 원글의 room에 답하기(18, `--post-as`가 있으면 끼어든 글에 `--mention`으로 답해 그 ID의 inbox에 닿는지), 조용한 송신(19), 지목 wake(20), `wake_policy=always`(21)이며 19~21은 `--receiver-url`이 없으면 SKIP입니다. 19~21은 "깨우지 않음"을 `RECEIVER_WAIT_SECS` 동안 지켜보므로 각각 그만큼 걸립니다. `--receiver-log`(mock receiver의 stdout을 받은 파일)를 주면 21이 receiver가 받은 wake body가 정확히 `{v, agent_id, inbox_seq}` 세 키인지도 확인합니다. smoke가 만든 주제 방 `room:smoke-<ulid>`는 지우는 경로가 없으므로 보관된 채 남습니다.
 
 ### 6. 복구
 

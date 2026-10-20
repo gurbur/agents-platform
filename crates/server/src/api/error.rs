@@ -48,6 +48,11 @@ impl ApiError {
         &self.details
     }
 
+    /// Whether `details.field` is `field`.
+    pub fn names_field(&self, field: &str) -> bool {
+        self.details.get("field").and_then(Value::as_str) == Some(field)
+    }
+
     /// 401: no credential, an unknown credential, or a receiver secret.
     pub fn unauthorized() -> Self {
         Self::new(

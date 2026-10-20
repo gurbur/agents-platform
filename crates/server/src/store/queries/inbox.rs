@@ -1,16 +1,20 @@
 //! Inbox pages and the read marker (`IF-DB-001` tables `agents.inbox_head`,
 //! `inbox_rows`, `messages`, `read_state`).
 //!
-//! A marker that moves up also runs the read-marker delivery transition
-//! (`IF-DLV-001`) in the same transaction: at the head, the agent is idle.
+//! Inbox rows are events with a `kind` (`IF-WIRE-012`); S13 writes only
+//! message events. A marker that moves up also runs the read-marker
+//! delivery transition (`IF-DLV-001`) in the same transaction: at the last
+//! woken row, the agent is idle.
 
-use platform_wire::{AgentId, InboxItem, RoomId, Seq};
+use platform_wire::{AgentId, InboxItem, Seq};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
-use super::agents::stored_agent_id;
 use super::delivery as delivery_queries;
-use super::messages::{stored_message_id, stored_seq};
+use super::messages::{MESSAGE_COLUMNS, StoredMessage, stored_seq};
 use crate::store::StoreError;
+
+/// `inbox_rows.kind` of a message event.
+pub const MESSAGE_EVENT: &str = platform_wire::inbox::MESSAGE_KIND;
 
 /// A validated inbox request. Absent bounds take their defaults inside
 /// [`page`], from the same reads as the rows.
@@ -63,13 +67,13 @@ pub fn page(conn: &Connection, query: &InboxQuery) -> Result<Option<InboxSlice>,
     let snapshot_head_seq = query.until_seq.unwrap_or(cursor.inbox_head);
 
     let fetch = i64::from(query.limit) + 1;
-    let mut statement = conn.prepare(
-        "SELECT r.inbox_seq, m.message_id, m.event_seq, m.room_id, m.sender_id, m.body, m.created_at
+    let mut statement = conn.prepare(&format!(
+        "SELECT r.inbox_seq, r.kind, {MESSAGE_COLUMNS}
          FROM inbox_rows r JOIN messages m ON m.message_id = r.message_id
          WHERE r.agent_id = ?1 AND r.inbox_seq > ?2 AND r.inbox_seq <= ?3
          ORDER BY r.inbox_seq ASC
-         LIMIT ?4",
-    )?;
+         LIMIT ?4"
+    ))?;
     let rows = statement.query_map(
         params![
             query.agent_id.as_str(),
@@ -142,40 +146,29 @@ fn cursor(conn: &Connection, agent_id: &AgentId) -> Result<Option<Cursor>, Store
 /// An inbox row joined with its message, before validation.
 struct StoredItem {
     inbox_seq: i64,
-    message_id: String,
-    event_seq: i64,
-    room_id: String,
-    sender_id: String,
-    body: String,
-    created_at: String,
+    kind: String,
+    message: StoredMessage,
 }
 
 impl StoredItem {
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             inbox_seq: row.get(0)?,
-            message_id: row.get(1)?,
-            event_seq: row.get(2)?,
-            room_id: row.get(3)?,
-            sender_id: row.get(4)?,
-            body: row.get(5)?,
-            created_at: row.get(6)?,
+            kind: row.get(1)?,
+            message: StoredMessage::from_row(row, 2)?,
         })
     }
 
     fn into_item(self) -> Result<InboxItem, StoreError> {
-        let room_id = self
-            .room_id
-            .parse::<RoomId>()
-            .map_err(|err| StoreError::Invariant(format!("stored room_id is invalid: {err}")))?;
-        Ok(InboxItem {
-            inbox_seq: stored_seq(self.inbox_seq, "inbox_rows.inbox_seq")?,
-            message_id: stored_message_id(self.message_id)?,
-            event_seq: stored_seq(self.event_seq, "messages.event_seq")?,
-            room_id,
-            sender_id: stored_agent_id(self.sender_id)?,
-            body: self.body,
-            created_at: self.created_at,
-        })
+        if self.kind != MESSAGE_EVENT {
+            return Err(StoreError::Invariant(format!(
+                "inbox_rows.kind '{}' is not written by this version",
+                self.kind
+            )));
+        }
+        Ok(InboxItem::message(
+            stored_seq(self.inbox_seq, "inbox_rows.inbox_seq")?,
+            self.message.into_message()?,
+        ))
     }
 }

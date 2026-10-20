@@ -34,7 +34,8 @@ const V1_ROWS: [(&str, &str); 8] = [
     ),
     (
         "memberships",
-        "SELECT room_id, agent_id, joined, epoch, effective_event_seq FROM memberships ORDER BY agent_id",
+        // `all` only: v5 adds DM membership rows next to these (S13).
+        "SELECT room_id, agent_id, joined, epoch, effective_event_seq FROM memberships WHERE room_id = 'all' ORDER BY agent_id",
     ),
     (
         "sequences",
@@ -566,4 +567,352 @@ async fn the_v4_migration_restores_foreign_keys_and_refuses_violations() {
     );
     drop(store);
     thread.shutdown(JOIN_LIMIT).await.unwrap();
+}
+
+// ---- v4 → v5 (S13): rooms as a table, DM memberships, event rows ---------------
+
+const V5_ALL_1: &str = "msg-01M500000000000000000005A1";
+const V5_DM_1: &str = "msg-01M500000000000000000005D1";
+const V5_DM_2: &str = "msg-01M500000000000000000005D2";
+const V5_DM_Z: &str = "msg-01M500000000000000000005Z1";
+const V5_ALL_Z: &str = "msg-01M500000000000000000005Z2";
+
+/// Rows a v4 server could have written: agent-a and agent-b in `all`,
+/// agent-c who left it, a DM between a and b, and a DM and broadcast from
+/// agent-z, deleted since (its messages stay, its rows are gone).
+fn v4_rows() -> String {
+    format!(
+        "INSERT INTO agents (agent_id, api_key_hash, receiver_secret, receiver_url, route_version, inbox_head, created_at, name, profile_updated_at) VALUES
+           ('agent-a', '{hash_a}', 'prs_v4-a', NULL, 1, 4, '2026-10-19T00:00:00.000Z', 'A', '2026-10-19T00:00:00.000Z'),
+           ('agent-b', '{hash_b}', 'prs_v4-b', 'http://127.0.0.1:9/n', 2, 3, '2026-10-19T00:00:01.000Z', 'B', '2026-10-19T00:00:01.000Z'),
+           ('agent-c', 'hash-c', 'prs_v4-c', NULL, 1, 0, '2026-10-19T00:00:02.000Z', 'C', '2026-10-19T00:00:02.000Z');
+         INSERT INTO memberships (room_id, agent_id, joined, epoch, effective_event_seq) VALUES
+           ('all', 'agent-a', 1, 1, 0),
+           ('all', 'agent-b', 1, 1, 0),
+           ('all', 'agent-c', 0, 2, 1);
+         UPDATE sequences SET value = 5 WHERE name = 'event_seq';
+         INSERT INTO messages (message_id, event_seq, room_id, sender_id, body, reply_to, created_at) VALUES
+           ('{V5_ALL_1}', 1, 'all', 'agent-a', 'all 1', NULL, '2026-10-19T01:00:00.000Z'),
+           ('{V5_DM_1}', 2, 'dm:agent-a:agent-b', 'agent-a', 'dm 1', NULL, '2026-10-19T01:00:01.000Z'),
+           ('{V5_DM_2}', 3, 'dm:agent-a:agent-b', 'agent-b', 'dm 2', '{V5_DM_1}', '2026-10-19T01:00:02.000Z'),
+           ('{V5_DM_Z}', 4, 'dm:agent-a:agent-z', 'agent-z', 'from z', NULL, '2026-10-19T01:00:03.000Z'),
+           ('{V5_ALL_Z}', 5, 'all', 'agent-z', 'z to all', NULL, '2026-10-19T01:00:04.000Z');
+         INSERT INTO inbox_rows (agent_id, inbox_seq, message_id) VALUES
+           ('agent-a', 1, '{V5_ALL_1}'),
+           ('agent-b', 1, '{V5_ALL_1}'),
+           ('agent-b', 2, '{V5_DM_1}'),
+           ('agent-a', 2, '{V5_DM_2}'),
+           ('agent-a', 3, '{V5_DM_Z}'),
+           ('agent-a', 4, '{V5_ALL_Z}'),
+           ('agent-b', 3, '{V5_ALL_Z}');
+         INSERT INTO read_state (agent_id, read_marker) VALUES ('agent-a', 2), ('agent-b', 3), ('agent-c', 0);
+         INSERT INTO idempotency (sender_id, client_key, request_hash, message_id) VALUES
+           ('agent-a', 'key-dm', 'deadbeef', '{V5_DM_1}');
+         INSERT INTO notification_pending (agent_id, route_version, state, target_seq, last_accepted_seq, attempt, next_due_at, redrive_due_at, last_attempt_at, last_error) VALUES
+           ('agent-a', 1, 'pending', 4, NULL, 0, NULL, NULL, NULL, NULL),
+           ('agent-b', 2, 'idle', 3, 3, 0, NULL, NULL, '2026-10-19T02:00:00.000Z', NULL),
+           ('agent-c', 1, 'idle', 0, NULL, 0, NULL, NULL, NULL, NULL);
+         INSERT INTO agent_avatars (agent_id, content_type, bytes, sha256, updated_at)
+           VALUES ('agent-a', 'image/png', X'89504E470D0A1A0A00', 'abc', '2026-10-19T00:00:00.000Z');",
+        hash_a = hash_api_key(KEY_A),
+        hash_b = hash_api_key(KEY_B),
+    )
+}
+
+/// Every v4 column of every table, in a stable order. `memberships` is
+/// restricted to `all`: v5 adds DM rows next to the existing ones.
+const V4_ROWS: [(&str, &str); 9] = [
+    (
+        "agents",
+        "SELECT agent_id, api_key_hash, receiver_secret, receiver_url, route_version, inbox_head, created_at, name, gender_form, age_band, role, intro, profile_updated_at FROM agents ORDER BY agent_id",
+    ),
+    (
+        "memberships",
+        "SELECT room_id, agent_id, joined, epoch, effective_event_seq FROM memberships WHERE room_id = 'all' ORDER BY agent_id",
+    ),
+    (
+        "sequences",
+        "SELECT name, value FROM sequences ORDER BY name",
+    ),
+    (
+        "messages",
+        "SELECT message_id, event_seq, room_id, sender_id, body, reply_to, created_at FROM messages ORDER BY event_seq",
+    ),
+    (
+        "inbox_rows",
+        "SELECT agent_id, inbox_seq, message_id FROM inbox_rows ORDER BY agent_id, inbox_seq",
+    ),
+    (
+        "read_state",
+        "SELECT agent_id, read_marker FROM read_state ORDER BY agent_id",
+    ),
+    (
+        "idempotency",
+        "SELECT sender_id, client_key, request_hash, message_id FROM idempotency ORDER BY sender_id, client_key",
+    ),
+    (
+        "notification_pending",
+        "SELECT agent_id, route_version, state, target_seq, last_accepted_seq, attempt, next_due_at, redrive_due_at, last_attempt_at, last_error FROM notification_pending ORDER BY agent_id",
+    ),
+    (
+        "agent_avatars",
+        "SELECT agent_id, content_type, bytes, sha256, updated_at FROM agent_avatars ORDER BY agent_id",
+    ),
+];
+
+fn select_all(conn: &rusqlite::Connection, sql: &str) -> Result<Vec<Vec<SqlValue>>, StoreError> {
+    let mut statement = conn.prepare(sql)?;
+    let width = statement.column_count();
+    let rows = statement
+        .query_map([], |row| {
+            (0..width)
+                .map(|index| row.get::<_, SqlValue>(index))
+                .collect()
+        })?
+        .collect::<Result<Vec<Vec<SqlValue>>, _>>()?;
+    Ok(rows)
+}
+
+fn v4_snapshot(conn: &rusqlite::Connection) -> Result<Rows, StoreError> {
+    V4_ROWS
+        .iter()
+        .map(|(table, sql)| Ok((*table, select_all(conn, sql)?)))
+        .collect()
+}
+
+/// Builds a v4 database at the fixture's path, runs `extra` on it and
+/// returns its rows.
+async fn write_v4_database(fx: &Fixture, extra: &'static str) -> Rows {
+    std::fs::create_dir_all(fx.db_path().parent().unwrap()).unwrap();
+    let (store, thread) = Store::open(&fx.db_path()).unwrap();
+    let version = store
+        .run(|conn| migrations::apply_through(conn, 4))
+        .await
+        .unwrap();
+    assert_eq!(version, 4);
+    let rows = v4_rows();
+    let snapshot = store
+        .transaction(move |tx| {
+            tx.execute_batch(&rows)?;
+            tx.execute_batch(extra)?;
+            v4_snapshot(tx)
+        })
+        .await
+        .unwrap();
+    drop(store);
+    thread.shutdown(JOIN_LIMIT).await.unwrap();
+    snapshot
+}
+
+fn text(value: &str) -> SqlValue {
+    SqlValue::Text(value.to_owned())
+}
+
+#[tokio::test]
+async fn an_empty_database_starts_at_v5_with_only_the_all_room() {
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config()).await;
+    let health: Value = reqwest::get(server.url("/healthz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["schema_version"], 5);
+    assert_eq!(LATEST_SCHEMA_VERSION, 5);
+    server.shutdown().await.unwrap();
+
+    let (rooms, memberships, mentions) = fx
+        .read_db(|conn| {
+            Ok((
+                select_all(
+                    conn,
+                    "SELECT room_id, kind, title, created_by, archived_at FROM rooms",
+                )?,
+                select_all(conn, "SELECT * FROM memberships")?,
+                select_all(conn, "SELECT * FROM message_mentions")?,
+            ))
+        })
+        .await;
+    assert_eq!(
+        rooms,
+        [vec![
+            text("all"),
+            text("all"),
+            SqlValue::Null,
+            text("owner"),
+            SqlValue::Null
+        ]]
+    );
+    assert!(memberships.is_empty() && mentions.is_empty());
+    let created_at: String = fx
+        .read_db(|conn| Ok(conn.query_row("SELECT created_at FROM rooms", [], |row| row.get(0))?))
+        .await;
+    assert!(
+        created_at.len() == 24 && created_at.ends_with('Z') && created_at.as_bytes()[19] == b'.',
+        "RFC 3339 with milliseconds: {created_at}"
+    );
+}
+
+#[tokio::test]
+async fn a_v4_database_gains_rooms_dm_memberships_and_event_columns() {
+    let fx = Fixture::new();
+    let before = write_v4_database(&fx, "").await;
+    let config = fx.load_config();
+    let server = RunningServer::start(&config).await;
+    let health: Value = reqwest::get(server.url("/healthz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["schema_version"], 5);
+    server.shutdown().await.unwrap();
+
+    let after = fx.read_db(|conn| v4_snapshot(conn)).await;
+    assert_eq!(after, before, "every existing row and value is unchanged");
+
+    let (rooms, dm_members, inbox, messages, policies, mentions, violations, orphans, versions) =
+        fx.read_db(|conn| {
+            Ok((
+                select_all(
+                    conn,
+                    "SELECT room_id, kind, title, created_by, created_at, archived_at FROM rooms ORDER BY room_id",
+                )?,
+                select_all(
+                    conn,
+                    "SELECT room_id, agent_id, joined, epoch, effective_event_seq FROM memberships WHERE room_id <> 'all' ORDER BY room_id, agent_id",
+                )?,
+                select_all(conn, "SELECT DISTINCT kind, wake FROM inbox_rows")?,
+                select_all(conn, "SELECT DISTINCT wake FROM messages")?,
+                select_all(conn, "SELECT DISTINCT wake_policy FROM agents")?,
+                select_all(conn, "SELECT * FROM message_mentions")?,
+                foreign_key_violations(conn)?,
+                select_all(
+                    conn,
+                    "SELECT room_id FROM messages WHERE room_id NOT IN (SELECT room_id FROM rooms)
+                     UNION ALL SELECT room_id FROM memberships WHERE room_id NOT IN (SELECT room_id FROM rooms)",
+                )?,
+                applied_migrations(conn)?,
+            ))
+        })
+        .await;
+    assert_eq!(
+        rooms,
+        [
+            vec![
+                text("all"),
+                text("all"),
+                SqlValue::Null,
+                text("owner"),
+                text("2026-10-19T01:00:00.000Z"),
+                SqlValue::Null
+            ],
+            vec![
+                text("dm:agent-a:agent-b"),
+                text("dm"),
+                SqlValue::Null,
+                text("agent-a"),
+                text("2026-10-19T01:00:01.000Z"),
+                SqlValue::Null
+            ],
+            vec![
+                text("dm:agent-a:agent-z"),
+                text("dm"),
+                SqlValue::Null,
+                text("agent-z"),
+                text("2026-10-19T01:00:03.000Z"),
+                SqlValue::Null
+            ],
+        ]
+    );
+    let joined = |room: &str, agent: &str| {
+        vec![
+            text(room),
+            text(agent),
+            SqlValue::Integer(1),
+            SqlValue::Integer(1),
+            SqlValue::Integer(5),
+        ]
+    };
+    assert_eq!(
+        dm_members,
+        [
+            joined("dm:agent-a:agent-b", "agent-a"),
+            joined("dm:agent-a:agent-b", "agent-b"),
+            joined("dm:agent-a:agent-z", "agent-a"),
+        ],
+        "only registered members"
+    );
+    assert_eq!(inbox, [vec![text("message"), SqlValue::Integer(1)]]);
+    assert_eq!(messages, [vec![SqlValue::Integer(1)]]);
+    assert_eq!(policies, [vec![text("sender")]]);
+    assert!(mentions.is_empty());
+    assert_eq!(violations, 0, "PRAGMA foreign_key_check is empty");
+    assert!(orphans.is_empty(), "the post-check is empty");
+
+    // The backfilled rooms serve the S13 API right away.
+    let server = RunningServer::start(&config).await;
+    let api = server.api();
+    let listed = api.get("/v1/rooms", KEY_A).await;
+    let ids: Vec<&str> = listed.body["rooms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|room| room["room_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["all", "dm:agent-a:agent-z", "dm:agent-a:agent-b"]);
+    let item = api.get("/v1/inbox?after_seq=0&limit=1", KEY_A).await;
+    assert_eq!(item.body["items"][0]["kind"], "message");
+    assert_eq!(item.body["items"][0]["wake"], true);
+    assert_eq!(item.body["items"][0]["mentions"], json!([]));
+    server.shutdown().await.unwrap();
+
+    // Reopening is a no-op.
+    let server = RunningServer::start(&config).await;
+    server.shutdown().await.unwrap();
+    let (again, versions_again) = fx
+        .read_db(|conn| Ok((v4_snapshot(conn)?, applied_migrations(conn)?)))
+        .await;
+    assert_eq!(again, before);
+    assert_eq!(versions_again, versions, "nothing re-applied");
+}
+
+#[tokio::test]
+async fn a_v5_post_check_violation_rolls_back_and_refuses_to_start() {
+    let fx = Fixture::new();
+    // A message in a room the backfill cannot create a row for.
+    write_v4_database(
+        &fx,
+        "INSERT INTO messages (message_id, event_seq, room_id, sender_id, body, reply_to, created_at)
+         VALUES ('msg-01M500000000000000000005X1', 6, 'lobby', 'agent-a', 'x', NULL, '2026-10-19T03:00:00.000Z');",
+    )
+    .await;
+
+    let (store, thread) = Store::open(&fx.db_path()).unwrap();
+    let (refused, version, has_rooms) = store
+        .run(|conn| {
+            let refused = migrations::apply(conn).is_err();
+            let version = migrations::current_version(conn)?;
+            let has_rooms: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'rooms'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((refused, version, has_rooms))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (refused, version, has_rooms),
+        (true, 4, 0),
+        "rolled back to v4"
+    );
+    drop(store);
+    thread.shutdown(JOIN_LIMIT).await.unwrap();
+
+    assert!(
+        platformd::start(&fx.load_config()).await.is_err(),
+        "startup is refused"
+    );
 }

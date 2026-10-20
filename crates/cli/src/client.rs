@@ -96,8 +96,17 @@ impl ApiClient {
         &self,
         path: &str,
     ) -> Result<Decoded<T>, CliError> {
+        self.send_empty(Method::POST, path).await
+    }
+
+    /// Authenticated request without a body (room invite and archive).
+    pub async fn send_empty<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+    ) -> Result<Decoded<T>, CliError> {
         let url = self.url(path, &Query::new())?;
-        execute(self.authorized(self.http.post(url))).await
+        execute(self.authorized(self.http.request(method, url))).await
     }
 
     /// Authenticated `PUT` with a raw (non-JSON) body, e.g. an avatar image.

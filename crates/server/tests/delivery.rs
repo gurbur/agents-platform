@@ -289,6 +289,7 @@ async fn wake_post_carries_three_fields_and_the_receiver_secret() {
             "last_accepted_seq",
             "route_version",
             "receiver_url_present",
+            "wake_policy",
             "state",
             "last_attempt_at",
             "last_error"

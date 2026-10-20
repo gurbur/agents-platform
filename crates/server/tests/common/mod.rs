@@ -227,6 +227,10 @@ pub struct RawReply {
 }
 
 impl RawReply {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).and_then(|value| value.to_str().ok())
     }
@@ -243,6 +247,36 @@ impl RawReply {
         assert_eq!(self.status.as_u16(), status, "body: {body}");
         assert_eq!(body["error"]["code"], code, "body: {body}");
     }
+}
+
+/// The top-level keys of a JSON object text in document order (`Value`
+/// sorts them: serde_json is built without `preserve_order`).
+pub fn ordered_keys(text: &str) -> Vec<String> {
+    struct Keys(Vec<String>);
+    impl<'de> serde::Deserialize<'de> for Keys {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Keys;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("a JSON object")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Keys, A::Error> {
+                    let mut keys = Vec::new();
+                    while let Some(key) = map.next_key::<String>()? {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        keys.push(key);
+                    }
+                    Ok(Keys(keys))
+                }
+            }
+            deserializer.deserialize_map(Visitor)
+        }
+    }
+    serde_json::from_str::<Keys>(text).expect("a JSON object").0
 }
 
 /// The display name [`Api::register`] gives `agent_id`.
@@ -336,6 +370,28 @@ impl Api {
         }
     }
 
+    /// The top-level keys of a JSON response body in document order.
+    pub async fn keys_of(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        token: &str,
+        body: Option<serde_json::Value>,
+    ) -> Vec<String> {
+        let (headers, bytes): (&[(&str, &str)], _) = match body {
+            Some(value) => (
+                &[("content-type", "application/json")],
+                Some(serde_json::to_vec(&value).expect("serialize body")),
+            ),
+            None => (&[], None),
+        };
+        let reply = self
+            .send_bytes(method, path, Some(token), headers, bytes)
+            .await;
+        assert!(reply.status.is_success(), "{}", reply.text());
+        ordered_keys(&reply.text())
+    }
+
     pub async fn get(&self, path: &str, token: &str) -> Reply {
         self.send(reqwest::Method::GET, path, Some(token), None)
             .await
@@ -363,12 +419,19 @@ impl Api {
             .await
     }
 
-    /// `POST /v1/messages` with `reply_to` omitted.
+    /// `POST /v1/messages` with `reply_to` omitted. `to` is a room id
+    /// (`all`, `dm:…`, `room:…`, sent as `room_id`) or an agent id (sent as
+    /// the DM alias `to`); S13 refuses `"to": "all"` (`IF-WIRE-010`).
     pub async fn send_message(&self, token: &str, to: &str, body: &str, client_key: &str) -> Reply {
+        let destination = if to == "all" || to.contains(':') {
+            "room_id"
+        } else {
+            "to"
+        };
         self.post(
             "/v1/messages",
             token,
-            serde_json::json!({"to": to, "body": body, "client_key": client_key}),
+            serde_json::json!({destination: to, "body": body, "client_key": client_key}),
         )
         .await
     }

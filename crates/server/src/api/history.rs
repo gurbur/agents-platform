@@ -1,8 +1,9 @@
 //! `GET /v1/messages` and `GET /v1/messages/{message_id}` (`IF-API-HISTORY`).
 //!
-//! Query order: parameter names → `room_id` (422) → room permission (403) →
-//! cursor exclusivity (400) → cursor and `limit` values (422). Unknown or
-//! repeated parameters are rejected rather than silently ignored.
+//! Query order: parameter names → `room_id` (422) → room permission (the
+//! store's: owner 404 `unknown_room`, agent 403 `forbidden`) → cursor
+//! exclusivity (400) → cursor and `limit` values (422). Unknown or repeated
+//! parameters are rejected rather than silently ignored.
 
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
@@ -12,6 +13,7 @@ use super::query::{QueryParams, parse_seq};
 use super::{ApiError, AppState};
 use crate::auth::Principal;
 use crate::store::queries::messages::{self as message_queries, HistoryDirection, HistoryQuery};
+use crate::store::queries::rooms::{self as room_queries, ReadAccess, Viewer};
 
 const PARAMS: &[&str] = &[
     "room_id",
@@ -29,8 +31,16 @@ pub async fn list(
 ) -> Result<Json<HistoryPage>, ApiError> {
     let mut params = QueryParams::parse(query.as_deref(), PARAMS)?;
     let room = parse_room(params.get("room_id"))?;
-    if !principal.can_read_room(&room) {
-        return Err(ApiError::forbidden());
+    let viewer = viewer_of(principal);
+    let checked = room.clone();
+    let access = state
+        .store
+        .run(move |conn| room_queries::read_access(conn, &viewer, &checked))
+        .await?;
+    match access {
+        ReadAccess::Allowed => {}
+        ReadAccess::UnknownRoom => return Err(unknown_room()),
+        ReadAccess::Forbidden => return Err(ApiError::forbidden()),
     }
     let direction = parse_cursor(
         params.get("before_event_seq"),
@@ -73,15 +83,30 @@ pub async fn get_one(
     Path(raw_message_id): Path<String>,
 ) -> Result<Json<Message>, ApiError> {
     let message_id: MessageId = raw_message_id.parse().map_err(|_| message_not_found())?;
+    let viewer = viewer_of(principal);
     let message = state
         .store
-        .run(move |conn| message_queries::find_message(conn, &message_id))
+        .run(move |conn| {
+            let Some(message) = message_queries::find_message(conn, &message_id)? else {
+                return Ok(None);
+            };
+            let access = room_queries::read_access(conn, &viewer, &message.room_id)?;
+            Ok((access == ReadAccess::Allowed).then_some(message))
+        })
         .await?
         .ok_or_else(message_not_found)?;
-    if !principal.can_read_room(&message.room_id) {
-        return Err(message_not_found());
-    }
     Ok(Json(message))
+}
+
+fn viewer_of(principal: Principal) -> Viewer {
+    match principal {
+        Principal::Owner => Viewer::Owner,
+        Principal::Agent(agent_id) => Viewer::Agent(agent_id),
+    }
+}
+
+fn unknown_room() -> ApiError {
+    ApiError::not_found(codes::UNKNOWN_ROOM, "no such room")
 }
 
 fn message_not_found() -> ApiError {

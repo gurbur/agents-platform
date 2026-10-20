@@ -2,22 +2,24 @@
 # Acceptance smoke against a running platformd, through the `platform` CLI
 # and curl. Prints a PASS/FAIL/SKIP table; exits 1 if anything failed.
 #
-# Usage: deploy/smoke.sh <base-url> <owner-token-file> [--receiver-url URL] [--identity-aud AUD] [--post-as AGENT_ID] [--platform PATH]
+# Usage: deploy/smoke.sh <base-url> <owner-token-file> [--receiver-url URL] [--receiver-log FILE] [--identity-aud AUD] [--post-as AGENT_ID] [--platform PATH]
 #   <base-url>          e.g. http://100.x.y.z:7340 or http://127.0.0.1:7340
 #   <owner-token-file>  file holding the owner token (read, never printed)
 #   --receiver-url URL  a mock receiver the server can reach (deploy/mock-receiver.py);
-#                       without it the receiver scenario is SKIP
+#                       without it the receiver scenarios (5, 19-21) are SKIP
+#   --receiver-log FILE that mock receiver's stdout, to check the wake body keys (21)
 #   --identity-aud AUD  audience for the identity token scenario (default: garage-docs);
 #                       a hub without [identity] makes that scenario SKIP
 #   --post-as AGENT_ID  a registered agent in the hub's [owner] post_as (e.g. human);
-#                       without it the owner barge-in part of the room post scenario and
-#                       the protected-id part of the deletion scenario are skipped
+#                       without it the owner barge-in parts (14, 18) and the
+#                       protected-id part of the deletion scenario are skipped
 #   --platform PATH     platform CLI binary (default: `platform` on PATH)
 #
 # Every run registers new agents named smoke-<ulid>, so runs never collide.
 # The `all` scenario fans out to every agent joined to `all`, including real
 # ones. At the end the smoke agents are deleted (their messages stay in the
-# history, like any deleted agent's).
+# history, like any deleted agent's). The smoke topic rooms room:smoke-<ulid>
+# stay, archived: rooms are never deleted (S13).
 set -euo pipefail
 
 # shellcheck source=deploy/lib.sh
@@ -36,6 +38,7 @@ readonly AVATAR_MAX_BYTES=524288
 base_url=""
 owner_token_file=""
 receiver_url=""
+receiver_log=""
 identity_aud="$DEFAULT_IDENTITY_AUD"
 post_as=""
 platform_bin=platform
@@ -47,12 +50,12 @@ result_states=()
 result_notes=()
 
 # Filled in by the scenarios.
-agent_a="" agent_b="" agent_r="" agent_z=""
-all_message_id="" dm_message_id="" dm_room=""
+agent_a="" agent_b="" agent_c="" agent_r="" agent_z=""
+all_message_id="" dm_message_id="" dm_room="" topic_room="" wake_room=""
 snapshot_head=""
 
 usage() {
-  sed -n '5,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '5,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -63,6 +66,11 @@ parse_args() {
       --receiver-url)
         [[ $# -ge 2 ]] || usage
         receiver_url="$2"
+        shift
+        ;;
+      --receiver-log)
+        [[ $# -ge 2 ]] || usage
+        receiver_log="$2"
         shift
         ;;
       --identity-aud)
@@ -198,10 +206,15 @@ expect_status() {
   return 1
 }
 
+# send_as SENDER DESTINATION BODY KEY: a room id (`all`, `dm:…`, `room:…`)
+# goes out as `room_id`, an agent id as the DM alias `to` (S13: `to` never
+# takes `all`).
 send_as() {
-  local sender="$1" to="$2" body="$3" key="$4"
+  local sender="$1" to="$2" body="$3" key="$4" field=to
+  [[ "$to" != all && "$to" != *:* ]] || field=room_id
   api POST /v1/messages "$(token_file "$sender")" \
-    "$(jq -nc --arg to "$to" --arg body "$body" --arg key "$key" '{to: $to, body: $body, client_key: $key}')"
+    "$(jq -nc --arg field "$field" --arg to "$to" --arg body "$body" --arg key "$key" \
+      '{($field): $to, body: $body, client_key: $key}')"
 }
 
 record() {
@@ -400,6 +413,7 @@ inbox_has() {
 }
 
 check_all_fanout() {
+  ack_head "$agent_a" || return 1
   send_as "$agent_a" all "smoke all" smoke-all
   expect_status 201 "send to all" || return 1
   all_message_id="$(jq -r .message_id <<<"$http_body")"
@@ -411,9 +425,39 @@ check_all_fanout() {
     note="sender inbox lacks its own all message"
     return 1
   }
+  not_woken "$agent_a" || {
+    note="the sender's own row woke it: $(cli "$owner_token_file" delivery "$agent_a")"
+    return 1
+  }
+  note="sender has its own row and owes no wake"
+}
+
+delivery_field() {
+  cli "$owner_token_file" delivery "$1" | jq -c ".$2"
+}
+
+head_of() {
+  cli "$owner_token_file" delivery "$1" | jq -r .inbox_head_seq
+}
+
+# Moves AGENT's marker to its head, so it owes no wake.
+ack_head() {
+  local head
+  head="$(head_of "$1")" || return 1
+  cli "$(token_file "$1")" inbox read --through-seq "$head" >/dev/null
+}
+
+# Whether AGENT owes no wake: `pending_seq` is null (its own rows and quiet
+# rows never set it, ADR-0011). Callers move the marker to the head first
+# (ack_head) so only the event under test counts.
+not_woken() {
+  local json
+  json="$(cli "$owner_token_file" delivery "$1")" || return 1
+  jq -e '.pending_seq == null' >/dev/null <<<"$json"
 }
 
 check_dm() {
+  ack_head "$agent_a" || return 1
   send_as "$agent_a" "$agent_b" "smoke dm" smoke-dm
   expect_status 201 "send DM" || return 1
   dm_message_id="$(jq -r .message_id <<<"$http_body")"
@@ -422,10 +466,14 @@ check_dm() {
     note="recipient inbox lacks the DM"
     return 1
   }
-  if inbox_has "$agent_a" "$dm_message_id"; then
-    note="the DM landed in the sender's inbox"
+  inbox_has "$agent_a" "$dm_message_id" || {
+    note="the sender's inbox lacks its own DM (S13: every member gets the event)"
     return 1
-  fi
+  }
+  not_woken "$agent_a" || {
+    note="the sender's own DM woke it"
+    return 1
+  }
   local json
   json="$(cli "$(token_file "$agent_a")" history --room "$dm_room")" || {
     note="sender history of $dm_room failed: $(cli_error)"
@@ -631,11 +679,11 @@ check_identity_token() {
 }
 
 # Scenario 14, list half: the owner sees the smoke DM room with its two
-# members and `all`; an agent key is refused.
+# members and `all`; an agent lists its own rooms (S13), not others' DMs.
 check_rooms_list() {
   local json
-  json="$(cli "$owner_token_file" rooms)" || {
-    note="platform rooms failed: $(cli_error)"
+  json="$(cli "$owner_token_file" room list)" || {
+    note="platform room list failed: $(cli_error)"
     return 1
   }
   expect_json "$json" "any(.rooms[]; .room_id == \"$dm_room\" and .kind == \"dm\"
@@ -643,40 +691,48 @@ check_rooms_list() {
       and (.last_sender_id | type == \"string\") and .message_count >= 1)" \
     "rooms lacks $dm_room with its members" || return 1
   expect_json "$json" 'any(.rooms[]; .room_id == "all" and .kind == "all")' "rooms lacks all" || return 1
-  api GET /v1/rooms "$(token_file "$agent_a")"
-  expect_status 403 "agent key on GET /v1/rooms" || return 1
-  expect_json "$http_body" '.error.code == "forbidden"' "agent rooms code: $http_body" || return 1
-  note="$(jq '.rooms | length' <<<"$json") rooms, agent 403"
+  local mine
+  mine="$(cli "$(token_file "$agent_b")" room list)" || {
+    note="room list as $agent_b failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$mine" "any(.rooms[]; .room_id == \"$dm_room\") and any(.rooms[]; .room_id == \"all\")
+      and all(.rooms[]; .kind != \"dm\" or (.members | index(\"$agent_b\")) != null)" \
+    "$agent_b's room list is not its own rooms" || return 1
+  note="$(jq '.rooms | length' <<<"$json") rooms (owner), $(jq '.rooms | length' <<<"$mine") for $agent_b"
 }
 
-# Scenario 14, post half: agent key and a non-allowlisted sender are 403;
-# with --post-as the owner barges into the smoke DM as that agent, both
-# smoke agents get the row, the room history shows it, a replay is 200 and
-# a DM room with an unregistered member is 404. Bodies stay out of notes.
+# Scenario 14, post half: an agent key sending sender_id is 422 and a
+# sender outside post_as 403; with --post-as the owner barges into the
+# smoke DM as that agent (S13: POST /v1/messages with sender_id), both smoke
+# agents get the row, the room history shows it, a replay is 200 and a DM
+# room with an unregistered member is 404. Bodies stay out of notes.
 check_owner_room_post() {
-  local path="/v1/rooms/$dm_room/messages" request
-  request="$(jq -nc --arg sender "$agent_a" '{sender_id: $sender, body: "smoke barge-in", client_key: "smoke-barge"}')"
-  api POST "$path" "$(token_file "$agent_a")" "$request"
-  expect_status 403 "agent key on room post" || return 1
-  expect_json "$http_body" '.error.code == "forbidden"' "agent post code: $http_body" || return 1
-  api POST "$path" "$owner_token_file" "$request"
+  local request
+  request="$(jq -nc --arg sender "$agent_a" --arg room "$dm_room" \
+    '{sender_id: $sender, room_id: $room, body: "smoke barge-in", client_key: "smoke-barge"}')"
+  api POST /v1/messages "$(token_file "$agent_a")" "$request"
+  expect_status 422 "agent key with sender_id" || return 1
+  expect_json "$http_body" '.error.code == "unexpected_field" and .error.details.field == "sender_id"' \
+    "agent sender_id code: $http_body" || return 1
+  api POST /v1/messages "$owner_token_file" "$request"
   expect_status 403 "sender outside post_as" || return 1
   expect_json "$http_body" '.error.code == "forbidden" and .error.details.field == "sender_id"' \
     "allowlist code: $http_body" || return 1
   if [[ -z "$post_as" ]]; then
-    skip_note="403s pass; barge-in needs --post-as"
+    skip_note="422/403 pass; barge-in needs --post-as"
     return 0
   fi
 
   local key json message_id
   key="smoke-barge-$(new_ulid)"
-  json="$(cli "$owner_token_file" room post "$dm_room" --as "$post_as" --body "smoke barge-in" \
-    --reply-to "$dm_message_id" --client-key "$key")" || {
-    note="platform room post as $post_as failed: $(cli_error)"
+  json="$(cli "$owner_token_file" send --as "$post_as" --room "$dm_room" --body "smoke barge-in" \
+    --client-key "$key")" || {
+    note="platform send --as $post_as failed: $(cli_error)"
     return 1
   }
-  expect_json "$json" ".room_id == \"$dm_room\" and .sender_id == \"$post_as\" and .reply_to == \"$dm_message_id\"" \
-    "room post response does not match" || return 1
+  expect_json "$json" ".room_id == \"$dm_room\" and .sender_id == \"$post_as\"" \
+    "owner post response does not match" || return 1
   message_id="$(jq -r .message_id <<<"$json")"
   local agent
   for agent in "$agent_a" "$agent_b"; do
@@ -692,25 +748,28 @@ check_owner_room_post() {
   expect_json "$json" "any(.items[]; .message_id == \"$message_id\" and .sender_id == \"$post_as\")" \
     "room history lacks the barge-in" || return 1
 
-  request="$(jq -nc --arg sender "$post_as" --arg key "$key" --arg reply "$dm_message_id" \
-    '{sender_id: $sender, body: "smoke barge-in", client_key: $key, reply_to: $reply}')"
-  api POST "$path" "$owner_token_file" "$request"
-  expect_status 200 "replayed room post" || return 1
+  request="$(jq -nc --arg sender "$post_as" --arg key "$key" --arg room "$dm_room" \
+    '{sender_id: $sender, room_id: $room, body: "smoke barge-in", client_key: $key}')"
+  api POST /v1/messages "$owner_token_file" "$request"
+  expect_status 200 "replayed owner post" || return 1
   expect_json "$http_body" ".message_id == \"$message_id\" and .deduplicated == true" \
     "replay did not return the original" || return 1
 
-  local ghost unknown_room
-  ghost="smoke-unknown-$(new_ulid)"
-  if [[ "$agent_a" < "$ghost" ]]; then
-    unknown_room="dm:$agent_a:$ghost"
-  else
-    unknown_room="dm:$ghost:$agent_a"
-  fi
-  api POST "/v1/rooms/$unknown_room/messages" "$owner_token_file" \
-    "$(jq -nc --arg sender "$post_as" '{sender_id: $sender, body: "x", client_key: "smoke-unknown-room"}')"
+  api POST /v1/messages "$owner_token_file" \
+    "$(jq -nc --arg sender "$post_as" --arg room "$(dm_room_of "$agent_a" "smoke-unknown-$(new_ulid)")" \
+      '{sender_id: $sender, room_id: $room, body: "x", client_key: "smoke-unknown-room"}')"
   expect_status 404 "room with an unregistered member" || return 1
   expect_json "$http_body" '.error.code == "unknown_room"' "unknown room code: $http_body" || return 1
-  note="as $post_as: both members got it, replay 200, unknown_room 404, 403s"
+  note="as $post_as: both members got it, replay 200, unknown_room 404, 422/403"
+}
+
+# The canonical DM room id of two agent ids.
+dm_room_of() {
+  if [[ "$1" < "$2" ]]; then
+    printf 'dm:%s:%s\n' "$1" "$2"
+  else
+    printf 'dm:%s:%s\n' "$2" "$1"
+  fi
 }
 
 # Scenario 16: Z sends a DM to A and is deleted; Z's key is 401, its inbox
@@ -747,8 +806,8 @@ check_agent_deletion() {
   }
   expect_json "$json" "any(.items[]; .message_id == \"$message_id\" and .sender_id == \"$agent_z\")" \
     "the deleted agent's DM left the history" || return 1
-  json="$(cli "$owner_token_file" rooms)" || return 1
-  expect_json "$json" "any(.rooms[]; .room_id == \"$room\")" "rooms no longer lists $room" || return 1
+  json="$(cli "$owner_token_file" room list)" || return 1
+  expect_json "$json" "any(.rooms[]; .room_id == \"$room\")" "room list no longer lists $room" || return 1
   send_as "$agent_a" "$agent_z" "anyone there?" "smoke-to-deleted-$(new_ulid)"
   expect_status 404 "DM to the deleted agent" || return 1
   expect_json "$http_body" '.error.code == "unknown_recipient"' "DM code: $http_body" || return 1
@@ -777,17 +836,283 @@ check_agent_deletion() {
   note="401, 404s, history and room kept, re-register seq 1, agent 403, protected: $protected"
 }
 
+# ---- S13: topic rooms, reply_to routing, quiet sends, mentions, wake_policy ----
+
+# Runs `platform` and expects exit 1 with CODE on stderr.
+expect_cli_error() {
+  local code="$1" what="$2" rc=0
+  shift 2
+  cli "$@" >/dev/null || rc=$?
+  if [[ "$rc" == 1 ]] && grep -q "platform: $code:" "$workdir/cli.stderr"; then
+    return 0
+  fi
+  note="$what: exit $rc, expected 1 $code ($(cli_error))"
+  return 1
+}
+
+history_status() {
+  api GET "/v1/messages?room_id=$2" "$(token_file "$1")"
+}
+
+# Scenario 17: the owner creates a topic room and invites A and B; A's
+# message reaches B and A's own inbox without waking A; uninvited C can
+# neither read nor write, reads the room from the start once invited, and
+# loses it when removed; an agent key cannot create rooms; room lists are
+# per agent; an archived room is read-only. The room stays archived.
+check_topic_room() {
+  topic_room="room:smoke-$(new_ulid)"
+  register "$agent_c" || return 1
+  local json message_id key_a key_c
+  key_a="$(token_file "$agent_a")"
+  key_c="$(token_file "$agent_c")"
+  json="$(cli "$owner_token_file" room create "$topic_room" --title "smoke room")" || {
+    note="room create failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" ".kind == \"topic\" and .members == [] and .created_by == \"owner\"" \
+    "room create output: $json" || return 1
+  local agent
+  for agent in "$agent_a" "$agent_b"; do
+    cli "$owner_token_file" room invite "$topic_room" "$agent" >/dev/null || {
+      note="room invite $agent failed: $(cli_error)"
+      return 1
+    }
+  done
+  ack_head "$agent_a" || return 1
+  json="$(cli "$key_a" send --room "$topic_room" --body "smoke topic")" || {
+    note="send to $topic_room failed: $(cli_error)"
+    return 1
+  }
+  message_id="$(jq -r .message_id <<<"$json")"
+  inbox_has "$agent_b" "$message_id" || {
+    note="$agent_b inbox lacks the topic message"
+    return 1
+  }
+  inbox_has "$agent_a" "$message_id" || {
+    note="$agent_a inbox lacks its own topic message"
+    return 1
+  }
+  not_woken "$agent_a" || {
+    note="the sender was woken by its own topic message"
+    return 1
+  }
+
+  history_status "$agent_c" "$topic_room"
+  expect_status 403 "uninvited history" || return 1
+  expect_cli_error not_room_member "uninvited send" "$key_c" send --room "$topic_room" --body x || return 1
+  cli "$owner_token_file" room invite "$topic_room" "$agent_c" >/dev/null || return 1
+  json="$(cli "$key_c" history --room "$topic_room")" || {
+    note="invited history failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" "any(.items[]; .message_id == \"$message_id\")" \
+    "the invited agent does not read the earlier message" || return 1
+  cli "$owner_token_file" room remove "$topic_room" "$agent_c" >/dev/null || return 1
+  history_status "$agent_c" "$topic_room"
+  expect_status 403 "history after removal" || return 1
+
+  expect_cli_error forbidden "agent room create" "$key_a" room create "room:smoke-$(new_ulid)" || return 1
+  json="$(cli "$key_a" room list)" || return 1
+  expect_json "$json" "any(.rooms[]; .room_id == \"$topic_room\")" "$agent_a does not list $topic_room" || return 1
+  json="$(cli "$key_c" room list)" || return 1
+  expect_json "$json" "all(.rooms[]; .room_id != \"$topic_room\")" "$agent_c still lists $topic_room" || return 1
+
+  json="$(cli "$owner_token_file" room archive "$topic_room")" || {
+    note="room archive failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" '.archived_at | type == "string"' "archive output: $json" || return 1
+  expect_cli_error room_archived "send to the archived room" "$key_a" send --room "$topic_room" --body x || return 1
+  history_status "$agent_a" "$topic_room"
+  expect_status 200 "history of the archived room" || return 1
+  note="$topic_room: B and A rows, C 403/invited/removed, agent create 403, archived 409/200"
+}
+
+# Scenario 18: B answers A's DM with --reply-to alone and lands in the DM;
+# --reply-to with --room is a CLI usage error and the raw request 422
+# invalid_destination. With --post-as: the owner barges in as that agent,
+# A answers with --reply-to and --mention, and the answer reaches that
+# agent's inbox (read through the owner, which acks nothing).
+check_reply_to_routing() {
+  local json key_a key_b rc=0
+  key_a="$(token_file "$agent_a")"
+  key_b="$(token_file "$agent_b")"
+  json="$(cli "$key_b" send --reply-to "$dm_message_id" --body "smoke answer")" || {
+    note="send --reply-to failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" ".room_id == \"$dm_room\" and .reply_to == \"$dm_message_id\"" \
+    "the answer is not in $dm_room: $json" || return 1
+  cli "$key_b" send --reply-to "$dm_message_id" --room all --body x >/dev/null || rc=$?
+  [[ "$rc" == 2 ]] || {
+    note="--reply-to with --room: exit $rc, expected 2"
+    return 1
+  }
+  api POST /v1/messages "$key_b" \
+    "$(jq -nc --arg reply "$dm_message_id" '{room_id: "all", reply_to: $reply, body: "x", client_key: "smoke-both"}')"
+  expect_status 422 "room_id with reply_to" || return 1
+  expect_json "$http_body" '.error.code == "invalid_destination"' "destination code: $http_body" || return 1
+  if [[ -z "$post_as" ]]; then
+    skip_note="reply_to routing passes; the barge-in answer needs --post-as"
+    return 0
+  fi
+
+  local barge answer head
+  barge="$(cli "$owner_token_file" send --as "$post_as" --room "$dm_room" --body "smoke barge-in 2" | jq -r .message_id)" || {
+    note="owner barge-in failed: $(cli_error)"
+    return 1
+  }
+  head="$(cli "$owner_token_file" delivery "$post_as" | jq -r .inbox_head_seq)" || return 1
+  json="$(cli "$key_a" send --reply-to "$barge" --mention "$post_as" --body "smoke answer to $post_as")" || {
+    note="answer with --mention failed: $(cli_error)"
+    return 1
+  }
+  answer="$(jq -r .message_id <<<"$json")"
+  expect_json "$json" ".room_id == \"$dm_room\" and .mentions == [\"$post_as\"]" "answer: $json" || return 1
+  api GET "/v1/agents/$post_as/inbox?after_seq=$head&limit=100" "$owner_token_file"
+  expect_status 200 "owner view of $post_as's inbox" || return 1
+  expect_json "$http_body" "any(.items[]; .message_id == \"$answer\")" \
+    "$post_as's inbox lacks the answer that mentions it" || return 1
+  note="reply in $dm_room, CLI exit 2, 422; $post_as got the mention (its own history 403 needs its key)"
+}
+
+# Polls AGENT's delivery until `last_accepted_seq` is SEQ.
+wait_accepted() {
+  local agent="$1" seq="$2" json deadline=$((SECONDS + RECEIVER_WAIT_SECS))
+  while :; do
+    json="$(cli "$owner_token_file" delivery "$agent")" || return 1
+    jq -e --arg seq "$seq" '.last_accepted_seq == $seq' >/dev/null <<<"$json" && return 0
+    if ((SECONDS >= deadline)); then
+      note="$agent: no 202 for $seq within ${RECEIVER_WAIT_SECS}s: $json"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# Watches AGENT for RECEIVER_WAIT_SECS: it must stay idle with
+# `last_accepted_seq` LAST (a JSON value, e.g. null or "4").
+stays_quiet() {
+  local agent="$1" last="$2" json deadline=$((SECONDS + RECEIVER_WAIT_SECS))
+  while ((SECONDS < deadline)); do
+    json="$(cli "$owner_token_file" delivery "$agent")" || return 1
+    jq -e --argjson last "$last" '.state == "idle" and .pending_seq == null and .last_accepted_seq == $last' \
+      >/dev/null <<<"$json" || {
+      note="$agent woke for a quiet event: $json"
+      return 1
+    }
+    sleep 1
+  done
+}
+
+# Scenario 19: with B's marker at its head and a receiver set, a quiet DM
+# moves B's head but wakes nothing; the next default DM is posted with the
+# new head, covering the quiet row.
+check_quiet_send() {
+  local key_a last head json
+  key_a="$(token_file "$agent_a")"
+  ack_head "$agent_b" || return 1
+  cli "$(token_file "$agent_b")" receiver set "$agent_b" "$receiver_url" >/dev/null || {
+    note="receiver set $agent_b failed: $(cli_error)"
+    return 1
+  }
+  last="$(delivery_field "$agent_b" last_accepted_seq)" || return 1
+  head="$(head_of "$agent_b")" || return 1
+  json="$(cli "$key_a" send --to "$agent_b" --quiet --body "smoke quiet")" || {
+    note="quiet send failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" '.wake == false' "quiet send output: $json" || return 1
+  [[ "$(head_of "$agent_b")" == $((head + 1)) ]] || {
+    note="the quiet row did not move $agent_b's head"
+    return 1
+  }
+  stays_quiet "$agent_b" "$last" || return 1
+  cli "$key_a" send --to "$agent_b" --body "smoke wake" >/dev/null || return 1
+  wait_accepted "$agent_b" "$((head + 2))" || return 1
+  note="head moved, idle for ${RECEIVER_WAIT_SECS}s, then 202 at $((head + 2))"
+}
+
+# Scenario 20: in a topic room of A, B and C, a quiet send mentioning B
+# wakes B only; mentioning a non-member is 422 mention_not_member and
+# mentioning oneself 422 invalid_field (the CLI does not filter it).
+check_mention_wake() {
+  wake_room="room:smoke-$(new_ulid)"
+  local key_a key_c last_c head_b
+  key_a="$(token_file "$agent_a")"
+  key_c="$(token_file "$agent_c")"
+  cli "$owner_token_file" room create "$wake_room" >/dev/null || {
+    note="room create failed: $(cli_error)"
+    return 1
+  }
+  local agent
+  for agent in "$agent_a" "$agent_b" "$agent_c"; do
+    cli "$owner_token_file" room invite "$wake_room" "$agent" >/dev/null || return 1
+  done
+  ack_head "$agent_b" && ack_head "$agent_c" || return 1
+  cli "$key_c" receiver set "$agent_c" "$receiver_url" >/dev/null || {
+    note="receiver set $agent_c failed: $(cli_error)"
+    return 1
+  }
+  last_c="$(delivery_field "$agent_c" last_accepted_seq)" || return 1
+  head_b="$(head_of "$agent_b")" || return 1
+  cli "$key_a" send --room "$wake_room" --quiet --mention "$agent_b" --body "smoke b?" >/dev/null || {
+    note="quiet send with --mention failed: $(cli_error)"
+    return 1
+  }
+  wait_accepted "$agent_b" "$((head_b + 1))" || return 1
+  stays_quiet "$agent_c" "$last_c" || return 1
+  api POST /v1/messages "$key_a" \
+    "$(jq -nc --arg to "$agent_b" --arg c "$agent_c" '{to: $to, body: "x", client_key: "smoke-outsider", mentions: [$c]}')"
+  expect_status 422 "mention of a non-member" || return 1
+  expect_json "$http_body" '.error.code == "mention_not_member"' "outsider code: $http_body" || return 1
+  expect_cli_error invalid_field "self mention" "$key_a" send --room "$wake_room" --mention "$agent_a" --body x || return 1
+  note="$agent_b woken, $agent_c idle, outsider 422, self 422"
+}
+
+# Scenario 21: C switches to wake_policy=always and wakes for a quiet send
+# while B does not; the wake body stays exactly {v, agent_id, inbox_seq}
+# (read from --receiver-log when given).
+check_wake_policy_always() {
+  local key_a key_c json last_b head_c
+  key_a="$(token_file "$agent_a")"
+  key_c="$(token_file "$agent_c")"
+  json="$(cli "$key_c" receiver set "$agent_c" "$receiver_url" --wake-policy always)" || {
+    note="receiver set --wake-policy failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" '.wake_policy == "always"' "receiver set output: $json" || return 1
+  ack_head "$agent_b" || return 1
+  last_b="$(delivery_field "$agent_b" last_accepted_seq)" || return 1
+  head_c="$(head_of "$agent_c")" || return 1
+  cli "$key_a" send --room "$wake_room" --quiet --body "smoke fyi" >/dev/null || return 1
+  wait_accepted "$agent_c" "$((head_c + 1))" || return 1
+  stays_quiet "$agent_b" "$last_b" || return 1
+  if [[ -z "$receiver_log" ]]; then
+    note="$agent_c woken, $agent_b idle (wake body keys unchecked: no --receiver-log)"
+    return 0
+  fi
+  local body
+  body="$(grep -F "\"agent_id\":\"$agent_c\"" "$receiver_log" | tail -n 1 | sed 's/.*body=//')"
+  expect_json "$body" "(keys == [\"agent_id\", \"inbox_seq\", \"v\"]) and .inbox_seq == \"$((head_c + 1))\" and .v == 1" \
+    "wake body is not exactly {v, agent_id, inbox_seq}: $body" || return 1
+  note="$agent_c woken, $agent_b idle, body $body"
+}
+
 # Deletes the smoke agents so they stop accumulating; their messages stay.
 check_cleanup() {
   local agent failed=""
-  for agent in "$agent_a" "$agent_b" ${agent_r:+"$agent_r"}; do
+  if [[ -n "$wake_room" ]]; then
+    cli "$owner_token_file" room archive "$wake_room" >/dev/null || failed=" $wake_room:$(cli_error)"
+  fi
+  for agent in "$agent_a" "$agent_b" ${agent_c:+"$agent_c"} ${agent_r:+"$agent_r"}; do
     cli "$owner_token_file" agent delete "$agent" --yes >/dev/null || failed="$failed $agent:$(cli_error)"
   done
   [[ -z "$failed" ]] || {
     note="cleanup failed:$failed"
     return 1
   }
-  note="smoke agents deleted"
+  note="smoke agents deleted, smoke rooms archived"
 }
 
 # ---- main ------------------------------------------------------------------
@@ -799,7 +1124,7 @@ print_table() {
     printf '%-36s %-5s %s\n' "${result_names[$index]}" "${result_states[$index]}" "${result_notes[$index]}"
     [[ "${result_states[$index]}" != FAIL ]] || failures=$((failures + 1))
   done
-  printf '\nagents: %s %s %s%s\n' "$agent_a" "$agent_b" "$agent_z" "${agent_r:+ $agent_r}"
+  printf '\nagents: %s %s %s %s%s\n' "$agent_a" "$agent_b" "$agent_c" "$agent_z" "${agent_r:+ $agent_r}"
   if [[ "$failures" -gt 0 ]]; then
     printf 'smoke: %d FAIL\n' "$failures"
     return 1
@@ -818,6 +1143,7 @@ main() {
   agent_a="smoke-$(new_ulid)"
   agent_b="smoke-$(new_ulid)"
   agent_z="smoke-$(new_ulid)"
+  agent_c="smoke-$(new_ulid)"
   log "smoke against $base_url as $agent_a, $agent_b"
 
   scenario "healthz / platform health" check_health
@@ -830,7 +1156,7 @@ main() {
   scenario "directory profile (13)" check_directory_profile
   scenario "directory avatar (15)" check_directory_avatar
   scenario "all fanout (1)" check_all_fanout
-  scenario "DM recipient-only (2)" check_dm
+  scenario "DM to both members (2)" check_dm
   scenario "unknown 404 / self DM 422 (2)" check_dm_errors
   scenario "idempotency 200 / 409 (4)" check_idempotency
   scenario "inbox paging snapshot (10)" check_inbox_paging
@@ -848,6 +1174,18 @@ main() {
   fi
   scenario "identity token" check_identity_token
   scenario "agent deletion (16)" check_agent_deletion
+  scenario "topic room (17)" check_topic_room
+  scenario "reply_to routing (18)" check_reply_to_routing
+  if [[ -n "$receiver_url" ]]; then
+    scenario "quiet send (19)" check_quiet_send
+    scenario "mention wake (20)" check_mention_wake
+    scenario "wake_policy always (21)" check_wake_policy_always
+  else
+    local skipped
+    for skipped in "quiet send (19)" "mention wake (20)" "wake_policy always (21)"; do
+      record "$skipped" SKIP "no --receiver-url"
+    done
+  fi
   scenario "cleanup (delete smoke agents)" check_cleanup
   print_table
 }

@@ -1,6 +1,7 @@
 //! Request and response bodies for agent registration, directory, receiver
-//! route, `all` membership and token rotation (API_V1 "Agent 등록과
-//! directory", "Receiver 경로와 membership", "Token rotation"; `IF-WIRE-001`).
+//! route and wake policy, `all` membership and token rotation (API_V1
+//! "Agent 등록과 directory", "Receiver 경로와 membership", "Token rotation";
+//! `IF-WIRE-001`, `IF-WIRE-004`).
 //!
 //! Request types reject unknown fields. `agent_id`, `name` and
 //! `receiver_url` arrive as plain strings so the server can answer format
@@ -8,10 +9,12 @@
 //! `invalid_receiver_url`) instead of a generic deserialization error.
 
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{AgentId, AgentProfile, AvatarSummary, Seq};
+use crate::profile::present_patch;
+use crate::{AgentId, AgentProfile, AvatarSummary, FieldPatch, Seq, UnknownValue};
 
 /// Placeholder printed instead of a credential by `Debug` impls.
 const REDACTED: &str = "<redacted>";
@@ -85,6 +88,8 @@ pub struct OwnerAgentEntry {
     pub joined_all: bool,
     pub profile: AgentProfile,
     pub receiver_url: Option<String>,
+    /// The stored receiver setting, also without a receiver (S13).
+    pub wake_policy: WakePolicy,
     pub route_version: i64,
     pub created_at: String,
     pub delivery: DeliverySummary,
@@ -109,13 +114,62 @@ pub enum DeliveryState {
     Blocked,
 }
 
-/// `PATCH /v1/agents/{agent_id}/receiver` body. `receiver_url` must be
-/// present; `null` disconnects the route.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Which events wake an agent's receiver (`IF-RCV-WAKESET`): `sender`
+/// (the default) follows the sender's `wake` and `mentions`; `always` also
+/// wakes for quiet events. The sender is never woken by its own event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakePolicy {
+    #[default]
+    Sender,
+    Always,
+}
+
+impl WakePolicy {
+    pub const ALL: [WakePolicy; 2] = [WakePolicy::Sender, WakePolicy::Always];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WakePolicy::Sender => "sender",
+            WakePolicy::Always => "always",
+        }
+    }
+}
+
+impl FromStr for WakePolicy {
+    type Err = UnknownValue;
+
+    /// Exact spelling only, like the profile enums.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|policy| policy.as_str() == s)
+            .ok_or(UnknownValue)
+    }
+}
+
+impl fmt::Display for WakePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// `PATCH /v1/agents/{agent_id}/receiver` body: `receiver_url` (`null`
+/// disconnects the route) and `wake_policy`, at least one of them; an
+/// omitted key keeps the stored value (`IF-WIRE-004`). `wake_policy`
+/// arrives as a string so a wrong spelling is `invalid_field`; like any
+/// optional field, `null` means the same as an omitted key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateReceiverRequest {
-    #[serde(deserialize_with = "present_nullable")]
-    pub receiver_url: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "present_patch",
+        skip_serializing_if = "FieldPatch::is_keep"
+    )]
+    pub receiver_url: FieldPatch<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_policy: Option<String>,
 }
 
 /// `PATCH /v1/agents/{agent_id}/receiver` 200 body.
@@ -124,6 +178,7 @@ pub struct ReceiverResponse {
     pub agent_id: AgentId,
     pub receiver_url: Option<String>,
     pub route_version: i64,
+    pub wake_policy: WakePolicy,
     pub state: DeliveryState,
 }
 
@@ -223,15 +278,28 @@ mod tests {
     }
 
     #[test]
-    fn receiver_request_requires_the_key_but_accepts_null() {
+    fn receiver_request_keeps_omitted_keys_and_serializes_only_given_ones() {
         let null: UpdateReceiverRequest =
             serde_json::from_value(json!({"receiver_url": null})).unwrap();
-        assert_eq!(null.receiver_url, None);
+        assert_eq!(null.receiver_url, FieldPatch::Clear);
+        let empty: UpdateReceiverRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(empty, UpdateReceiverRequest::default());
 
-        let err = serde_json::from_value::<UpdateReceiverRequest>(json!({})).unwrap_err();
-        assert!(
-            err.to_string().contains("missing field `receiver_url`"),
-            "{err}"
+        let request = UpdateReceiverRequest {
+            receiver_url: FieldPatch::Set("http://r/n".into()),
+            wake_policy: Some("always".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            json!({"receiver_url": "http://r/n", "wake_policy": "always"})
+        );
+        let unset = UpdateReceiverRequest {
+            receiver_url: FieldPatch::Clear,
+            wake_policy: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&unset).unwrap(),
+            json!({"receiver_url": null})
         );
     }
 

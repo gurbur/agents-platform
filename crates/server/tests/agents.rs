@@ -139,6 +139,7 @@ async fn directory_never_contains_credentials() {
                 "joined_all",
                 "profile",
                 "receiver_url",
+                "wake_policy",
                 "route_version",
                 "created_at",
                 "delivery",
@@ -384,8 +385,9 @@ async fn missing_or_mistyped_fields_are_invalid_field() {
     let patch = api
         .patch(&receiver_path("agent-a"), &agent.api_key, json!({}))
         .await;
+    // S13: `{}` names neither receiver_url nor wake_policy (IF-WIRE-004).
     patch.assert_error(422, "invalid_field");
-    assert_eq!(patch.error_field(), Some("receiver_url"));
+    assert_eq!(patch.error_field(), None);
 
     let put = api
         .put(
@@ -615,7 +617,13 @@ async fn receiver_route_version_changes_only_with_the_value() {
     assert_eq!(connected.status, 200, "{}", connected.body);
     assert_eq!(
         keys(&connected.body),
-        set(&["agent_id", "receiver_url", "route_version", "state"])
+        set(&[
+            "agent_id",
+            "receiver_url",
+            "route_version",
+            "wake_policy",
+            "state"
+        ])
     );
     assert_eq!(connected.body["agent_id"], "agent-a");
     assert_eq!(connected.body["receiver_url"], "http://receiver.test/a");

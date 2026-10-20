@@ -1,218 +1,148 @@
-//! S10 CLI: `platform rooms` and `platform room post` against an in-process
-//! platformd with `[owner] post_as = ["human"]`.
+//! S13 CLI rooms and event output (`IF-CLI-001` S13): `room list|create|
+//! invite|remove|archive`, `receiver set --wake-policy`, the new inbox,
+//! history and message columns, and `inbox --all-pages --json` keeping the
+//! server's items verbatim.
 
 mod common;
 
-use common::{OWNER_TOKEN, Platformd, assert_server_error, json, ok, stderr, stdout, value};
+use common::{
+    CaptureServer, OWNER_TOKEN, Platformd, assert_server_error, json, ok, platform, stderr, stdout,
+    value,
+};
+use serde_json::json;
 
-#[tokio::test]
-async fn rooms_lists_every_room_as_a_table_and_as_json() {
-    let server = Platformd::start_with_owner(&["human"]).await;
-    let a = server.register("agent-a").await;
-    server.register("agent-b").await;
-    ok(&server
-        .cli(
-            &a,
-            &[
-                "send",
-                "--to",
-                "agent-b",
-                "--body",
-                "hi",
-                "--client-key",
-                "k-1",
-            ],
-        )
-        .await);
-
-    let table = ok(&server.cli(OWNER_TOKEN, &["rooms"]).await);
-    let lines: Vec<Vec<&str>> = table
-        .lines()
+fn table(text: &str) -> Vec<Vec<&str>> {
+    text.lines()
         .map(|line| line.split_whitespace().collect())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_owner_manages_topic_rooms_and_agents_list_their_own() {
+    let server = Platformd::start_with_owner(&["human"]).await;
+    let a = server.register("agent-a").await;
+    let c = server.register("agent-c").await;
+
+    let created = ok(&server
+        .cli(
+            OWNER_TOKEN,
+            &["room", "create", "room:launch", "--title", "출시"],
+        )
+        .await);
+    assert_eq!(value(&created, "room_id"), "room:launch");
+    assert_eq!(value(&created, "kind"), "topic");
+    assert_eq!(value(&created, "title"), "출시");
+    assert_eq!(value(&created, "members"), "-");
+    assert_eq!(value(&created, "created_by"), "owner");
+    assert_eq!(value(&created, "archived_at"), "-");
+    assert!(value(&created, "created_at").ends_with('Z'));
+
+    let invited = ok(&server
+        .cli(OWNER_TOKEN, &["room", "invite", "room:launch", "agent-a"])
+        .await);
+    assert_eq!(value(&invited, "members"), "agent-a");
+    let raw = json(
+        &server
+            .cli(
+                OWNER_TOKEN,
+                &["--json", "room", "invite", "room:launch", "agent-c"],
+            )
+            .await,
+    );
+    assert_eq!(raw["members"], json!(["agent-a", "agent-c"]));
+    let removed = ok(&server
+        .cli(OWNER_TOKEN, &["room", "remove", "room:launch", "agent-c"])
+        .await);
+    assert_eq!(removed.trim(), "removed: agent-c from room:launch");
+    let removed_json = json(
+        &server
+            .cli(
+                OWNER_TOKEN,
+                &["--json", "room", "remove", "room:launch", "agent-c"],
+            )
+            .await,
+    );
+    assert_eq!(
+        removed_json,
+        json!({"room_id": "room:launch", "agent_id": "agent-c", "removed": true})
+    );
+
+    ok(&server
+        .cli(&a, &["send", "--room", "room:launch", "--body", "hi"])
+        .await);
+    let listed = ok(&server.cli(&a, &["room", "list"]).await);
+    let rows = table(&listed);
+    assert_eq!(
+        rows[0],
+        [
+            "ROOM",
+            "KIND",
+            "TITLE",
+            "MEMBERS",
+            "LAST_AT",
+            "LAST_SENDER",
+            "COUNT",
+            "ARCHIVED_AT"
+        ]
+    );
+    assert_eq!(rows[1][..4], ["room:launch", "topic", "출시", "agent-a"]);
+    assert_eq!(rows[1][5..], ["agent-a", "1", "-"]);
+    assert_eq!(rows.len(), 3, "room:launch and all: {listed}");
+    let mine = json(&server.cli(&c, &["--json", "room", "list"]).await);
+    let ids: Vec<&str> = mine["rooms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|room| room["room_id"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        lines[0],
-        ["ROOM", "KIND", "MEMBERS", "LAST_AT", "LAST_SENDER", "COUNT"],
-        "{table}"
-    );
-    assert_eq!(lines.len(), 3, "{table}");
-    assert_eq!(
-        lines[1][..3],
-        ["dm:agent-a:agent-b", "dm", "agent-a,agent-b"]
-    );
-    assert_eq!(lines[1][4..], ["agent-a", "1"]);
-    assert!(lines[1][3].ends_with('Z'), "{table}");
-    assert_eq!(lines[2], ["all", "all", "agent-a,agent-b", "-", "-", "0"]);
+    assert_eq!(ids, ["all"]);
 
-    let raw = json(&server.cli(OWNER_TOKEN, &["--json", "rooms"]).await);
-    assert_eq!(raw["rooms"][0]["room_id"], "dm:agent-a:agent-b");
-    assert_eq!(raw["rooms"][1]["last_event_seq"], serde_json::Value::Null);
-
-    assert_server_error(&server.cli(&a, &["rooms"]).await, "forbidden");
+    let archived = ok(&server
+        .cli(OWNER_TOKEN, &["room", "archive", "room:launch"])
+        .await);
+    assert!(value(&archived, "archived_at").ends_with('Z'));
+    assert_server_error(
+        &server
+            .cli(&a, &["send", "--room", "room:launch", "--body", "late"])
+            .await,
+        "room_archived",
+    );
+    assert_server_error(
+        &server.cli(&a, &["room", "create", "room:mine"]).await,
+        "forbidden",
+    );
+    assert_server_error(
+        &server
+            .cli(OWNER_TOKEN, &["room", "create", "room:launch"])
+            .await,
+        "room_id_taken",
+    );
+    assert_server_error(
+        &server
+            .cli(OWNER_TOKEN, &["room", "invite", "room:missing", "agent-a"])
+            .await,
+        "unknown_room",
+    );
     server.stop().await;
 }
 
 #[tokio::test]
-async fn room_post_sends_as_the_allowlisted_agent() {
-    let server = Platformd::start_with_owner(&["human"]).await;
-    let a = server.register("agent-a").await;
-    let b = server.register("agent-b").await;
-    let human = server.register("human").await;
-    let dm = ok(&server
-        .cli(
-            &a,
-            &[
-                "send",
-                "--to",
-                "agent-b",
-                "--body",
-                "hi",
-                "--client-key",
-                "k-1",
-            ],
-        )
-        .await);
-    let dm_id = value(&dm, "message_id");
-
-    let posted = ok(&server
-        .cli(
-            OWNER_TOKEN,
-            &[
-                "room",
-                "post",
-                "dm:agent-a:agent-b",
-                "--as",
-                "human",
-                "--body",
-                "잠깐만",
-                "--reply-to",
-                &dm_id,
-                "--client-key",
-                "barge-1",
-            ],
-        )
-        .await);
-    assert_eq!(value(&posted, "room_id"), "dm:agent-a:agent-b");
-    assert_eq!(value(&posted, "sender_id"), "human");
-    assert_eq!(value(&posted, "reply_to"), dm_id);
-    assert_eq!(value(&posted, "client_key"), "barge-1");
-    let message_id = value(&posted, "message_id");
-
-    for key in [&a, &b] {
-        let inbox = json(&server.cli(key, &["--json", "inbox"]).await);
-        let items = inbox["items"].as_array().unwrap();
-        assert!(
-            items
-                .iter()
-                .any(|item| item["message_id"] == message_id.as_str()
-                    && item["sender_id"] == "human"),
-            "{inbox}"
-        );
-    }
-    let human_inbox = json(&server.cli(&human, &["--json", "inbox"]).await);
-    assert_eq!(human_inbox["items"], serde_json::json!([]));
-
-    let replay = ok(&server
-        .cli(
-            OWNER_TOKEN,
-            &[
-                "room",
-                "post",
-                "dm:agent-a:agent-b",
-                "--as",
-                "human",
-                "--body",
-                "잠깐만",
-                "--reply-to",
-                &dm_id,
-                "--client-key",
-                "barge-1",
-            ],
-        )
-        .await);
-    assert_eq!(value(&replay, "message_id"), message_id);
-    assert!(replay.contains("deduplicated"), "{replay}");
-
-    let generated = server
-        .cli(
-            OWNER_TOKEN,
-            &[
-                "--json", "room", "post", "all", "--as", "human", "--body", "to all",
-            ],
-        )
-        .await;
-    let body = json(&generated);
-    assert_eq!(body["room_id"], "all");
-    assert_eq!(body["sender_id"], "human");
-    let key_line = stderr(&generated);
-    let key = key_line
-        .trim()
-        .strip_prefix("platform: client_key ")
-        .unwrap_or_else(|| panic!("generated key on stderr: {key_line}"));
-    assert_eq!(key.len(), 26, "a ULID: {key}");
-    server.stop().await;
-}
-
-#[tokio::test]
-async fn room_post_errors_and_exit_codes() {
-    let server = Platformd::start_with_owner(&["human"]).await;
-    let a = server.register("agent-a").await;
-    server.register("agent-b").await;
-    server.register("human").await;
-
-    let agent_key = server
-        .cli(&a, &["room", "post", "all", "--as", "human", "--body", "x"])
-        .await;
-    assert_server_error(&agent_key, "forbidden");
-    let not_allowed = server
-        .cli(
-            OWNER_TOKEN,
-            &["room", "post", "all", "--as", "agent-a", "--body", "x"],
-        )
-        .await;
-    assert_server_error(&not_allowed, "forbidden");
-    let unknown = server
-        .cli(
-            OWNER_TOKEN,
-            &[
-                "room",
-                "post",
-                "dm:agent-a:ghost",
-                "--as",
-                "human",
-                "--body",
-                "x",
-            ],
-        )
-        .await;
-    assert_server_error(&unknown, "unknown_room");
-
-    let invalid: [&[&str]; 4] = [
-        &[
-            "room",
-            "post",
-            "dm:agent-b:agent-a",
-            "--as",
-            "human",
-            "--body",
-            "x",
-        ],
-        &["room", "post", "all", "--as", "Human", "--body", "x"],
-        &[
-            "room",
-            "post",
-            "all",
-            "--as",
-            "human",
-            "--body",
-            "x",
-            "--reply-to",
-            "nope",
-        ],
-        &["room", "post", "all", "--as", "human"],
+async fn room_arguments_are_checked_before_any_request() {
+    let capture = CaptureServer::start(vec![(200, json!({}))]);
+    let long_title = "가".repeat(platform_wire::MAX_ROOM_TITLE_CHARS + 1);
+    let invalid: [&[&str]; 7] = [
+        &["room", "create", "all"],
+        &["room", "create", "dm:agent-a:agent-b"],
+        &["room", "create", "room:Launch"],
+        &["room", "create", "room:ok", "--title", long_title.as_str()],
+        &["room", "invite", "room:ok", "Bad"],
+        &["room", "remove", "nope", "agent-a"],
+        &["rooms"],
     ];
     for args in invalid {
-        let output = server.cli(OWNER_TOKEN, args).await;
+        let mut full = vec!["--url", capture.url.as_str(), "--token", "t"];
+        full.extend_from_slice(args);
+        let output = platform(&full).await;
         assert_eq!(
             output.status.code(),
             Some(2),
@@ -221,5 +151,189 @@ async fn room_post_errors_and_exit_codes() {
         );
         assert!(stdout(&output).is_empty());
     }
+    let post = platform(&[
+        "--url",
+        capture.url.as_str(),
+        "--token",
+        "t",
+        "room",
+        "post",
+        "all",
+        "--as",
+        "human",
+        "--body",
+        "x",
+    ])
+    .await;
+    assert_eq!(post.status.code(), Some(2), "room post is gone");
+    assert!(capture.captured().is_empty());
+}
+
+#[tokio::test]
+async fn receiver_set_takes_a_wake_policy() {
+    let server = Platformd::start().await;
+    let a = server.register("agent-a").await;
+    let set = ok(&server
+        .cli(
+            &a,
+            &[
+                "receiver",
+                "set",
+                "agent-a",
+                "http://127.0.0.1:9/n",
+                "--wake-policy",
+                "always",
+            ],
+        )
+        .await);
+    assert_eq!(value(&set, "wake_policy"), "always");
+    let kept = ok(&server
+        .cli(&a, &["receiver", "set", "agent-a", "http://127.0.0.1:9/m"])
+        .await);
+    assert_eq!(value(&kept, "wake_policy"), "always", "omitted means kept");
+    let bad = server
+        .cli(
+            &a,
+            &[
+                "receiver",
+                "set",
+                "agent-a",
+                "http://127.0.0.1:9/n",
+                "--wake-policy",
+                "never",
+            ],
+        )
+        .await;
+    assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
     server.stop().await;
+}
+
+#[tokio::test]
+async fn inbox_history_and_message_show_print_the_event_fields() {
+    let server = Platformd::start().await;
+    let a = server.register("agent-a").await;
+    let b = server.register("agent-b").await;
+    let first = ok(&server
+        .cli(&a, &["send", "--to", "agent-b", "--body", "q"])
+        .await);
+    let first_id = value(&first, "message_id");
+    ok(&server
+        .cli(
+            &b,
+            &[
+                "send",
+                "--reply-to",
+                &first_id,
+                "--quiet",
+                "--mention",
+                "agent-a",
+                "--body",
+                "a",
+            ],
+        )
+        .await);
+
+    let inbox = ok(&server.cli(&a, &["inbox"]).await);
+    let rows = table(&inbox);
+    assert_eq!(
+        rows[0],
+        [
+            "INBOX_SEQ",
+            "KIND",
+            "ROOM_ID",
+            "EVENT_SEQ",
+            "MESSAGE_ID",
+            "CREATED_AT",
+            "SENDER_ID",
+            "WAKE",
+            "REPLY_TO",
+            "MENTIONS",
+            "BODY"
+        ]
+    );
+    assert_eq!(rows[1][..3], ["1", "message", "dm:agent-a:agent-b"]);
+    assert_eq!(rows[1][6..], ["agent-a", "wake", "-", "-", "q"]);
+    assert_eq!(
+        rows[2][6..],
+        ["agent-b", "quiet", first_id.as_str(), "agent-a", "a"]
+    );
+
+    let history = ok(&server
+        .cli(
+            &a,
+            &["history", "--room", "dm:agent-a:agent-b", "--after", "0"],
+        )
+        .await);
+    let rows = table(&history);
+    assert_eq!(
+        rows[0],
+        [
+            "EVENT_SEQ",
+            "MESSAGE_ID",
+            "CREATED_AT",
+            "SENDER_ID",
+            "WAKE",
+            "REPLY_TO",
+            "MENTIONS",
+            "BODY"
+        ]
+    );
+    assert_eq!(
+        rows[2][3..],
+        ["agent-b", "quiet", first_id.as_str(), "agent-a", "a"]
+    );
+
+    let shown = ok(&server.cli(&a, &["message", "show", &first_id]).await);
+    assert_eq!(value(&shown, "room_kind"), "dm");
+    assert_eq!(value(&shown, "wake"), "true");
+    assert_eq!(value(&shown, "mentions"), "-");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn inbox_all_pages_json_keeps_unknown_kinds_and_fields() {
+    let message = json!({
+        "inbox_seq": "1", "kind": "message", "message_id": "msg-01J00000000000000000000000",
+        "event_seq": "5", "room_id": "room:launch", "room_kind": "topic", "sender_id": "agent-b",
+        "body": "x", "reply_to": null, "wake": true, "mentions": [],
+        "created_at": "2026-10-20T09:00:00.000Z", "thread_id": "t-1"
+    });
+    let reaction = json!({"inbox_seq": "2", "kind": "reaction", "emoji": "👍"});
+    let first = json!({
+        "agent_id": "agent-a", "read_marker": "0", "snapshot_head_seq": "2",
+        "items": [message], "next_after_seq": "1", "has_more": true
+    });
+    let second = json!({
+        "agent_id": "agent-a", "read_marker": "0", "snapshot_head_seq": "2",
+        "items": [reaction], "next_after_seq": "2", "has_more": false
+    });
+    let capture = CaptureServer::start(vec![(200, first), (200, second)]);
+
+    let output = platform(&[
+        "--url",
+        capture.url.as_str(),
+        "--token",
+        "t",
+        "--json",
+        "inbox",
+        "--all-pages",
+        "--limit",
+        "1",
+    ])
+    .await;
+    let document = json(&output);
+    assert_eq!(document["items"], json!([message, reaction]), "verbatim");
+    assert_eq!(document["snapshot_head_seq"], "2");
+
+    let capture = CaptureServer::start(vec![(
+        200,
+        json!({"agent_id": "agent-a", "read_marker": "0", "snapshot_head_seq": "2",
+               "items": [reaction], "next_after_seq": "2", "has_more": false}),
+    )]);
+    let text = ok(&platform(&["--url", capture.url.as_str(), "--token", "t", "inbox"]).await);
+    let rows = table(&text);
+    assert_eq!(
+        rows[1],
+        ["2", "reaction", "-", "-", "-", "-", "-", "-", "-", "-", "-"]
+    );
 }

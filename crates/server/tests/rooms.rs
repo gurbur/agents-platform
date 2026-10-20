@@ -1,14 +1,14 @@
-//! S10: `GET /v1/rooms` and `POST /v1/rooms/{room_id}/messages` — the owner
-//! lists every room and posts into any room as an agent named in
-//! `[owner] post_as` (acceptance scenario 14), over HTTP with the database
-//! inspected directly.
+//! S10, carried to S13: the owner lists every room and posts into any room
+//! as an agent named in `[owner] post_as` (acceptance scenario 14), over
+//! HTTP with the database inspected directly. Since S13 the post is
+//! `POST /v1/messages` with `sender_id` and a `room_id` (ADR-0010).
 
 mod common;
 
 use std::time::Duration;
 
 use common::receiver::MockReceiver;
-use common::{Api, Fixture, OWNER_TOKEN, RunningServer};
+use common::{Api, Fixture, OWNER_TOKEN, Reply, RunningServer};
 use platform_wire::messages::{MAX_BODY_BYTES, MAX_CLIENT_KEY_BYTES};
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -30,8 +30,10 @@ async fn start() -> (Fixture, RunningServer, Api) {
     start_with(POST_AS).await
 }
 
-fn post_path(room_id: &str) -> String {
-    format!("/v1/rooms/{room_id}/messages")
+/// An owner post (S13): `POST /v1/messages` with `room_id` added to `body`.
+async fn post_into(api: &Api, room_id: &str, token: &str, mut body: Value) -> Reply {
+    body["room_id"] = json!(room_id);
+    api.post("/v1/messages", token, body).await
 }
 
 fn post_body(sender_id: &str, body: &str, client_key: &str) -> Value {
@@ -108,16 +110,19 @@ fn room<'a>(rooms: &'a [Value], room_id: &str) -> &'a Value {
 // ---- GET /v1/rooms -------------------------------------------------------------
 
 #[tokio::test]
-async fn rooms_list_is_owner_only_and_takes_no_query() {
+async fn rooms_list_is_for_both_principals_and_takes_no_query() {
     let (_fx, server, api) = start().await;
     let a = api.register("agent-a", None).await;
 
     api.send(Method::GET, "/v1/rooms", None, None)
         .await
         .assert_error(401, "unauthorized");
-    api.get("/v1/rooms", &a.api_key)
-        .await
-        .assert_error(403, "forbidden");
+    let mine = api.get("/v1/rooms", &a.api_key).await;
+    assert_eq!(
+        mine.status.as_u16(),
+        200,
+        "S13: agents list their own rooms"
+    );
     let query = api.get("/v1/rooms?limit=10", OWNER_TOKEN).await;
     query.assert_error(422, "unexpected_field");
     assert_eq!(query.error_field(), Some("limit"));
@@ -130,14 +135,20 @@ async fn an_empty_hub_lists_only_all_with_null_last_fields() {
     api.register("agent-b", None).await;
     api.register("agent-a", None).await;
 
-    let rooms = rooms(&api).await;
+    let mut rooms = rooms(&api).await;
+    assert_eq!(rooms.len(), 1);
+    assert!(rooms[0]["created_at"].as_str().unwrap().ends_with('Z'));
+    rooms[0].as_object_mut().unwrap().remove("created_at");
 
     assert_eq!(
         rooms,
         [json!({
             "room_id": "all",
             "kind": "all",
+            "title": null,
             "members": ["agent-a", "agent-b"],
+            "created_by": "owner",
+            "archived_at": null,
             "last_event_seq": null,
             "last_message_at": null,
             "last_sender_id": null,
@@ -178,29 +189,48 @@ async fn rooms_are_sorted_by_their_last_message_with_members_and_counts() {
         ["dm:agent-b:agent-c", "all", "dm:agent-a:agent-b"],
         "newest last message first"
     );
+    let bc = room(&rooms, "dm:agent-b:agent-c");
+    assert_eq!(bc["created_by"], "agent-b", "the first message's sender");
     assert_eq!(
-        room(&rooms, "dm:agent-b:agent-c"),
-        &json!({
-            "room_id": "dm:agent-b:agent-c",
-            "kind": "dm",
-            "members": ["agent-b", "agent-c"],
-            "last_event_seq": last["event_seq"],
-            "last_message_at": last["created_at"],
-            "last_sender_id": "agent-c",
-            "message_count": 2
-        })
+        json!([
+            bc["room_id"],
+            bc["kind"],
+            bc["members"],
+            bc["last_event_seq"],
+            bc["last_message_at"],
+            bc["last_sender_id"],
+            bc["message_count"]
+        ]),
+        json!([
+            "dm:agent-b:agent-c",
+            "dm",
+            ["agent-b", "agent-c"],
+            last["event_seq"],
+            last["created_at"],
+            "agent-c",
+            2
+        ])
     );
+    let all = room(&rooms, "all");
     assert_eq!(
-        room(&rooms, "all"),
-        &json!({
-            "room_id": "all",
-            "kind": "all",
-            "members": ["agent-a", "agent-c"],
-            "last_event_seq": broadcast["event_seq"],
-            "last_message_at": broadcast["created_at"],
-            "last_sender_id": "agent-a",
-            "message_count": 1
-        }),
+        json!([
+            all["room_id"],
+            all["kind"],
+            all["members"],
+            all["last_event_seq"],
+            all["last_message_at"],
+            all["last_sender_id"],
+            all["message_count"]
+        ]),
+        json!([
+            "all",
+            "all",
+            ["agent-a", "agent-c"],
+            broadcast["event_seq"],
+            broadcast["created_at"],
+            "agent-a",
+            1
+        ]),
         "all lists the current members only"
     );
     let ab = room(&rooms, "dm:agent-a:agent-b");
@@ -235,13 +265,13 @@ async fn barge_in_reaches_both_dm_members_and_not_the_sender() {
     let b = api.register("agent-b", Some(&mock.url())).await;
     let human = api.register("human", None).await;
 
-    let reply = api
-        .post(
-            &post_path("dm:agent-a:agent-b"),
-            OWNER_TOKEN,
-            post_body("human", "둘 다 잠깐, 배포는 내일로.", "barge-1"),
-        )
-        .await;
+    let reply = post_into(
+        &api,
+        "dm:agent-a:agent-b",
+        OWNER_TOKEN,
+        post_body("human", "둘 다 잠깐, 배포는 내일로.", "barge-1"),
+    )
+    .await;
 
     assert_eq!(reply.status.as_u16(), 201, "{}", reply.body);
     let posted = &reply.body;
@@ -311,7 +341,7 @@ async fn barge_in_reaches_both_dm_members_and_not_the_sender() {
         .post(
             "/v1/messages",
             &b.api_key,
-            json!({"to": "agent-a", "body": "알겠습니다", "client_key": "b-1", "reply_to": message_id}),
+            json!({"body": "알겠습니다", "client_key": "b-1", "reply_to": message_id}),
         )
         .await;
     assert_eq!(answer.status.as_u16(), 201, "{}", answer.body);
@@ -321,57 +351,44 @@ async fn barge_in_reaches_both_dm_members_and_not_the_sender() {
 }
 
 #[tokio::test]
-async fn posting_into_a_dm_the_sender_belongs_to_reaches_only_the_other_member() {
+async fn posting_into_a_dm_the_sender_belongs_to_gives_the_sender_a_quiet_own_row() {
     let (fx, server, api) = start().await;
     api.register("agent-a", None).await;
     api.register("human", None).await;
 
-    let reply = api
-        .post(
-            &post_path("dm:agent-a:human"),
-            OWNER_TOKEN,
-            post_body("human", "hi", "k-1"),
-        )
-        .await;
+    let reply = post_into(
+        &api,
+        "dm:agent-a:human",
+        OWNER_TOKEN,
+        post_body("human", "hi", "k-1"),
+    )
+    .await;
 
     assert_eq!(reply.status.as_u16(), 201, "{}", reply.body);
     let message_id = reply.body["message_id"].as_str().unwrap();
-    assert_eq!(recipients(&fx, message_id).await, ["agent-a"]);
+    assert_eq!(recipients(&fx, message_id).await, ["agent-a", "human"]);
+    assert_eq!(pending(&fx, "human").await, Some(("idle".to_owned(), 0)));
     server.shutdown().await.unwrap();
 }
 
 // ---- Permissions ---------------------------------------------------------------
 
 #[tokio::test]
-async fn posting_is_owner_only_and_checked_before_the_body() {
+async fn sender_id_is_the_owners_and_an_agent_key_gets_unexpected_field() {
     let (fx, server, api) = start().await;
     api.register("agent-a", None).await;
     api.register("agent-b", None).await;
     let human = api.register("human", None).await;
-    let path = post_path("dm:agent-a:agent-b");
+    let path = "dm:agent-a:agent-b";
+    let mut body = post_body("human", "x", "k-1");
+    body["room_id"] = json!(path);
 
-    api.send(
-        Method::POST,
-        &path,
-        None,
-        Some(post_body("human", "x", "k-1")),
-    )
-    .await
-    .assert_error(401, "unauthorized");
-    let own_key = api
-        .post(&path, &human.api_key, post_body("human", "x", "k-1"))
-        .await;
-    own_key.assert_error(403, "forbidden");
-    assert_eq!(own_key.error_field(), None);
-    api.send_raw(
-        Method::POST,
-        &path,
-        Some(&human.api_key),
-        Some("text/plain"),
-        Some(b"not json".to_vec()),
-    )
-    .await
-    .assert_error(403, "forbidden");
+    api.send(Method::POST, "/v1/messages", None, Some(body))
+        .await
+        .assert_error(401, "unauthorized");
+    let own_key = post_into(&api, path, &human.api_key, post_body("human", "x", "k-1")).await;
+    own_key.assert_error(422, "unexpected_field");
+    assert_eq!(own_key.error_field(), Some("sender_id"));
 
     assert_eq!(message_count(&fx).await, 0);
     server.shutdown().await.unwrap();
@@ -385,13 +402,13 @@ async fn the_sender_must_be_in_the_allowlist() {
     api.register("human", None).await;
 
     for sender in ["agent-a", "Human", "owner", ""] {
-        let reply = api
-            .post(
-                &post_path("dm:agent-a:agent-b"),
-                OWNER_TOKEN,
-                post_body(sender, "x", "k-1"),
-            )
-            .await;
+        let reply = post_into(
+            &api,
+            "dm:agent-a:agent-b",
+            OWNER_TOKEN,
+            post_body(sender, "x", "k-1"),
+        )
+        .await;
         reply.assert_error(403, "forbidden");
         assert_eq!(reply.error_field(), Some("sender_id"), "{sender:?}");
     }
@@ -406,13 +423,7 @@ async fn posting_is_off_by_default() {
     let api = server.api();
     api.register("human", None).await;
 
-    let reply = api
-        .post(
-            &post_path("all"),
-            OWNER_TOKEN,
-            post_body("human", "x", "k-1"),
-        )
-        .await;
+    let reply = post_into(&api, "all", OWNER_TOKEN, post_body("human", "x", "k-1")).await;
 
     reply.assert_error(403, "forbidden");
     assert_eq!(reply.error_field(), Some("sender_id"));
@@ -425,13 +436,7 @@ async fn an_allowlisted_sender_must_be_registered() {
     let (fx, server, api) = start().await;
     api.register("agent-a", None).await;
 
-    let reply = api
-        .post(
-            &post_path("all"),
-            OWNER_TOKEN,
-            post_body("human", "x", "k-1"),
-        )
-        .await;
+    let reply = post_into(&api, "all", OWNER_TOKEN, post_body("human", "x", "k-1")).await;
 
     reply.assert_error(404, "agent_not_found");
     assert_eq!(reply.error_field(), Some("sender_id"));
@@ -454,23 +459,17 @@ async fn the_room_must_be_canonical_and_its_members_registered() {
         "dm:agent-a",
         "ALL",
     ] {
-        let reply = api
-            .post(
-                &post_path(room_id),
-                OWNER_TOKEN,
-                post_body("human", "x", "k-1"),
-            )
-            .await;
+        let reply = post_into(&api, room_id, OWNER_TOKEN, post_body("human", "x", "k-1")).await;
         reply.assert_error(422, "invalid_field");
         assert_eq!(reply.error_field(), Some("room_id"), "{room_id}");
     }
-    let unknown = api
-        .post(
-            &post_path("dm:agent-a:ghost"),
-            OWNER_TOKEN,
-            post_body("human", "x", "k-1"),
-        )
-        .await;
+    let unknown = post_into(
+        &api,
+        "dm:agent-a:ghost",
+        OWNER_TOKEN,
+        post_body("human", "x", "k-1"),
+    )
+    .await;
     unknown.assert_error(404, "unknown_room");
     assert_eq!(message_count(&fx).await, 0);
     server.shutdown().await.unwrap();
@@ -482,33 +481,23 @@ async fn room_format_then_allowlist_then_room_existence() {
     api.register("agent-a", None).await;
     api.register("human", None).await;
 
-    let bad_room_and_sender = api
-        .post(
-            &post_path("nope"),
-            OWNER_TOKEN,
-            post_body("agent-a", "x", "k-1"),
-        )
-        .await;
+    let bad_room_and_sender =
+        post_into(&api, "nope", OWNER_TOKEN, post_body("agent-a", "x", "k-1")).await;
     bad_room_and_sender.assert_error(422, "invalid_field");
     assert_eq!(bad_room_and_sender.error_field(), Some("room_id"));
 
-    let unknown_room_and_sender = api
-        .post(
-            &post_path("dm:agent-a:ghost"),
-            OWNER_TOKEN,
-            post_body("agent-a", "x", "k-1"),
-        )
-        .await;
+    let unknown_room_and_sender = post_into(
+        &api,
+        "dm:agent-a:ghost",
+        OWNER_TOKEN,
+        post_body("agent-a", "x", "k-1"),
+    )
+    .await;
     unknown_room_and_sender.assert_error(403, "forbidden");
     assert_eq!(unknown_room_and_sender.error_field(), Some("sender_id"));
 
-    let bad_body_and_room = api
-        .post(
-            &post_path("nope"),
-            OWNER_TOKEN,
-            json!({"sender_id": "human"}),
-        )
-        .await;
+    let bad_body_and_room =
+        post_into(&api, "nope", OWNER_TOKEN, json!({"sender_id": "human"})).await;
     bad_body_and_room.assert_error(422, "invalid_field");
     assert_ne!(
         bad_body_and_room.error_field(),
@@ -519,38 +508,60 @@ async fn room_format_then_allowlist_then_room_existence() {
 }
 
 #[tokio::test]
-async fn reply_to_must_name_a_message_in_the_same_room() {
+async fn reply_to_alone_names_the_room_of_the_original() {
     let (fx, server, api) = start().await;
     let a = api.register("agent-a", None).await;
     api.register("agent-b", None).await;
     api.register("human", None).await;
     let in_all = api.sent(&a.api_key, "all", "in all", "k-all").await;
     let in_dm = api.sent(&a.api_key, "agent-b", "in dm", "k-dm").await;
-    let path = post_path("dm:agent-a:agent-b");
+    let path = "dm:agent-a:agent-b";
     let with_reply = |key: &str, reply_to: &Value| json!({"sender_id": "human", "body": "x", "client_key": key, "reply_to": reply_to});
 
-    api.post(&path, OWNER_TOKEN, with_reply("k-1", &in_all["message_id"]))
-        .await
-        .assert_error(422, "reply_to_room_mismatch");
+    post_into(
+        &api,
+        path,
+        OWNER_TOKEN,
+        with_reply("k-1", &in_all["message_id"]),
+    )
+    .await
+    .assert_error(422, "invalid_destination");
     api.post(
-        &path,
+        "/v1/messages",
         OWNER_TOKEN,
         with_reply("k-2", &json!("msg-01J00000000000000000000000")),
     )
     .await
     .assert_error(404, "reply_to_not_found");
     let malformed = api
-        .post(&path, OWNER_TOKEN, with_reply("k-3", &json!("not-an-id")))
+        .post(
+            "/v1/messages",
+            OWNER_TOKEN,
+            with_reply("k-3", &json!("not-an-id")),
+        )
         .await;
     malformed.assert_error(422, "invalid_field");
     assert_eq!(malformed.error_field(), Some("reply_to"));
     assert_eq!(message_count(&fx).await, 2, "rejections store nothing");
 
     let ok = api
-        .post(&path, OWNER_TOKEN, with_reply("k-4", &in_dm["message_id"]))
+        .post(
+            "/v1/messages",
+            OWNER_TOKEN,
+            with_reply("k-4", &in_dm["message_id"]),
+        )
         .await;
     assert_eq!(ok.status.as_u16(), 201, "{}", ok.body);
     assert_eq!(ok.body["reply_to"], in_dm["message_id"]);
+    assert_eq!(ok.body["room_id"], path);
+    let in_all_reply = api
+        .post(
+            "/v1/messages",
+            OWNER_TOKEN,
+            with_reply("k-5", &in_all["message_id"]),
+        )
+        .await;
+    assert_eq!(in_all_reply.body["room_id"], "all");
     server.shutdown().await.unwrap();
 }
 
@@ -562,30 +573,27 @@ async fn a_repeated_post_returns_the_original_and_a_changed_one_conflicts() {
     api.register("agent-a", None).await;
     api.register("agent-b", None).await;
     api.register("human", None).await;
-    let path = post_path("dm:agent-a:agent-b");
+    let path = "dm:agent-a:agent-b";
 
-    let first = api
-        .post(&path, OWNER_TOKEN, post_body("human", "once", "k-1"))
-        .await;
+    let first = post_into(&api, path, OWNER_TOKEN, post_body("human", "once", "k-1")).await;
     assert_eq!(first.status.as_u16(), 201, "{}", first.body);
-    let again = api
-        .post(&path, OWNER_TOKEN, post_body("human", "once", "k-1"))
-        .await;
+    let again = post_into(&api, path, OWNER_TOKEN, post_body("human", "once", "k-1")).await;
     assert_eq!(again.status.as_u16(), 200, "{}", again.body);
     assert_eq!(again.body["deduplicated"], true);
     assert_eq!(again.body["message_id"], first.body["message_id"]);
     assert_eq!(again.body["event_seq"], first.body["event_seq"]);
 
-    api.post(&path, OWNER_TOKEN, post_body("human", "changed", "k-1"))
-        .await
-        .assert_error(409, "idempotency_conflict");
-    api.post(
-        &post_path("all"),
+    post_into(
+        &api,
+        path,
         OWNER_TOKEN,
-        post_body("human", "once", "k-1"),
+        post_body("human", "changed", "k-1"),
     )
     .await
     .assert_error(409, "idempotency_conflict");
+    post_into(&api, "all", OWNER_TOKEN, post_body("human", "once", "k-1"))
+        .await
+        .assert_error(409, "idempotency_conflict");
     assert_eq!(message_count(&fx).await, 1);
     let message_id = first.body["message_id"].as_str().unwrap();
     assert_eq!(recipients(&fx, message_id).await, ["agent-a", "agent-b"]);
@@ -598,13 +606,13 @@ async fn posts_share_the_senders_own_client_key_namespace() {
     api.register("agent-a", None).await;
     let human = api.register("human", None).await;
 
-    let posted = api
-        .post(
-            &post_path("all"),
-            OWNER_TOKEN,
-            post_body("human", "hello", "k-all"),
-        )
-        .await;
+    let posted = post_into(
+        &api,
+        "all",
+        OWNER_TOKEN,
+        post_body("human", "hello", "k-all"),
+    )
+    .await;
     assert_eq!(posted.status.as_u16(), 201, "{}", posted.body);
     let own_send = api
         .send_message(&human.api_key, "all", "hello", "k-all")
@@ -613,17 +621,21 @@ async fn posts_share_the_senders_own_client_key_namespace() {
     assert_eq!(own_send.body["message_id"], posted.body["message_id"]);
     assert_eq!(own_send.body["deduplicated"], true);
 
-    let dm_post = api
-        .post(
-            &post_path("dm:agent-a:human"),
-            OWNER_TOKEN,
-            post_body("human", "dm", "k-dm"),
-        )
-        .await;
+    let dm_post = post_into(
+        &api,
+        "dm:agent-a:human",
+        OWNER_TOKEN,
+        post_body("human", "dm", "k-dm"),
+    )
+    .await;
     assert_eq!(dm_post.status.as_u16(), 201, "{}", dm_post.body);
-    api.send_message(&human.api_key, "agent-a", "dm", "k-dm")
-        .await
-        .assert_error(409, "idempotency_conflict");
+    // S13: the hash takes the resolved room, so `to: agent-a` names the
+    // same DM and this is the same request (`IF-DB-001`).
+    let same_dm = api
+        .send_message(&human.api_key, "agent-a", "dm", "k-dm")
+        .await;
+    assert_eq!(same_dm.status.as_u16(), 200, "{}", same_dm.body);
+    assert_eq!(same_dm.body["message_id"], dm_post.body["message_id"]);
     assert_eq!(message_count(&fx).await, 2);
     server.shutdown().await.unwrap();
 }
@@ -646,15 +658,9 @@ async fn the_owner_posts_into_all_without_the_sender_being_a_member() {
     assert_eq!(leave.status.as_u16(), 200, "{}", leave.body);
     api.send_message(&human.api_key, "all", "own", "k-own")
         .await
-        .assert_error(403, "not_all_member");
+        .assert_error(403, "not_room_member");
 
-    let away = api
-        .post(
-            &post_path("all"),
-            OWNER_TOKEN,
-            post_body("human", "away", "k-1"),
-        )
-        .await;
+    let away = post_into(&api, "all", OWNER_TOKEN, post_body("human", "away", "k-1")).await;
     assert_eq!(away.status.as_u16(), 201, "{}", away.body);
     assert_eq!(away.body["room_id"], "all");
     let away_id = away.body["message_id"].as_str().unwrap();
@@ -668,13 +674,7 @@ async fn the_owner_posts_into_all_without_the_sender_being_a_member() {
         )
         .await;
     assert_eq!(rejoin.status.as_u16(), 200, "{}", rejoin.body);
-    let back = api
-        .post(
-            &post_path("all"),
-            OWNER_TOKEN,
-            post_body("human", "back", "k-2"),
-        )
-        .await;
+    let back = post_into(&api, "all", OWNER_TOKEN, post_body("human", "back", "k-2")).await;
     assert_eq!(back.status.as_u16(), 201, "{}", back.body);
     let back_id = back.body["message_id"].as_str().unwrap();
     assert_eq!(
@@ -691,48 +691,48 @@ async fn the_owner_posts_into_all_without_the_sender_being_a_member() {
 async fn the_body_follows_the_send_rules() {
     let (fx, server, api) = start().await;
     api.register("human", None).await;
-    let path = post_path("all");
+    let path = "all";
 
-    let unexpected = api
-        .post(
-            &path,
-            OWNER_TOKEN,
-            json!({"sender_id": "human", "body": "x", "client_key": "k", "to": "all"}),
-        )
-        .await;
+    let unexpected = post_into(
+        &api,
+        path,
+        OWNER_TOKEN,
+        json!({"sender_id": "human", "body": "x", "client_key": "k", "reply": "all"}),
+    )
+    .await;
     unexpected.assert_error(422, "unexpected_field");
-    assert_eq!(unexpected.error_field(), Some("to"));
+    assert_eq!(unexpected.error_field(), Some("reply"));
 
-    let missing = api
-        .post(&path, OWNER_TOKEN, json!({"body": "x", "client_key": "k"}))
-        .await;
+    let missing = post_into(
+        &api,
+        path,
+        OWNER_TOKEN,
+        json!({"body": "x", "client_key": "k"}),
+    )
+    .await;
     missing.assert_error(422, "invalid_field");
 
-    api.post(&path, OWNER_TOKEN, json!(["human", "x", "k"]))
+    api.post("/v1/messages", OWNER_TOKEN, json!(["human", "x", "k"]))
         .await
         .assert_error(422, "invalid_field");
 
     for key in ["", "키", &"k".repeat(MAX_CLIENT_KEY_BYTES + 1)] {
-        let reply = api
-            .post(&path, OWNER_TOKEN, post_body("human", "x", key))
-            .await;
+        let reply = post_into(&api, path, OWNER_TOKEN, post_body("human", "x", key)).await;
         reply.assert_error(422, "invalid_field");
         assert_eq!(reply.error_field(), Some("client_key"), "{key:?}");
     }
 
     let large = "x".repeat(MAX_BODY_BYTES + 1);
-    api.post(&path, OWNER_TOKEN, post_body("human", &large, "k"))
+    post_into(&api, path, OWNER_TOKEN, post_body("human", &large, "k"))
         .await
         .assert_error(413, "body_too_large");
     let limit = "x".repeat(MAX_BODY_BYTES);
-    let at_limit = api
-        .post(&path, OWNER_TOKEN, post_body("human", &limit, "k"))
-        .await;
+    let at_limit = post_into(&api, path, OWNER_TOKEN, post_body("human", &limit, "k")).await;
     assert_eq!(at_limit.status.as_u16(), 201, "{}", at_limit.body);
 
     api.send_raw(
         Method::POST,
-        &path,
+        "/v1/messages",
         Some(OWNER_TOKEN),
         Some("text/plain"),
         Some(b"{}".to_vec()),
@@ -751,13 +751,13 @@ async fn a_post_carries_the_event_and_inbox_sequences_of_a_send() {
     api.register("human", None).await;
     let before = api.sent(&a.api_key, "agent-b", "first", "k-1").await;
 
-    let posted = api
-        .post(
-            &post_path("dm:agent-a:agent-b"),
-            OWNER_TOKEN,
-            post_body("human", "second", "k-2"),
-        )
-        .await;
+    let posted = post_into(
+        &api,
+        "dm:agent-a:agent-b",
+        OWNER_TOKEN,
+        post_body("human", "second", "k-2"),
+    )
+    .await;
 
     assert_eq!(posted.status.as_u16(), 201, "{}", posted.body);
     assert_eq!(
@@ -777,7 +777,7 @@ async fn a_post_carries_the_event_and_inbox_sequences_of_a_send() {
     assert_eq!(
         heads,
         [
-            ("agent-a".to_owned(), 1),
+            ("agent-a".to_owned(), 2),
             ("agent-b".to_owned(), 2),
             ("human".to_owned(), 0)
         ]

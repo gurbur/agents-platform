@@ -350,17 +350,17 @@ async fn room_post_bodies_do_not_appear_in_logs() {
     for (room, key) in [("dm:agent-a:agent-b", "room-key-1"), ("all", "room-key-2")] {
         let reply = api
             .post(
-                &format!("/v1/rooms/{room}/messages"),
+                "/v1/messages",
                 OWNER_TOKEN,
-                json!({"sender_id": "human", "body": body_marker, "client_key": key}),
+                json!({"sender_id": "human", "room_id": room, "body": body_marker, "client_key": key}),
             )
             .await;
         assert_eq!(reply.status.as_u16(), 201, "{}", reply.body);
     }
     api.post(
-        "/v1/rooms/dm:agent-a:agent-b/messages",
+        "/v1/messages",
         OWNER_TOKEN,
-        json!({"sender_id": "human", "body": "ROOM-POST-MARKER-conflict", "client_key": "room-key-1"}),
+        json!({"sender_id": "human", "room_id": "dm:agent-a:agent-b", "body": "ROOM-POST-MARKER-conflict", "client_key": "room-key-1"}),
     )
     .await
     .assert_error(409, "idempotency_conflict");
@@ -478,4 +478,103 @@ async fn agent_deletion_logs_no_credentials_or_bodies() {
         !logs.contains("DELETE-PATH-MARKER"),
         "a receiver path was logged"
     );
+}
+
+/// S13: sends, topic room management and the receiver PATCH log no body,
+/// no room title and no mention values; the send line carries counts only
+/// (`IF-WIRE-010`, `IF-WIRE-011`).
+#[tokio::test]
+async fn s13_sends_and_room_management_log_no_bodies_titles_or_mentions() {
+    let captured = install_capture();
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config_with_owner(&["human"])).await;
+    let api = server.api();
+    let a = api.register("agent-a", None).await;
+    api.register("agent-b", None).await;
+    api.register("mentioned-only", None).await;
+    api.register("human", None).await;
+
+    let title = "S13-TITLE-MARKER-do-not-log";
+    let created = api
+        .post(
+            "/v1/rooms",
+            OWNER_TOKEN,
+            json!({"room_id": "room:s13-log", "title": title}),
+        )
+        .await;
+    assert_eq!(created.status.as_u16(), 201, "{}", created.body);
+    for member in ["agent-a", "mentioned-only"] {
+        let reply = api
+            .send(
+                Method::PUT,
+                &format!("/v1/rooms/room:s13-log/members/{member}"),
+                Some(OWNER_TOKEN),
+                None,
+            )
+            .await;
+        assert_eq!(reply.status.as_u16(), 200, "{}", reply.body);
+    }
+
+    let body = "S13-BODY-MARKER-do-not-log";
+    for request in [
+        json!({"room_id": "room:s13-log", "body": body, "client_key": "s13-1", "wake": false, "mentions": ["mentioned-only"]}),
+        json!({"to": "agent-b", "body": body, "client_key": "s13-2"}),
+    ] {
+        let reply = api.post("/v1/messages", &a.api_key, request).await;
+        assert_eq!(reply.status.as_u16(), 201, "{}", reply.body);
+    }
+    let owner_post = api
+        .post(
+            "/v1/messages",
+            OWNER_TOKEN,
+            json!({"sender_id": "human", "room_id": "dm:agent-a:agent-b", "body": body, "client_key": "s13-3"}),
+        )
+        .await;
+    assert_eq!(owner_post.status.as_u16(), 201, "{}", owner_post.body);
+    api.send(
+        Method::DELETE,
+        "/v1/rooms/room:s13-log/members/mentioned-only",
+        Some(OWNER_TOKEN),
+        None,
+    )
+    .await;
+    api.send(
+        Method::POST,
+        "/v1/rooms/room:s13-log/archive",
+        Some(OWNER_TOKEN),
+        None,
+    )
+    .await;
+    let patched = api
+        .patch(
+            "/v1/agents/agent-a/receiver",
+            OWNER_TOKEN,
+            json!({"wake_policy": "always"}),
+        )
+        .await;
+    assert_eq!(patched.status.as_u16(), 200, "{}", patched.body);
+    server.shutdown().await.unwrap();
+
+    let logs = captured.text();
+    assert!(
+        !logs.contains("S13-BODY-MARKER"),
+        "a message body was logged"
+    );
+    assert!(
+        !logs.contains("S13-TITLE-MARKER"),
+        "a room title was logged"
+    );
+    let committed: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("message committed") && line.contains("room:s13-log"))
+        .collect();
+    assert_eq!(committed.len(), 1, "{logs}");
+    assert!(
+        !committed[0].contains("mentioned-only"),
+        "mention values are not logged: {}",
+        committed[0]
+    );
+    for field in ["recipients=", "woken=", "wake=false", "mentions=1"] {
+        assert!(committed[0].contains(field), "{field}: {}", committed[0]);
+    }
 }
