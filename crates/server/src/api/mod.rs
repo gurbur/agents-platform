@@ -13,6 +13,7 @@ mod messages;
 mod owner;
 mod presence;
 mod query;
+mod reactions;
 mod receiver_url;
 mod request_id;
 mod rooms;
@@ -105,6 +106,7 @@ pub fn router(state: AppState) -> Router {
         .merge(inbox::routes())
         .merge(rooms::routes())
         .merge(threads::routes())
+        .merge(reactions::routes())
         .merge(owner::routes())
         .merge(identity::routes())
         .merge(ui::routes())

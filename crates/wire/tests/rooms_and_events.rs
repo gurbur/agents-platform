@@ -145,6 +145,7 @@ fn sample_message() -> Message {
         wake: false,
         mentions: vec![agent("human")],
         thread_summary: None,
+        reactions: vec![],
         created_at: "2026-10-20T09:00:00.000Z".into(),
     }
 }
@@ -193,7 +194,7 @@ fn a_send_body_omits_every_absent_option() {
 }
 
 #[test]
-fn a_message_has_thirteen_keys_in_order_and_keeps_nulls_and_empty_mentions() {
+fn a_message_has_fourteen_keys_in_order_and_keeps_nulls_and_empty_mentions() {
     let mut message = sample_message();
     message.mentions.clear();
     let value = serde_json::to_value(&message).unwrap();
@@ -212,6 +213,7 @@ fn a_message_has_thirteen_keys_in_order_and_keeps_nulls_and_empty_mentions() {
             "wake",
             "mentions",
             "thread_summary",
+            "reactions",
             "created_at"
         ]
     );
@@ -230,11 +232,11 @@ fn a_message_event_is_flat_and_round_trips() {
                "event_seq": "57", "room_id": "dm:agent-a:agent-b", "room_kind": "dm",
                "sender_id": "agent-a", "body": "…", "reply_to": null, "thread_id": null,
                "corrects": null, "wake": false, "mentions": ["human"], "thread_summary": null,
-               "created_at": "2026-10-20T09:00:00.000Z"})
+               "reactions": [], "created_at": "2026-10-20T09:00:00.000Z"})
     );
     let order = ordered_keys(&serde_json::to_string(&item).unwrap());
     assert_eq!(order[..4], ["inbox_seq", "kind", "woke", "message_id"]);
-    assert_eq!(order.len(), 16);
+    assert_eq!(order.len(), 17);
     let back: InboxItem = serde_json::from_value(value).unwrap();
     assert_eq!(back, item);
     assert_eq!(back.kind(), "message");
@@ -252,12 +254,12 @@ fn a_message_event_is_flat_and_round_trips() {
 #[test]
 fn an_unknown_event_kind_is_accepted_not_an_error() {
     let item: InboxItem = serde_json::from_value(json!({
-        "inbox_seq": "43", "kind": "reaction", "message_id": "msg-01J00000000000000000000000",
+        "inbox_seq": "43", "kind": "poll", "message_id": "msg-01J00000000000000000000000",
         "emoji": "👍"
     }))
     .unwrap();
     assert_eq!(item.inbox_seq, Seq::new(43).unwrap());
-    assert_eq!(item.kind(), "reaction");
+    assert_eq!(item.kind(), "poll");
     assert_eq!(item.as_message(), None);
     // A known kind with an extra field still reads.
     let mut extended = serde_json::to_value(InboxItem::message(
@@ -266,8 +268,8 @@ fn an_unknown_event_kind_is_accepted_not_an_error() {
         sample_message(),
     ))
     .unwrap();
-    // S15 made `thread_id` a field; a later slice's key stands in.
-    extended["reactions"] = json!([]);
+    // S16 made `reactions` a field; a later slice's key stands in.
+    extended["later"] = json!([]);
     assert!(serde_json::from_value::<InboxItem>(extended).is_ok());
     // Without its sequence or kind an item is still malformed.
     assert!(serde_json::from_value::<InboxItem>(json!({"kind": "message"})).is_err());

@@ -9,7 +9,7 @@ use super::StoreError;
 use crate::clock;
 
 /// Latest schema version this binary knows. `/healthz` reports it.
-pub const LATEST_SCHEMA_VERSION: u32 = 7;
+pub const LATEST_SCHEMA_VERSION: u32 = 8;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
@@ -87,6 +87,12 @@ const MIGRATIONS: &[Migration] = &[
             broken: "breaks the thread invariant (its root is in a thread or in another room, \
                      or it is a reply outside any thread)",
         }),
+    },
+    Migration {
+        version: 8,
+        sql: V8_SCHEMA,
+        rebuilds_tables: false,
+        post_check: None,
     },
 ];
 
@@ -328,6 +334,52 @@ WHERE r.thread_id IS NOT NULL OR r.room_id <> t.room_id
 UNION ALL
 SELECT message_id FROM messages WHERE reply_to IS NOT NULL AND thread_id IS NULL
 LIMIT 1";
+
+/// v8 (S16): reactions and the kind registry (ADR-0014). The registry with
+/// its seven seeded kinds (`created_at` is the migration time), the
+/// `change_seq` sequence, the append-only event log, the current-state
+/// table with tombstones, and the change an inbox reaction event points
+/// at. One transaction, no table rebuild; every v7 row stays (old inbox
+/// rows get `NULL` `change_seq`).
+const V8_SCHEMA: &str = "
+CREATE TABLE reaction_kinds (
+    slug TEXT PRIMARY KEY,
+    glyph TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    sort INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+INSERT INTO reaction_kinds (slug, glyph, label, sort, enabled, created_at) VALUES
+  ('ack',      '👌', '확인했다',  10, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  ('thumbsup', '👍', '좋다',      20, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  ('heart',    '❤️', '고마워',    30, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  ('eyes',     '👀', '보고 있다', 40, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  ('question', '❓', '확인 필요', 50, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  ('done',     '☑️', '처리 끝',   60, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  ('claim',    '🙋', '맡음',      70, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+INSERT INTO sequences (name, value) VALUES ('change_seq', 0);
+CREATE TABLE reaction_events (
+    change_seq INTEGER PRIMARY KEY,
+    message_id TEXT NOT NULL REFERENCES messages(message_id),
+    agent_id TEXT NOT NULL,
+    kind TEXT NOT NULL REFERENCES reaction_kinds(slug),
+    removed INTEGER NOT NULL,
+    wake INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX reaction_events_message ON reaction_events(message_id, change_seq);
+CREATE TABLE reactions (
+    message_id TEXT NOT NULL REFERENCES messages(message_id),
+    agent_id TEXT NOT NULL,
+    kind TEXT NOT NULL REFERENCES reaction_kinds(slug),
+    created_at TEXT NOT NULL,
+    removed INTEGER NOT NULL DEFAULT 0,
+    change_seq INTEGER NOT NULL UNIQUE REFERENCES reaction_events(change_seq),
+    PRIMARY KEY (message_id, agent_id, kind)
+);
+ALTER TABLE inbox_rows ADD COLUMN change_seq INTEGER REFERENCES reaction_events(change_seq);
+";
 
 /// Opens the database file and applies and verifies the connection PRAGMAs.
 /// Refuses to continue unless the journal mode is WAL.

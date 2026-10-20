@@ -295,13 +295,14 @@ async fn inbox_history_and_message_show_print_the_event_fields() {
             "THREAD_ID",
             "CORRECTS",
             "REPLIES",
+            "REACTIONS",
             "BODY"
         ]
     );
     assert_eq!(
         rows[1][7..],
-        ["-", "-", "1", "q"],
-        "S15: the root's replies"
+        ["-", "-", "1", "-", "q"],
+        "S15: the root's replies; S16: no reactions"
     );
     assert_eq!(
         rows[2][3..],
@@ -311,6 +312,7 @@ async fn inbox_history_and_message_show_print_the_event_fields() {
             first_id.as_str(),
             "agent-a",
             first_id.as_str(),
+            "-",
             "-",
             "-",
             "a"
@@ -332,7 +334,8 @@ async fn inbox_all_pages_json_keeps_unknown_kinds_and_fields() {
         "body": "x", "reply_to": null, "wake": true, "mentions": [],
         "created_at": "2026-10-20T09:00:00.000Z", "reactions": []
     });
-    let reaction = json!({"inbox_seq": "2", "kind": "reaction", "emoji": "👍"});
+    // S16 made `reaction` a known kind; a later slice's kind stands in.
+    let reaction = json!({"inbox_seq": "2", "kind": "poll", "emoji": "👍"});
     let first = json!({
         "agent_id": "agent-a", "read_marker": "0", "snapshot_head_seq": "2",
         "items": [message], "next_after_seq": "1", "has_more": true
@@ -369,7 +372,7 @@ async fn inbox_all_pages_json_keeps_unknown_kinds_and_fields() {
     assert_eq!(
         rows[1],
         [
-            "2", "reaction", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"
+            "2", "poll", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"
         ]
     );
 }

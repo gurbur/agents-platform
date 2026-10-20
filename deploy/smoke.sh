@@ -7,7 +7,8 @@
 #   <owner-token-file>  file holding the owner token (read, never printed)
 #   --receiver-url URL  a mock receiver the server can reach (deploy/mock-receiver.py);
 #                       without it the receiver scenarios (5, 19-21) are SKIP and
-#                       the thread scenario (25-29) judges wakes without 202s
+#                       the thread (25-29) and reaction (32-36) scenarios judge
+#                       wakes without 202s
 #   --receiver-log FILE that mock receiver's stdout, to check the wake body keys (21)
 #   --identity-aud AUD  audience for the identity token scenario (default: garage-docs);
 #                       a hub without [identity] makes that scenario SKIP
@@ -22,7 +23,8 @@
 # The `all` scenario fans out to every agent joined to `all`, including real
 # ones. At the end the smoke agents are deleted (their messages stay in the
 # history, like any deleted agent's). The smoke topic rooms room:smoke-<ulid>
-# stay, archived: rooms are never deleted (S13).
+# stay, archived: rooms are never deleted (S13). The smoke reaction kind
+# smoke_<ulid> stays, disabled: kinds are never deleted (S16).
 set -euo pipefail
 
 # shellcheck source=deploy/lib.sh
@@ -1417,6 +1419,181 @@ check_corrections() {
   note="201 with corrects; not_own, room_mismatch 422; not_found 404"
 }
 
+# ---- S16: reactions and claims ------------------------------------------------
+
+# platform <args...> without --json (the human rendering), token from a file.
+cli_text() {
+  local token="$1"
+  shift
+  "$platform_bin" --url "$base_url" --token-file "$token" "$@" 2>"$workdir/cli.stderr"
+}
+
+# Four random CJK ideographs (U+4E00..U+9FFF): a glyph no earlier run took.
+random_glyph() {
+  local points=() value
+  for value in $(od -An -N8 -tu2 /dev/urandom); do
+    points+=($((0x4E00 + value % 20992)))
+  done
+  jq -nr --argjson points "[$(IFS=,; printf '%s' "${points[*]:0:4}")]" '$points | implode'
+}
+
+# AGENT's reaction events for MESSAGE_ID as `kind:sender:wake:woke` lines.
+reaction_events_of() {
+  cli "$(token_file "$1")" inbox --all-pages |
+    jq -r --arg id "$2" '.items[] | select(.kind == "reaction" and .message_id == $id)
+      | "\(.reaction):\(.sender_id):\(.wake):\(.woke)"'
+}
+
+# The room's feed after CURSOR for MESSAGE_ID as `kind:agent:removed`
+# lines in change order (pages through has_more).
+feed_of() {
+  local room="$1" cursor="$2" message_id="$3" token="$4" pages=0 lines=""
+  while :; do
+    api GET "/v1/reactions?room_id=$room&after_change_seq=$cursor&limit=100" "$token"
+    [[ "$http_status" == 200 ]] || return 1
+    jq -e '(.has_more | type == "boolean") and (.items | map(.change_seq | tonumber) | . == sort)' \
+      >/dev/null <<<"$http_body" || return 1
+    lines="$lines$(jq -r --arg id "$message_id" '.items[] | select(.message_id == $id)
+      | "\(.kind):\(.agent_id):\(.removed)"' <<<"$http_body")"$'\n'
+    cursor="$(jq -r .next_after_change_seq <<<"$http_body")"
+    pages=$((pages + 1))
+    [[ "$(jq -r .has_more <<<"$http_body")" == true && "$pages" -lt 50 ]] || break
+  done
+  printf '%s' "$lines" | sed '/^$/d'
+}
+
+# Scenarios 32-36: B's thumbsup on A's `all` message is 201 then 200 and
+# reaches A's inbox as a quiet `reaction` event (with --receiver-url A stays
+# idle with the same last_accepted_seq); `--wake` wakes A; A's reaction to
+# its own message makes no event; the summary shows every kind; unreact is
+# 204 twice; an unknown kind is 422, another pair's DM 404; the owner adds
+# a kind that lists and works until disabled (422); the room's feed holds
+# the additions and the removal in change order; a claim on a thread root
+# shows in `thread show`; an agent key cannot edit kinds (403).
+check_reactions() {
+  local key_a key_b key_c target path start json head last expected
+  key_a="$(token_file "$agent_a")"
+  key_b="$(token_file "$agent_b")"
+  key_c="$(token_file "$agent_c")"
+  if [[ -n "$receiver_url" ]]; then
+    cli "$key_a" receiver set "$agent_a" "$receiver_url" --wake-policy sender >/dev/null || {
+      note="receiver set $agent_a failed: $(cli_error)"
+      return 1
+    }
+  fi
+  target="$(thread_send "$key_a" --room all --body "smoke reaction target")" || return 1
+  path="/v1/messages/$target/reactions"
+  api GET "/v1/reactions?room_id=all" "$key_b"
+  expect_status 200 "feed cursor" || return 1
+  start="$(jq -r .next_after_change_seq <<<"$http_body")"
+  ack_head "$agent_a" || return 1
+  last="$(delivery_field "$agent_a" last_accepted_seq)" || return 1
+
+  # 32, 33: new 201, repeat 200; one quiet event for the author.
+  api PUT "$path/thumbsup" "$key_b" '{}'
+  expect_status 201 "first thumbsup" || return 1
+  api PUT "$path/thumbsup" "$key_b" '{}'
+  expect_status 200 "repeated thumbsup" || return 1
+  [[ "$(reaction_events_of "$agent_a" "$target")" == "thumbsup:$agent_b:false:false" ]] || {
+    note="A's reaction events: $(reaction_events_of "$agent_a" "$target" | tr '\n' ' ')"
+    return 1
+  }
+  not_woken "$agent_a" || {
+    note="a quiet reaction woke the author"
+    return 1
+  }
+  if [[ -n "$receiver_url" ]]; then
+    stays_quiet "$agent_a" "$last" || return 1
+  fi
+  cli "$key_b" react "$target" eyes --wake >/dev/null || {
+    note="react --wake failed: $(cli_error)"
+    return 1
+  }
+  head="$(head_of "$agent_a")" || return 1
+  is_woken "$agent_a" || {
+    note="react --wake did not wake the author"
+    return 1
+  }
+  if [[ -n "$receiver_url" ]]; then
+    wait_accepted "$agent_a" "$head" || return 1
+  fi
+  ack_head "$agent_a" || return 1
+  cli "$key_a" react "$target" ack >/dev/null || {
+    note="react to own message failed: $(cli_error)"
+    return 1
+  }
+  [[ "$(head_of "$agent_a")" == "$head" ]] || {
+    note="a reaction to one's own message made an inbox row"
+    return 1
+  }
+  json="$(cli "$key_c" message show "$target")" || return 1
+  expect_json "$json" "[.reactions[] | {kind, agents}] == [{kind: \"ack\", agents: [\"$agent_a\"]},
+      {kind: \"thumbsup\", agents: [\"$agent_b\"]}, {kind: \"eyes\", agents: [\"$agent_b\"]}]" \
+    "message show reactions: $(jq -c .reactions <<<"$json")" || return 1
+  api DELETE "$path/thumbsup" "$key_b"
+  expect_status 204 "unreact" || return 1
+  api DELETE "$path/thumbsup" "$key_b"
+  expect_status 204 "unreact again" || return 1
+  expect_cli_error unknown_reaction_kind "an unknown kind" "$key_b" react "$target" nosuchkind || return 1
+  expect_cli_error message_not_found "another pair's DM" "$key_c" react "$dm_message_id" thumbsup || return 1
+
+  # 34: the owner's kind lists and works until disabled.
+  local slug glyph
+  slug="smoke_$(new_ulid)"
+  glyph="$(random_glyph)"
+  json="$(cli "$owner_token_file" reaction-kind set "$slug" --glyph "$glyph" --label smoke)" || {
+    note="reaction-kind set failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" ".slug == \"$slug\" and .enabled == true" "new kind: $json" || return 1
+  json="$(cli "$key_b" react --list)" || return 1
+  expect_json "$json" "any(.kinds[]; .slug == \"$slug\")" "react --list lacks $slug" || return 1
+  api PUT "$path/$slug" "$key_b" '{}'
+  expect_status 201 "react with the new kind" || return 1
+  json="$(cli "$owner_token_file" reaction-kind set "$slug" --glyph "$glyph" --label smoke --enabled false)" || return 1
+  expect_json "$json" ".enabled == false" "disable: $json" || return 1
+  api PUT "$path/$slug" "$key_b" '{}'
+  expect_status 422 "react with the disabled kind" || return 1
+  expect_json "$http_body" '.error.code == "unknown_reaction_kind"' "disabled kind: $http_body" || return 1
+  expect_cli_error forbidden "an agent key editing kinds" "$key_b" reaction-kind set "$slug" --glyph "$glyph" --label x ||
+    return 1
+
+  # 35: the feed holds this message's changes in change order.
+  local feed
+  feed="$(feed_of all "$start" "$target" "$key_c")" || {
+    note="feed after $start: HTTP $http_status $(head -c 200 <<<"$http_body")"
+    return 1
+  }
+  expected="$(printf '%s\n' "thumbsup:$agent_b:false" "eyes:$agent_b:false" "ack:$agent_a:false" \
+    "thumbsup:$agent_b:true" "$slug:$agent_b:false")"
+  [[ "$feed" == "$expected" ]] || {
+    note="feed for the message: $(tr '\n' ' ' <<<"$feed")"
+    return 1
+  }
+  api GET "/v1/reactions?room_id=$dm_room" "$key_c"
+  expect_status 403 "C's feed of another pair's DM" || return 1
+
+  # 36: a claim on a thread root shows in `thread show`.
+  local root
+  root="$(thread_send "$key_a" --room all --body "smoke claim root")" || return 1
+  thread_send "$key_b" --reply-to "$root" --body "smoke claim reply" >/dev/null || return 1
+  cli "$key_c" react "$root" claim >/dev/null || {
+    note="react claim failed: $(cli_error)"
+    return 1
+  }
+  json="$(cli_text "$key_a" thread show "$root")" || {
+    note="thread show failed: $(cli_error)"
+    return 1
+  }
+  grep -Eq "^claimed_by +$agent_c\$" <<<"$json" || {
+    note="thread show: $(grep -E '^(claimed|done)_by' <<<"$json" | tr '\n' ' ')"
+    return 1
+  }
+  local receipts=""
+  [[ -n "$receiver_url" ]] || receipts=" (wakes judged by pending_seq; 202s need --receiver-url)"
+  note="201/200/204, quiet author event, --wake wakes, kinds add/disable, feed, claimed_by$receipts"
+}
+
 # Deletes the smoke agents so they stop accumulating; their messages stay.
 check_cleanup() {
   local agent failed=""
@@ -1508,6 +1685,7 @@ main() {
   fi
   scenario "threads (25-29)" check_threads
   scenario "corrections (30-31)" check_corrections
+  scenario "reactions (32-36)" check_reactions
   scenario "cleanup (delete smoke agents)" check_cleanup
   print_table
 }

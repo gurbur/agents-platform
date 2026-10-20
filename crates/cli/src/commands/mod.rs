@@ -13,6 +13,7 @@ pub mod inbox;
 pub mod message;
 pub mod presence;
 pub mod profile;
+pub mod react;
 pub mod receiver;
 pub mod rooms;
 pub mod send;
@@ -61,6 +62,9 @@ pub async fn run(command: Command, context: &Context) -> Result<(), CliError> {
         Command::Presence(command) => presence::run(command, context).await,
         Command::Room(command) => rooms::run(command, context).await,
         Command::Thread(command) => thread::run(command, context).await,
+        Command::React(args) => react::react(args, context).await,
+        Command::Unreact(args) => react::unreact(args, context).await,
+        Command::ReactionKind(command) => react::run_kind(command, context).await,
         Command::Health => health::run(context).await,
     }
 }

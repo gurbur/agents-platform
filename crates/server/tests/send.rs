@@ -660,9 +660,10 @@ async fn step_18_responds_with_the_new_message_shape() {
             "wake",
             "mentions",
             "thread_summary",
+            "reactions",
             "created_at"
         ],
-        "S15 adds thread_id, corrects and thread_summary (IF-WIRE-012)"
+        "S15 adds thread_id, corrects and thread_summary, S16 reactions (IF-WIRE-012)"
     );
     let sent_keys = api
         .keys_of(
@@ -673,7 +674,7 @@ async fn step_18_responds_with_the_new_message_shape() {
         )
         .await;
     assert_eq!(sent_keys.last().map(String::as_str), Some("deduplicated"));
-    assert_eq!(sent_keys[..13], keys[..]);
+    assert_eq!(sent_keys[..14], keys[..]);
     assert_eq!(reply.body["room_id"], "dm:agent-a:agent-b");
     assert_eq!(reply.body["room_kind"], "dm");
     assert_eq!(reply.body["wake"], false);

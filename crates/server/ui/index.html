@@ -77,8 +77,26 @@
 </div>
 
 <dialog id="dir" tabindex="-1">
-  <div class="dlg-head"><span><b>디렉토리</b><span class="muted" id="dirCount"></span></span><span class="dlg-tools"><button class="btn sm primary" data-act="reg-open"><svg class="svg" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>에이전트 등록</button><button class="btn icon" data-act="dir-close" aria-label="닫기"><svg class="svg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></span></div>
+  <div class="dlg-head"><span><b>디렉토리</b><span class="muted" id="dirCount"></span></span><span class="dlg-tools"><button class="btn sm" data-act="kinds-open" title="반응 종류 설정">반응 종류</button><button class="btn sm primary" data-act="reg-open"><svg class="svg" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>에이전트 등록</button><button class="btn icon" data-act="dir-close" aria-label="닫기"><svg class="svg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></span></div>
   <div class="tbl-wrap"><table><thead><tr><th>NAME</th><th>ROLE</th><th>JOINED_ALL</th><th>PRESENCE</th><th>DELIVERY</th><th></th></tr></thead><tbody id="dirBody"></tbody></table></div>
+</dialog>
+
+<dialog id="kinds" tabindex="-1">
+  <div class="dlg-head"><span><b>반응 종류</b><span class="muted" id="kindsCount"></span></span><span class="dlg-tools"><button class="btn icon" data-act="kinds-close" aria-label="닫기"><svg class="svg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></span></div>
+  <div class="tbl-wrap"><table><thead><tr><th>GLYPH</th><th>SLUG</th><th>LABEL</th><th>SORT</th><th>ENABLED</th><th></th></tr></thead><tbody id="kindsBody"></tbody></table></div>
+  <form id="kindForm" class="dlg-body kind-form" autocomplete="off">
+    <b id="kindFormTitle">새 종류</b>
+    <div class="kind-fields">
+      <label class="form-row"><span>slug</span><span class="field"><input id="kindSlug" placeholder="party" spellcheck="false" autocapitalize="off" autocomplete="off" required></span></label>
+      <label class="form-row"><span>glyph</span><span class="field"><input id="kindGlyph" placeholder="🎉" spellcheck="false" autocomplete="off" required></span></label>
+      <label class="form-row"><span>label</span><span class="field"><input id="kindLabel" placeholder="축하" autocomplete="off" required></span></label>
+      <label class="form-row"><span>sort <em>선택</em></span><span class="field"><input id="kindSort" inputmode="numeric" placeholder="맨 뒤" autocomplete="off"></span></label>
+    </div>
+    <small class="muted">slug는 소문자로 시작하는 a-z·0-9·_ 2~32자, glyph는 공백 없는 1~4자, label은 32자 이하입니다. 종류는 지우지 않고 끕니다 — 꺼진 종류는 새로 달 수 없고 이미 달린 반응은 남습니다.</small>
+    <label class="check"><input id="kindEnabled" type="checkbox" checked>켜짐</label>
+    <p class="err flush" id="kindError" role="alert" hidden></p>
+    <div class="row-end"><button class="btn sm" type="button" data-act="kind-new">새로 쓰기</button><button class="btn sm primary" type="submit" id="kindGo">추가</button></div>
+  </form>
 </dialog>
 
 <dialog id="reg" class="narrow" tabindex="-1">

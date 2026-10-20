@@ -16,6 +16,7 @@ use crate::commands::inbox::InboxArgs;
 use crate::commands::message::MessageCommand;
 use crate::commands::presence::PresenceCommand;
 use crate::commands::profile::ProfileCommand;
+use crate::commands::react::{ReactArgs, ReactionKindCommand, UnreactArgs};
 use crate::commands::receiver::ReceiverCommand;
 use crate::commands::rooms::RoomCommand;
 use crate::commands::send::SendArgs;
@@ -78,6 +79,14 @@ pub enum Command {
     /// Threads: show one, mute or unmute its wakes
     #[command(subcommand)]
     Thread(ThreadCommand),
+    /// React to a message — PUT /v1/messages/{message_id}/reactions/{kind};
+    /// `--list` shows the kinds — GET /v1/reaction-kinds
+    React(ReactArgs),
+    /// Remove a reaction — DELETE /v1/messages/{message_id}/reactions/{kind}
+    Unreact(UnreactArgs),
+    /// The reaction kind registry (owner)
+    #[command(subcommand)]
+    ReactionKind(ReactionKindCommand),
     /// Delivery diagnostics and manual retry
     Delivery(DeliveryArgs),
     /// Identity tokens for third parties

@@ -406,6 +406,50 @@ fn calls() -> Vec<Call> {
             "/v1/threads/{root}/participation",
             json_body(json!({"wake": false, "agent_id": "human"})),
         ),
+        // S16: the kind registry (owner: every kind), an owner kind edit,
+        // reacting quietly as "나" and following the room's changes.
+        call(
+            "reactionKinds",
+            Method::GET,
+            "/v1/reaction-kinds",
+            "/v1/reaction-kinds?all=true",
+            None,
+        ),
+        call(
+            "reactionKind",
+            Method::PUT,
+            "/v1/reaction-kinds/${encodeURIComponent(slug)}",
+            "/v1/reaction-kinds/console_kind",
+            json_body(json!({"glyph": "🪁", "label": "콘솔", "enabled": true})),
+        ),
+        call(
+            "reactions",
+            Method::GET,
+            "/v1/reactions",
+            "/v1/reactions?room_id=all",
+            None,
+        ),
+        call(
+            "reaction",
+            Method::PUT,
+            "/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(kind)}",
+            "/v1/messages/{root}/reactions/console_kind",
+            json_body(json!({"sender_id": "human"})),
+        ),
+        call(
+            "reactions",
+            Method::GET,
+            "/v1/reactions",
+            "/v1/reactions?room_id=all&after_change_seq=0",
+            None,
+        ),
+        call(
+            "reaction",
+            Method::DELETE,
+            "/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(kind)}",
+            "/v1/messages/{root}/reactions/console_kind",
+            json_body(json!({"sender_id": "human"})),
+        ),
         // S15: a correction is the one send with `corrects`.
         call(
             "messages",
@@ -664,4 +708,66 @@ fn threads_and_corrections_use_the_documented_queries_and_no_new_polling() {
     );
     // A send names one destination: reply_to for a thread, room_id otherwise.
     assert!(!APP_JS.contains("body.thread_id"));
+}
+
+/// S16: kinds come with the directory refresh and reaction changes with the
+/// feed poll (no new timer); a reaction is "나"'s (`sender_id: S.me`) and
+/// quiet (no `wake`); glyphs, labels and names go in as text; `claim` shows
+/// as "맡음: …" and dims once `done` is there; the owner edits kinds in a
+/// dialog next to the directory.
+#[test]
+fn reactions_are_quiet_text_only_and_follow_the_feed_poll() {
+    for needle in [
+        "after_change_seq",
+        "next_after_change_seq",
+        "sender_id: S.me",
+        "'claim'",
+        "'done'",
+        "맡음: ",
+        "all: 'true'",
+    ] {
+        assert!(APP_JS.contains(needle), "app.js lacks {needle}");
+    }
+    let sends: Vec<&str> = APP_JS
+        .lines()
+        .filter(|line| line.contains("API.reaction("))
+        .collect();
+    assert!(!sends.is_empty(), "app.js never reacts");
+    for line in sends {
+        assert!(!line.contains("wake"), "a reaction wakes: {line}");
+    }
+    // Reaction changes ride the feed poll; the kinds the directory refresh.
+    let poll = APP_JS
+        .split("async function pollFeed() {")
+        .nth(1)
+        .expect("pollFeed");
+    let poll = &poll[..poll.find("\n}").expect("end of pollFeed")];
+    assert!(
+        poll.contains("pollReactions("),
+        "pollFeed does not follow reactions"
+    );
+    let directory = APP_JS
+        .split("async function refreshDirectory() {")
+        .nth(1)
+        .expect("refreshDirectory");
+    let directory = &directory[..directory.find("\n}").expect("end of refreshDirectory")];
+    assert!(
+        directory.contains("loadKinds("),
+        "kinds are not refreshed with the directory"
+    );
+    assert_eq!(APP_JS.matches("setInterval(").count(), 2, "no new timer");
+    // Server text stays text.
+    for line in APP_JS
+        .lines()
+        .filter(|line| line.contains(".glyph") || line.contains(".label"))
+    {
+        assert!(!line.contains("HTML"), "{line}");
+    }
+    assert!(
+        INDEX_HTML.contains("id=\"kinds\""),
+        "no kind settings dialog"
+    );
+    assert!(INDEX_HTML.contains("data-act=\"kinds-open\""));
+    assert!(APP_CSS.contains(".reacts{"), "no chip row style");
+    assert!(APP_CSS.contains(".claim.done{"), "no dimmed claim style");
 }

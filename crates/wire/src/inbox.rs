@@ -9,18 +9,16 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use crate::{AgentId, Message, Seq};
+use crate::{AgentId, Message, ReactionEvent, Seq};
 
 /// The `kind` of a message event.
 pub const MESSAGE_KIND: &str = "message";
 
+/// The `kind` of a reaction event (S16).
+pub const REACTION_KIND: &str = "reaction";
+
 /// What an inbox row records.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "consumers in other repositories match `Message { message, .. }` by value; \
-              a page holds at most 100 items"
-)]
 pub enum InboxEvent {
     /// `kind = "message"`: `woke`, then the message's fields flat next to
     /// `inbox_seq` and `kind`. `woke` is per recipient: whether the
@@ -28,6 +26,9 @@ pub enum InboxEvent {
     /// this recipient. A recipient's own `wake_policy = always` does not
     /// make it true, so history messages have no such field.
     Message { woke: bool, message: Message },
+    /// `kind = "reaction"` (S16): someone reacted to the recipient's own
+    /// message. `woke` is the reacting agent's `wake`.
+    Reaction { woke: bool, reaction: ReactionEvent },
     /// A `kind` this crate does not know (a later slice added it). Readers
     /// skip it and still move the read marker over it.
     Unknown { kind: String },
@@ -49,9 +50,17 @@ impl InboxItem {
         }
     }
 
+    pub fn reaction(inbox_seq: Seq, woke: bool, reaction: ReactionEvent) -> Self {
+        Self {
+            inbox_seq,
+            event: InboxEvent::Reaction { woke, reaction },
+        }
+    }
+
     pub fn kind(&self) -> &str {
         match &self.event {
             InboxEvent::Message { .. } => MESSAGE_KIND,
+            InboxEvent::Reaction { .. } => REACTION_KIND,
             InboxEvent::Unknown { kind } => kind,
         }
     }
@@ -59,28 +68,35 @@ impl InboxItem {
     pub fn as_message(&self) -> Option<&Message> {
         match &self.event {
             InboxEvent::Message { message, .. } => Some(message),
-            InboxEvent::Unknown { .. } => None,
+            InboxEvent::Reaction { .. } | InboxEvent::Unknown { .. } => None,
         }
     }
 
     pub fn as_message_mut(&mut self) -> Option<&mut Message> {
         match &mut self.event {
             InboxEvent::Message { message, .. } => Some(message),
-            InboxEvent::Unknown { .. } => None,
+            InboxEvent::Reaction { .. } | InboxEvent::Unknown { .. } => None,
         }
     }
 
-    /// `woke` of a message event; `None` for other kinds.
+    pub fn as_reaction(&self) -> Option<&ReactionEvent> {
+        match &self.event {
+            InboxEvent::Reaction { reaction, .. } => Some(reaction),
+            InboxEvent::Message { .. } | InboxEvent::Unknown { .. } => None,
+        }
+    }
+
+    /// `woke` of a message or reaction event; `None` for unknown kinds.
     pub fn woke(&self) -> Option<bool> {
         match &self.event {
-            InboxEvent::Message { woke, .. } => Some(*woke),
+            InboxEvent::Message { woke, .. } | InboxEvent::Reaction { woke, .. } => Some(*woke),
             InboxEvent::Unknown { .. } => None,
         }
     }
 }
 
 /// The serialized shape of a message event: `inbox_seq`, `kind`, `woke`,
-/// then the thirteen message keys.
+/// then the fourteen message keys.
 #[derive(Serialize)]
 struct MessageEvent<'a> {
     inbox_seq: Seq,
@@ -88,6 +104,17 @@ struct MessageEvent<'a> {
     woke: bool,
     #[serde(flatten)]
     message: &'a Message,
+}
+
+/// The serialized shape of a reaction event: `inbox_seq`, `kind`, `woke`,
+/// then the nine [`ReactionEvent`] keys (twelve in all).
+#[derive(Serialize)]
+struct ReactionEventShape<'a> {
+    inbox_seq: Seq,
+    kind: &'static str,
+    woke: bool,
+    #[serde(flatten)]
+    reaction: &'a ReactionEvent,
 }
 
 #[derive(Serialize)]
@@ -106,6 +133,13 @@ impl Serialize for InboxItem {
                 message,
             }
             .serialize(serializer),
+            InboxEvent::Reaction { woke, reaction } => ReactionEventShape {
+                inbox_seq: self.inbox_seq,
+                kind: REACTION_KIND,
+                woke: *woke,
+                reaction,
+            }
+            .serialize(serializer),
             InboxEvent::Unknown { kind } => UnknownEvent {
                 inbox_seq: self.inbox_seq,
                 kind,
@@ -120,13 +154,18 @@ impl<'de> Deserialize<'de> for InboxItem {
         let mut fields = Map::<String, Value>::deserialize(deserializer)?;
         let inbox_seq: Seq = take(&mut fields, "inbox_seq")?;
         let kind: String = take(&mut fields, "kind")?;
-        if kind != MESSAGE_KIND {
+        if kind != MESSAGE_KIND && kind != REACTION_KIND {
             return Ok(Self {
                 inbox_seq,
                 event: InboxEvent::Unknown { kind },
             });
         }
         let woke: bool = take(&mut fields, "woke")?;
+        if kind == REACTION_KIND {
+            let reaction =
+                ReactionEvent::deserialize(Value::Object(fields)).map_err(D::Error::custom)?;
+            return Ok(Self::reaction(inbox_seq, woke, reaction));
+        }
         let message = Message::deserialize(Value::Object(fields)).map_err(D::Error::custom)?;
         Ok(Self::message(inbox_seq, woke, message))
     }
@@ -201,6 +240,7 @@ mod tests {
                     wake: true,
                     mentions: vec![],
                     thread_summary: None,
+                    reactions: vec![],
                     created_at: "2026-10-14T10:00:00.000Z".into(),
                 },
             )],
@@ -230,6 +270,7 @@ mod tests {
                     "wake": true,
                     "mentions": [],
                     "thread_summary": null,
+                    "reactions": [],
                     "created_at": "2026-10-14T10:00:00.000Z"
                 }],
                 "next_after_seq": "42",
@@ -244,11 +285,11 @@ mod tests {
         let item = InboxItem {
             inbox_seq: seq(3),
             event: InboxEvent::Unknown {
-                kind: "reaction".into(),
+                kind: "poll".into(),
             },
         };
         let value = serde_json::to_value(&item).unwrap();
-        assert_eq!(value, json!({"inbox_seq": "3", "kind": "reaction"}));
+        assert_eq!(value, json!({"inbox_seq": "3", "kind": "poll"}));
         assert_eq!(serde_json::from_value::<InboxItem>(value).unwrap(), item);
     }
 

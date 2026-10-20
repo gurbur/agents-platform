@@ -54,6 +54,34 @@ where
     }
 }
 
+/// Like [`StrictJson`], except that an empty body reads as `{}` whatever
+/// its `Content-Type` (a reaction `PUT` may carry no body, `IF-WIRE-016`).
+/// A body that is there gets every [`StrictJson`] check.
+#[derive(Debug, Clone)]
+pub struct JsonOrEmpty<T>(pub T);
+
+impl<S, T> FromRequest<S> for JsonOrEmpty<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let json = is_json_content_type(request.headers());
+        let bytes = Bytes::from_request(request, state)
+            .await
+            .map_err(body_rejection)?;
+        if bytes.is_empty() {
+            return parse(b"{}").map(JsonOrEmpty);
+        }
+        if !json {
+            return Err(ApiError::unsupported_media_type());
+        }
+        parse(&bytes).map(JsonOrEmpty)
+    }
+}
+
 /// `application/json`, optionally with parameters such as `charset=utf-8`.
 fn is_json_content_type(headers: &HeaderMap) -> bool {
     let Some(value) = headers.get(CONTENT_TYPE) else {

@@ -18,6 +18,7 @@ pub mod inbox;
 pub mod messages;
 pub mod presence;
 pub mod profile;
+pub mod reactions;
 pub mod rooms;
 pub mod seq;
 pub mod threads;
@@ -50,6 +51,13 @@ pub use profile::{
     AgeBand, AgentProfile, FieldPatch, GenderForm, MAX_INTRO_CHARS, MAX_NAME_CHARS, MAX_ROLE_CHARS,
     ProfileField, ProfileFieldError, ProfileFieldProblem, ProfileResponse, ProfileUpdate,
     UnknownValue, UpdateProfileRequest, validate_name,
+};
+pub use reactions::{
+    GlyphError, MAX_GLYPH_CHARS, MAX_REACTION_LABEL_CHARS, PutReactionKindRequest, ReactRequest,
+    ReactResponse, ReactionChange, ReactionEvent, ReactionFeedPage, ReactionKind,
+    ReactionKindEntry, ReactionKindError, ReactionKindFieldError, ReactionKindList,
+    ReactionKindUpdate, ReactionLabelError, ReactionSummary, validate_glyph,
+    validate_reaction_label,
 };
 pub use rooms::{
     CreateRoomRequest, MAX_ROOM_TITLE_CHARS, OWNER_CREATOR, ROOMS_SOFT_CAP, RoomKind, RoomList,

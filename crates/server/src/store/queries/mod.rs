@@ -7,5 +7,7 @@ pub mod avatars;
 pub mod delivery;
 pub mod inbox;
 pub mod messages;
+pub mod reaction_kinds;
+pub mod reactions;
 pub mod rooms;
 pub mod threads;

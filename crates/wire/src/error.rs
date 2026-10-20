@@ -82,6 +82,11 @@ pub mod codes {
     pub const CORRECTS_NOT_FOUND: &str = "corrects_not_found";
     pub const CORRECTS_ROOM_MISMATCH: &str = "corrects_room_mismatch";
     pub const CORRECTS_NOT_OWN: &str = "corrects_not_own";
+    /// S16 reaction codes (`IF-WIRE-003`, `IF-WIRE-016`, `IF-WIRE-017`):
+    /// a well-formed kind the registry lacks or has disabled, and a glyph
+    /// another kind already uses.
+    pub const UNKNOWN_REACTION_KIND: &str = "unknown_reaction_kind";
+    pub const GLYPH_TAKEN: &str = "glyph_taken";
     /// Directory avatar codes (API_V1 "Directory avatar", `IF-WIRE-008`).
     pub const AVATAR_TOO_LARGE: &str = "avatar_too_large";
     pub const AVATAR_NOT_FOUND: &str = "avatar_not_found";

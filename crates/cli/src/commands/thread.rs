@@ -2,7 +2,9 @@
 //! `PUT /v1/threads/{root_id}/participation` (`IF-CLI-001` S15).
 
 use clap::Subcommand;
-use platform_wire::{AgentId, MessageId, ParticipationRequest, ParticipationResponse, ThreadView};
+use platform_wire::{
+    AgentId, Message, MessageId, ParticipationRequest, ParticipationResponse, ThreadView,
+};
 use reqwest::Method;
 
 use super::Context;
@@ -47,12 +49,22 @@ fn thread_path(root_id: &MessageId, suffix: &str) -> String {
     format!("/v1/threads/{root_id}{suffix}")
 }
 
+/// The thread view, plus who claimed the root and who marked it done,
+/// read from the root's `reactions` with one more request (the wire's
+/// thread view has no such field). `--json` prints the view as sent.
 async fn show(root_id: &MessageId, context: &Context) -> Result<(), CliError> {
     let response = context
         .client
         .get::<ThreadView>(&thread_path(root_id, ""), &Vec::new())
         .await?;
-    context.show(&response, output::thread)
+    if context.json {
+        return output::emit_raw(&response.raw);
+    }
+    let root = context
+        .client
+        .get::<Message>(&format!("/v1/messages/{root_id}"), &Vec::new())
+        .await?;
+    output::emit(&output::thread(&response.value, &root.value))
 }
 
 async fn participate(

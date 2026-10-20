@@ -14,7 +14,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::agents::present_nullable;
-use crate::{AgentId, AgentIdError, RoomKind, Seq, ThreadSummary};
+use crate::{AgentId, AgentIdError, ReactionSummary, RoomKind, Seq, ThreadSummary};
 
 /// Maximum decoded UTF-8 length of a message `body` in bytes (`IF-API-COMMON`: 16 KiB).
 pub const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -310,13 +310,15 @@ pub struct SendMessageRequest {
 }
 
 /// A stored message, as history, single-message lookups and the send
-/// response carry it (`IF-WIRE-012`): always these thirteen keys in this
+/// response carry it (`IF-WIRE-012`): always these fourteen keys in this
 /// order, `null` never omitted. `wake` is the sender's choice; `mentions`
 /// is in ASCII order, `[]` when nobody was named. `thread_id` is the root
 /// of the thread the message is in (`null` for a root and any message
 /// outside a thread); `corrects` the sender's own message it corrects.
 /// `thread_summary` is counted when read and only for a root with replies;
-/// the send response always has `null`.
+/// the send response always has `null`. `reactions` (S16) is the current
+/// reactions by kind in registry order, counted when read; the send
+/// response always has `[]`, and a message from an older hub reads as `[]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub message_id: MessageId,
@@ -331,6 +333,8 @@ pub struct Message {
     pub wake: bool,
     pub mentions: Vec<AgentId>,
     pub thread_summary: Option<ThreadSummary>,
+    #[serde(default)]
+    pub reactions: Vec<ReactionSummary>,
     pub created_at: String,
 }
 
@@ -496,6 +500,7 @@ mod tests {
             wake: true,
             mentions: vec![],
             thread_summary: None,
+            reactions: vec![],
             created_at: "2026-10-14T10:00:00.000Z".into(),
         }
     }
@@ -522,6 +527,7 @@ mod tests {
                 "wake": true,
                 "mentions": [],
                 "thread_summary": null,
+                "reactions": [],
                 "created_at": "2026-10-14T10:00:00.000Z",
                 "deduplicated": true
             })

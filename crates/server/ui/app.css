@@ -219,9 +219,38 @@ button,a,label,summary,input,textarea,select,[data-act],[role="tab"],[role="swit
 .mine .bq b{color:rgba(31,23,18,.85)}
 .mine .bq:hover span{color:var(--mine-tx)}
 .b-line{position:relative}
-.b-line .actions{top:-16px;right:0;z-index:1}
-.mine .b-line .actions{right:auto;left:0}
+.b-line .actions{top:-16px;z-index:1}
 .b-row:hover .actions,.b-row:focus-within .actions{display:flex}
+/* ---------- 반응 (S16) ---------- */
+.reacts{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-top:4px}
+.mine .reacts{justify-content:flex-end}
+.b-col > .reacts{margin:4px 2px 0}
+.rchip{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px;border:1px solid var(--line-2);border-radius:999px;background:var(--bg-raise);color:var(--tx-2);font-size:12.5px;line-height:1}
+.rchip:hover{border-color:var(--tx-3);color:var(--tx)}
+.rchip.mine{border-color:var(--ac-line);background:var(--ac-soft);color:var(--ac)}
+.rchip[disabled]{cursor:default;opacity:.8}
+.rchip .g{font-size:14px}
+.rchip .n{font-variant-numeric:tabular-nums;font-weight:600}
+.reacts .err{margin:0}
+.claim{display:inline-flex;align-items:center;max-width:100%;height:22px;padding:0 8px;border:1px solid var(--ac-line);border-radius:4px;color:var(--ac);font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.claim.done{opacity:.45}
+.claim-row{display:flex}
+.rbar{display:flex;align-items:center;gap:1px;margin-right:2px;padding-right:2px;border-right:1px solid var(--line-2)}
+.rbar:last-child{margin-right:0;padding-right:0;border-right:0}
+.actions .rbar button{padding:0 6px;font-size:15px}
+.actions .rbar button.on{background:var(--ac-soft);color:var(--ac)}
+.msg.acts-open .actions,.b-row.acts-open .actions{display:flex}
+/* The bar makes the menu wide: it grows away from the bubble's outer edge. */
+.actions{width:max-content;white-space:nowrap}
+.actions button{flex:none}
+.other .b-line .actions{left:0}
+.mine .b-line .actions{right:0}
+.kind-form{border-top:1px solid var(--line)}
+.kind-fields{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+td.glyph{font-size:18px}
+#kindsBody tr.off td{color:var(--tx-3)}
+#kindsBody tr.off td.glyph{opacity:.5}
+
 .b-row.flash .bubble{animation:bflash 1.8s ease-out}
 @keyframes bflash{0%,30%{outline:2px solid var(--ac);outline-offset:2px}100%{outline:2px solid transparent;outline-offset:2px}}
 
@@ -383,6 +412,7 @@ dialog.narrow{width:min(460px,calc(100vw - 32px))}
   .top .field{width:160px}
 }
 @media (max-width:720px){
+  .kind-fields{grid-template-columns:repeat(2,minmax(0,1fr))}
   .app,.app.info-off{grid-template-columns:minmax(0,1fr)}
   .main{display:none}
   .app.in-room .side{display:none}

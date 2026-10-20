@@ -39,7 +39,8 @@ const V1_ROWS: [(&str, &str); 8] = [
     ),
     (
         "sequences",
-        "SELECT name, value FROM sequences ORDER BY name",
+        // `event_seq` only: v8 adds the `change_seq` row (S16).
+        "SELECT name, value FROM sequences WHERE name = 'event_seq' ORDER BY name",
     ),
     (
         "messages",
@@ -637,7 +638,8 @@ const V4_ROWS: [(&str, &str); 9] = [
     ),
     (
         "sequences",
-        "SELECT name, value FROM sequences ORDER BY name",
+        // `event_seq` only: v8 adds the `change_seq` row (S16).
+        "SELECT name, value FROM sequences WHERE name = 'event_seq' ORDER BY name",
     ),
     (
         "messages",
@@ -949,7 +951,8 @@ const V5_ROWS: [(&str, &str); 12] = [
     ),
     (
         "sequences",
-        "SELECT name, value FROM sequences ORDER BY name",
+        // `event_seq` only: v8 adds the `change_seq` row (S16).
+        "SELECT name, value FROM sequences WHERE name = 'event_seq' ORDER BY name",
     ),
     (
         "messages",
@@ -1208,8 +1211,7 @@ async fn an_empty_database_starts_at_v7_with_thread_columns_and_participants() {
         .json()
         .await
         .unwrap();
-    assert_eq!(health["schema_version"], 7);
-    assert_eq!(LATEST_SCHEMA_VERSION, 7);
+    assert_eq!(health["schema_version"], LATEST_SCHEMA_VERSION);
     server.shutdown().await.unwrap();
 
     let (columns, participants, indexes) = fx
@@ -1251,7 +1253,7 @@ async fn a_v6_database_binds_old_reply_chains_into_threads() {
         .json()
         .await
         .unwrap();
-    assert_eq!(health["schema_version"], 7);
+    assert_eq!(health["schema_version"], LATEST_SCHEMA_VERSION);
     // The API sees the backfill: a top-level view without the old replies.
     let top = server
         .api()
@@ -1349,7 +1351,7 @@ async fn a_v6_database_binds_old_reply_chains_into_threads() {
     );
     assert_eq!(violations, 0, "PRAGMA foreign_key_check is empty");
     let numbers: Vec<u32> = versions.iter().map(|(version, _)| *version).collect();
-    assert_eq!(numbers, (1..=7).collect::<Vec<u32>>());
+    assert_eq!(numbers, (1..=LATEST_SCHEMA_VERSION).collect::<Vec<u32>>());
 
     // Reopening is a no-op.
     let server = RunningServer::start(&config).await;
@@ -1412,4 +1414,200 @@ async fn a_v7_post_check_violation_rolls_back_and_refuses_to_start() {
         platformd::start(&fx.load_config()).await.is_err(),
         "startup is refused"
     );
+}
+
+// ---- v8 (S16): reactions and the kind registry ------------------------------------------
+
+/// The seven seeded kinds `(slug, glyph, label, sort, enabled)` in order.
+fn seeded_kinds() -> Vec<Vec<SqlValue>> {
+    [
+        ("ack", "👌", "확인했다", 10),
+        ("thumbsup", "👍", "좋다", 20),
+        ("heart", "❤️", "고마워", 30),
+        ("eyes", "👀", "보고 있다", 40),
+        ("question", "❓", "확인 필요", 50),
+        ("done", "☑️", "처리 끝", 60),
+        ("claim", "🙋", "맡음", 70),
+    ]
+    .into_iter()
+    .map(|(slug, glyph, label, sort)| vec![text(slug), text(glyph), text(label), int(sort), int(1)])
+    .collect()
+}
+
+/// Every v7 column and row this test compares: the v6 rows, the thread
+/// columns, the participants, every inbox row (S13 columns included) and
+/// the v7 migration row.
+fn v7_snapshot(conn: &rusqlite::Connection) -> Result<Rows, StoreError> {
+    let mut rows = v6_snapshot(conn)?;
+    for (table, sql) in [
+        (
+            "messages v7",
+            "SELECT message_id, thread_id, corrects FROM messages ORDER BY event_seq",
+        ),
+        (
+            "thread_participants",
+            "SELECT thread_id, agent_id, joined_via, muted, joined_at FROM thread_participants
+             ORDER BY thread_id, agent_id",
+        ),
+        (
+            "inbox_rows v7",
+            "SELECT agent_id, inbox_seq, message_id, kind, wake, woke FROM inbox_rows
+             ORDER BY agent_id, inbox_seq",
+        ),
+        (
+            "schema_migrations v7",
+            "SELECT version, applied_at FROM schema_migrations WHERE version = 7",
+        ),
+    ] {
+        rows.push((table, select_all(conn, sql)?));
+    }
+    Ok(rows)
+}
+
+/// Builds a v7 database (the v6 fixture migrated, with its old replies
+/// bound into threads) and returns its rows.
+async fn write_v7_database(fx: &Fixture) -> Rows {
+    write_v6_database(fx, "").await;
+    let (store, thread) = Store::open(&fx.db_path()).unwrap();
+    let version = store
+        .run(|conn| migrations::apply_through(conn, 7))
+        .await
+        .unwrap();
+    assert_eq!(version, 7);
+    let snapshot = store.run(|conn| v7_snapshot(conn)).await.unwrap();
+    drop(store);
+    thread.shutdown(JOIN_LIMIT).await.unwrap();
+    snapshot
+}
+
+#[tokio::test]
+async fn an_empty_database_starts_at_v8_with_the_seeded_registry() {
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config()).await;
+    let health: Value = reqwest::get(server.url("/healthz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["schema_version"], 8);
+    assert_eq!(LATEST_SCHEMA_VERSION, 8);
+    server.shutdown().await.unwrap();
+
+    let (kinds, change_seq, tables, inbox_column) = fx
+        .read_db(|conn| {
+            Ok((
+                select_all(
+                    conn,
+                    "SELECT slug, glyph, label, sort, enabled FROM reaction_kinds ORDER BY sort",
+                )?,
+                select_all(
+                    conn,
+                    "SELECT value FROM sequences WHERE name = 'change_seq'",
+                )?,
+                select_all(
+                    conn,
+                    "SELECT name FROM sqlite_master WHERE type = 'table'
+                     AND name IN ('reaction_kinds', 'reaction_events', 'reactions') ORDER BY name",
+                )?,
+                select_all(
+                    conn,
+                    "SELECT name FROM pragma_table_info('inbox_rows') WHERE name = 'change_seq'",
+                )?,
+            ))
+        })
+        .await;
+    assert_eq!(kinds, seeded_kinds());
+    assert_eq!(change_seq, [vec![int(0)]]);
+    assert_eq!(
+        tables,
+        ["reaction_events", "reaction_kinds", "reactions"].map(|name| vec![text(name)])
+    );
+    assert_eq!(inbox_column, [vec![text("change_seq")]]);
+}
+
+#[tokio::test]
+async fn a_v7_database_gains_the_registry_and_keeps_every_row() {
+    let fx = Fixture::new();
+    let before = write_v7_database(&fx).await;
+    let config = fx.load_config();
+    let server = RunningServer::start(&config).await;
+    let health: Value = reqwest::get(server.url("/healthz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["schema_version"], 8);
+    // Old messages read with an empty summary.
+    let history = server
+        .api()
+        .get("/v1/messages?room_id=all", OWNER_TOKEN)
+        .await;
+    assert_eq!(history.status.as_u16(), 200, "{}", history.body);
+    let items = history.body["items"].as_array().unwrap();
+    assert!(!items.is_empty());
+    assert!(items.iter().all(|item| item["reactions"] == json!([])));
+    server.shutdown().await.unwrap();
+
+    let (after, kinds, created, change_seq, inbox_change_seqs, counts, violations, versions) = fx
+        .read_db(|conn| {
+            Ok((
+                v7_snapshot(conn)?,
+                select_all(
+                    conn,
+                    "SELECT slug, glyph, label, sort, enabled FROM reaction_kinds ORDER BY sort",
+                )?,
+                select_all(
+                    conn,
+                    "SELECT COUNT(DISTINCT created_at) FROM reaction_kinds
+                     WHERE created_at GLOB '[0-9][0-9][0-9][0-9]-*T*Z'",
+                )?,
+                select_all(conn, "SELECT value FROM sequences WHERE name = 'change_seq'")?,
+                select_all(
+                    conn,
+                    "SELECT COUNT(*), COUNT(change_seq) FROM inbox_rows",
+                )?,
+                select_all(
+                    conn,
+                    "SELECT (SELECT COUNT(*) FROM reactions), (SELECT COUNT(*) FROM reaction_events)",
+                )?,
+                foreign_key_violations(conn)?,
+                applied_migrations(conn)?,
+            ))
+        })
+        .await;
+    assert_eq!(after, before, "every v7 row and value is unchanged");
+    assert_eq!(kinds, seeded_kinds());
+    assert_eq!(created, [vec![int(1)]], "seeded at the migration time");
+    assert_eq!(change_seq, [vec![int(0)]]);
+    let SqlValue::Integer(inbox_rows) = inbox_change_seqs[0][0] else {
+        panic!("{inbox_change_seqs:?}");
+    };
+    assert!(inbox_rows > 0, "the fixture has inbox rows");
+    assert_eq!(
+        inbox_change_seqs[0][1],
+        int(0),
+        "old rows have NULL change_seq"
+    );
+    assert_eq!(counts, [vec![int(0), int(0)]]);
+    assert_eq!(violations, 0, "PRAGMA foreign_key_check is empty");
+    let numbers: Vec<u32> = versions.iter().map(|(version, _)| *version).collect();
+    assert_eq!(numbers, (1..=8).collect::<Vec<u32>>());
+
+    // Reopening is a no-op.
+    let server = RunningServer::start(&config).await;
+    server.shutdown().await.unwrap();
+    let (again, kinds_again, versions_again) = fx
+        .read_db(|conn| {
+            Ok((
+                v7_snapshot(conn)?,
+                select_all(conn, "SELECT COUNT(*) FROM reaction_kinds")?,
+                applied_migrations(conn)?,
+            ))
+        })
+        .await;
+    assert_eq!(again, before);
+    assert_eq!(kinds_again, [vec![int(7)]]);
+    assert_eq!(versions_again, versions, "nothing re-applied");
 }

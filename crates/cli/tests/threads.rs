@@ -195,12 +195,13 @@ async fn threads_show_mute_and_filter_history_against_a_hub() {
             "THREAD_ID",
             "CORRECTS",
             "REPLIES",
+            "REACTIONS",
             "BODY"
         ]
     );
     assert_eq!(rows.len(), 3, "the root only, then the cursor line: {top}");
     assert_eq!(rows[1][1], root_id);
-    assert_eq!(rows[1][7..], ["-", "-", "2", "root"]);
+    assert_eq!(rows[1][7..], ["-", "-", "2", "-", "root"]);
     let thread = ok(&server
         .cli(
             &c,
@@ -213,7 +214,7 @@ async fn threads_show_mute_and_filter_history_against_a_hub() {
     assert_eq!(rows.len(), 5, "root and two replies: {thread}");
     assert_eq!(rows[2][1], reply_id);
     assert_eq!(rows[2][5], root_id, "reply_to");
-    assert_eq!(rows[2][7..], [root_id.as_str(), "-", "-", "re"]);
+    assert_eq!(rows[2][7..], [root_id.as_str(), "-", "-", "-", "re"]);
     let both = server
         .cli(
             &c,

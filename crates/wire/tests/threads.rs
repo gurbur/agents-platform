@@ -1,5 +1,5 @@
 //! S15 wire shapes (`IF-WIRE-012`, `IF-WIRE-014`, `IF-WIRE-015`): the
-//! thirteen `Message` keys, the summary of a root, the thread view, the
+//! fourteen `Message` keys (S16 added `reactions`), the summary of a root, the thread view, the
 //! participation body and response, and the send body's `corrects`.
 
 use platform_wire::{
@@ -56,11 +56,12 @@ fn sample() -> Message {
         wake: false,
         mentions: vec![agent("human")],
         thread_summary: None,
+        reactions: vec![],
         created_at: "2026-10-20T09:00:00.000Z".into(),
     }
 }
 
-const MESSAGE_KEYS: [&str; 13] = [
+const MESSAGE_KEYS: [&str; 14] = [
     "message_id",
     "event_seq",
     "room_id",
@@ -73,11 +74,12 @@ const MESSAGE_KEYS: [&str; 13] = [
     "wake",
     "mentions",
     "thread_summary",
+    "reactions",
     "created_at",
 ];
 
 #[test]
-fn a_message_has_thirteen_keys_in_order_with_nulls_kept() {
+fn a_message_has_fourteen_keys_in_order_with_nulls_kept() {
     let message = sample();
     let text = serde_json::to_string(&message).unwrap();
     assert_eq!(ordered_keys(&text), MESSAGE_KEYS);

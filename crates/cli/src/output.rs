@@ -9,9 +9,9 @@ use platform_wire::{
     AgentEntry, AgentId, AgentProfile, AvatarResponse, DeliveryRetryResponse, DeliveryState,
     DeliveryStatus, HealthStatus, HistoryCursor, HistoryPage, IdentityTokenResponse, InboxItem,
     InboxPage, MembershipResponse, Message, MessageResponse, OwnerAgentEntry,
-    ParticipationResponse, Presence, PresenceResponse, ProfileResponse, ReadMarkerResponse,
-    ReceiverResponse, RegisterAgentResponse, RoomSummary, RotateTokensResponse, Seq,
-    ThreadParticipant, ThreadView,
+    ParticipationResponse, Presence, PresenceResponse, ProfileResponse, ReactResponse,
+    ReactionEvent, ReactionKindEntry, ReactionSummary, ReadMarkerResponse, ReceiverResponse,
+    RegisterAgentResponse, RoomSummary, RotateTokensResponse, Seq, ThreadParticipant, ThreadView,
 };
 
 use crate::error::CliError;
@@ -75,6 +75,34 @@ fn id_list(ids: &[AgentId]) -> String {
     }
     let ids: Vec<&str> = ids.iter().map(AgentId::as_str).collect();
     ids.join(",")
+}
+
+/// Reactions in one cell: `kind×count(agent,agent)` per kind joined by a
+/// space, or `-` for none (`IF-CLI-001` S16).
+fn reaction_cell(reactions: &[ReactionSummary]) -> String {
+    if reactions.is_empty() {
+        return NONE.to_owned();
+    }
+    let kinds: Vec<String> = reactions
+        .iter()
+        .map(|summary| {
+            format!(
+                "{}×{}({})",
+                summary.kind,
+                summary.count,
+                id_list(&summary.agents)
+            )
+        })
+        .collect();
+    kinds.join(" ")
+}
+
+/// The agents with an active reaction of `kind`, joined by `,`, or `-`.
+fn reactors(reactions: &[ReactionSummary], kind: &str) -> String {
+    reactions
+        .iter()
+        .find(|summary| summary.kind.as_str() == kind)
+        .map_or_else(|| NONE.to_owned(), |summary| id_list(&summary.agents))
 }
 
 /// The sender's `wake` in a table cell.
@@ -438,8 +466,10 @@ pub fn sent(response: &MessageResponse, client_key: &str) -> String {
 }
 
 /// One row per inbox event. `WAKE` is the sender's choice, `WOKE` whether
-/// the sender's rule woke this recipient. An event of a kind this CLI does
-/// not know shows only its sequence and kind.
+/// the sender's rule woke this recipient. A reaction event names the
+/// reacted-to message and who reacted, with `+<kind>` in place of a body
+/// (`IF-CLI-001` S16). An event of a kind this CLI does not know shows only
+/// its sequence and kind.
 fn inbox_table(items: &[InboxItem]) -> String {
     let mut table = Table::new(vec![
         "INBOX_SEQ",
@@ -459,6 +489,11 @@ fn inbox_table(items: &[InboxItem]) -> String {
     ]);
     for item in items {
         let mut row = vec![item.inbox_seq.to_string(), item.kind().to_owned()];
+        if let Some(reaction) = item.as_reaction() {
+            row.extend(reaction_row(reaction));
+            table.push(row);
+            continue;
+        }
         match item.as_message() {
             Some(message) => row.extend([
                 message.room_id.to_string(),
@@ -479,6 +514,26 @@ fn inbox_table(items: &[InboxItem]) -> String {
         table.push(row);
     }
     table.render()
+}
+
+/// The cells after `INBOX_SEQ` and `KIND` of a reaction event: the room,
+/// the message reacted to, when and by whom, the reacting agent's `wake`,
+/// the message's thread and `+<kind>` as the body; `-` elsewhere.
+fn reaction_row(reaction: &ReactionEvent) -> [String; 12] {
+    [
+        reaction.room_id.to_string(),
+        NONE.to_owned(),
+        reaction.message_id.to_string(),
+        reaction.created_at.clone(),
+        reaction.sender_id.to_string(),
+        wake_cell(reaction.wake).to_owned(),
+        NONE.to_owned(),
+        NONE.to_owned(),
+        NONE.to_owned(),
+        or_none(reaction.thread_id.as_ref()),
+        NONE.to_owned(),
+        format!("+{}", reaction.reaction),
+    ]
 }
 
 pub fn inbox_page(page: &InboxPage) -> String {
@@ -529,6 +584,7 @@ pub fn history_page(page: &HistoryPage) -> String {
         "THREAD_ID",
         "CORRECTS",
         "REPLIES",
+        "REACTIONS",
         "BODY",
     ]);
     for message in &page.items {
@@ -543,6 +599,7 @@ pub fn history_page(page: &HistoryPage) -> String {
             or_none(message.thread_id.as_ref()),
             or_none(message.corrects.as_ref()),
             or_none(message.thread_summary.map(|summary| summary.reply_count)),
+            reaction_cell(&message.reactions),
             escape_body(&message.body),
         ]);
     }
@@ -580,13 +637,20 @@ pub fn message(message: &Message) -> String {
         ),
         ("wake", message.wake.to_string()),
         ("mentions", id_list(&message.mentions)),
+        ("reactions", reaction_cell(&message.reactions)),
         ("created_at", message.created_at.clone()),
         ("body", escape_body(&message.body)),
     ])
 }
 
-/// `thread show`: the thread as key-value lines, then its participants.
-pub fn thread(view: &ThreadView) -> String {
+/// The reaction kinds `thread show` reads from the root: who took the
+/// work on and who marked it done (advisory, ADR-0014).
+const CLAIM_KIND: &str = "claim";
+const DONE_KIND: &str = "done";
+
+/// `thread show`: the thread as key-value lines with who claimed the root
+/// and who marked it done (`IF-CLI-001` S16), then its participants.
+pub fn thread(view: &ThreadView, root: &Message) -> String {
     let mut text = key_values(&[
         ("thread_id", view.thread_id.to_string()),
         ("room_id", view.room_id.to_string()),
@@ -594,6 +658,8 @@ pub fn thread(view: &ThreadView) -> String {
         ("reply_count", view.reply_count.to_string()),
         ("last_event_seq", view.last_event_seq.to_string()),
         ("last_message_at", view.last_message_at.clone()),
+        ("claimed_by", reactors(&root.reactions, CLAIM_KIND)),
+        ("done_by", reactors(&root.reactions, DONE_KIND)),
     ]);
     let mut table = Table::new(vec!["AGENT_ID", "JOINED_VIA", "MUTED", "JOINED_AT"]);
     for participant in &view.participants {
@@ -622,6 +688,47 @@ pub fn participation(changed: &ParticipationResponse) -> String {
         ("joined_via", joined_via.as_str().to_owned()),
         ("muted", muted.to_string()),
         ("joined_at", joined_at.clone()),
+    ])
+}
+
+/// `react`: the reaction, whether it is new (`created`) or was there
+/// (`existing`), and the message's reactions now.
+pub fn reacted(reacted: &ReactResponse, status: &str) -> String {
+    key_values(&[
+        ("message_id", reacted.message_id.to_string()),
+        ("agent_id", reacted.agent_id.to_string()),
+        ("kind", reacted.kind.to_string()),
+        ("change_seq", reacted.change_seq.to_string()),
+        ("created_at", reacted.created_at.clone()),
+        ("status", status.to_owned()),
+        ("reactions", reaction_cell(&reacted.reactions)),
+    ])
+}
+
+/// `react --list`: one row per kind in the hub's order.
+pub fn reaction_kinds(kinds: &[ReactionKindEntry]) -> String {
+    let mut table = Table::new(vec!["SLUG", "GLYPH", "LABEL", "SORT", "ENABLED"]);
+    for kind in kinds {
+        table.push(vec![
+            kind.slug.to_string(),
+            kind.glyph.clone(),
+            escape_body(&kind.label),
+            kind.sort.to_string(),
+            kind.enabled.to_string(),
+        ]);
+    }
+    table.render()
+}
+
+/// `reaction-kind set`: the kind as stored and whether it is new.
+pub fn reaction_kind(kind: &ReactionKindEntry, status: &str) -> String {
+    key_values(&[
+        ("slug", kind.slug.to_string()),
+        ("glyph", kind.glyph.clone()),
+        ("label", escape_body(&kind.label)),
+        ("sort", kind.sort.to_string()),
+        ("enabled", kind.enabled.to_string()),
+        ("status", status.to_owned()),
     ])
 }
 

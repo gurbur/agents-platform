@@ -1192,7 +1192,7 @@ async fn history_checks_the_thread_query_in_order() {
 
 // ---- item shapes ----------------------------------------------------------------------
 
-const MESSAGE_KEYS: [&str; 13] = [
+const MESSAGE_KEYS: [&str; 14] = [
     "message_id",
     "event_seq",
     "room_id",
@@ -1205,11 +1205,12 @@ const MESSAGE_KEYS: [&str; 13] = [
     "wake",
     "mentions",
     "thread_summary",
+    "reactions",
     "created_at",
 ];
 
 #[tokio::test]
-async fn every_message_carries_the_thirteen_keys_in_order() {
+async fn every_message_carries_the_fourteen_keys_in_order() {
     let (_fx, server, api) = start().await;
     let a = api.register("agent-a", None).await;
     let b = api.register("agent-b", None).await;

@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use super::agents::{agent_exists, stored_agent_id};
 use super::delivery as delivery_queries;
 use super::inbox::MESSAGE_EVENT;
+use super::reactions as reaction_queries;
 use super::rooms::{self as room_queries, RoomRow, stored_room_id};
 use super::threads as thread_queries;
 use crate::store::StoreError;
@@ -446,7 +447,7 @@ fn recipient(conn: &Connection, agent_id: &AgentId, woke: bool) -> Result<Recipi
     })
 }
 
-fn wake_policy(conn: &Connection, agent_id: &AgentId) -> Result<WakePolicy, StoreError> {
+pub(crate) fn wake_policy(conn: &Connection, agent_id: &AgentId) -> Result<WakePolicy, StoreError> {
     let stored: String = conn.query_row(
         "SELECT wake_policy FROM agents WHERE agent_id = ?1",
         params![agent_id.as_str()],
@@ -518,6 +519,7 @@ fn commit_new(tx: &Transaction, draft: Draft<'_>) -> Result<SendOutcome, StoreEr
         wake: command.wake,
         mentions: command.mentions.clone(),
         thread_summary: None,
+        reactions: Vec::new(),
         created_at: command.created_at.clone(),
     };
     insert_message(tx, &message)?;
@@ -597,8 +599,9 @@ fn register_participants(
 }
 
 /// One page of a room's history, fetching `limit + 1` rows to learn
-/// `has_more`, with the summary of every root on the page. Permission and
-/// the thread's existence are the caller's ([`room_queries::history_access`]).
+/// `has_more`, with the summary of every root on the page and every
+/// message's reactions. Permission and the thread's existence are the
+/// caller's ([`room_queries::history_access`]).
 pub fn history(conn: &Connection, query: &HistoryQuery) -> Result<HistorySlice, StoreError> {
     let (comparison, order, bound) = match query.direction {
         HistoryDirection::Before(bound) => ("<", "DESC", bound.map(Seq::get)),
@@ -639,11 +642,13 @@ pub fn history(conn: &Connection, query: &HistoryQuery) -> Result<HistorySlice, 
     let has_more = items.len() > query.limit as usize;
     items.truncate(query.limit as usize);
     thread_queries::attach_summaries(conn, &mut items)?;
+    reaction_queries::attach_summaries(conn, &mut items)?;
     Ok(HistorySlice { items, has_more })
 }
 
-/// A stored message without its `thread_summary` (the send response's
-/// shape); [`thread_queries::attach_summaries`] adds it for reads.
+/// A stored message without its `thread_summary` and `reactions` (the
+/// send response's shape); [`thread_queries::attach_summaries`] and
+/// [`reaction_queries::attach_summaries`] add them for reads.
 pub fn find_message(
     conn: &Connection,
     message_id: &MessageId,
@@ -796,7 +801,7 @@ impl StoredMessage {
         })
     }
 
-    /// The message with `thread_summary` unset.
+    /// The message with `thread_summary` unset and no `reactions`.
     pub(crate) fn into_message(self) -> Result<Message, StoreError> {
         let room_id = stored_room_id(&self.room_id)?;
         let mut mentions = self
@@ -820,6 +825,7 @@ impl StoredMessage {
             wake: self.wake,
             mentions,
             thread_summary: None,
+            reactions: Vec::new(),
             created_at: self.created_at,
         })
     }

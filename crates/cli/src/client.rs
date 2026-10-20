@@ -46,6 +46,9 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 pub struct Decoded<T> {
     pub value: T,
     pub raw: Vec<u8>,
+    /// The success status, e.g. 201 for a new reaction and 200 for one
+    /// already there.
+    pub status: StatusCode,
     /// The `x-request-id` header, empty when absent.
     pub request_id: String,
 }
@@ -137,6 +140,17 @@ impl ApiClient {
         execute_raw(self.authorized(self.http.delete(url))).await
     }
 
+    /// Authenticated `DELETE` with a JSON body (the owner's identity of an
+    /// `unreact`); a success has no body.
+    pub async fn delete_json<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<RawResponse, CliError> {
+        let url = self.url(path, &Query::new())?;
+        execute_raw(self.authorized(self.http.delete(url)).json(body)).await
+    }
+
     /// Attaches the bearer credential to an authenticated `/v1` request.
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         request.bearer_auth(&self.token.0)
@@ -207,6 +221,7 @@ async fn execute<T: DeserializeOwned>(
     Ok(Decoded {
         value,
         raw,
+        status,
         request_id,
     })
 }

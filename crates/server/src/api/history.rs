@@ -18,6 +18,7 @@ use crate::auth::Principal;
 use crate::store::queries::messages::{
     self as message_queries, HistoryDirection, HistoryQuery, ThreadFilter,
 };
+use crate::store::queries::reactions as reaction_queries;
 use crate::store::queries::rooms::{self as room_queries, ReadAccess, Viewer};
 use crate::store::queries::threads as thread_queries;
 
@@ -90,7 +91,8 @@ pub async fn list(
 
 /// `GET /v1/messages/{message_id}`: a message outside the caller's rooms
 /// and threads is indistinguishable from a missing one (404
-/// `message_not_found`). A root carries its thread summary.
+/// `message_not_found`). A root carries its thread summary; every message
+/// its reactions.
 pub async fn get_one(
     principal: Principal,
     State(state): State<AppState>,
@@ -108,6 +110,7 @@ pub async fn get_one(
                 return Ok(None);
             }
             thread_queries::attach_summaries(conn, [&mut message])?;
+            reaction_queries::attach_summaries(conn, [&mut message])?;
             Ok(Some(message))
         })
         .await?
@@ -122,7 +125,7 @@ pub(super) fn viewer_of(principal: Principal) -> Viewer {
     }
 }
 
-fn unknown_room() -> ApiError {
+pub(super) fn unknown_room() -> ApiError {
     ApiError::not_found(codes::UNKNOWN_ROOM, "no such room")
 }
 
@@ -133,11 +136,11 @@ pub(super) fn thread_not_found() -> ApiError {
     )
 }
 
-fn message_not_found() -> ApiError {
+pub(super) fn message_not_found() -> ApiError {
     ApiError::not_found(codes::MESSAGE_NOT_FOUND, "no such message")
 }
 
-fn parse_room(raw: Option<&str>) -> Result<RoomId, ApiError> {
+pub(super) fn parse_room(raw: Option<&str>) -> Result<RoomId, ApiError> {
     let Some(raw) = raw else {
         return Err(ApiError::invalid_field("room_id", "room_id is required"));
     };

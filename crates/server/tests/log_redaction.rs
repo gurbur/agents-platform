@@ -744,3 +744,73 @@ async fn thread_sends_and_participation_log_ids_only() {
         );
     }
 }
+
+#[tokio::test]
+async fn reactions_and_kind_edits_log_ids_only() {
+    let captured = install_capture();
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config_with_owner(&["human"])).await;
+    let api = server.api();
+    let a = api.register("s16-author", None).await;
+    let b = api.register("s16-reactor", None).await;
+
+    let body = "S16-BODY-MARKER-do-not-log";
+    let sent = api
+        .post(
+            "/v1/messages",
+            &a.api_key,
+            json!({"room_id": "all", "body": body, "client_key": "s16"}),
+        )
+        .await;
+    assert_eq!(sent.status.as_u16(), 201, "{}", sent.body);
+    let message_id = sent.body["message_id"].as_str().unwrap().to_owned();
+    let label = "S16-LABEL-MARKER";
+    let glyph = "🪐";
+    let kind = api
+        .put(
+            "/v1/reaction-kinds/s16_kind",
+            OWNER_TOKEN,
+            json!({"glyph": glyph, "label": label}),
+        )
+        .await;
+    assert_eq!(kind.status.as_u16(), 201, "{}", kind.body);
+    let path = format!("/v1/messages/{message_id}/reactions/s16_kind");
+    let added = api.send(Method::PUT, &path, Some(&b.api_key), None).await;
+    assert_eq!(added.status.as_u16(), 201, "{}", added.body);
+    let removed = api
+        .send(Method::DELETE, &path, Some(&b.api_key), None)
+        .await;
+    assert_eq!(removed.status.as_u16(), 204);
+    api.get("/v1/inbox", &a.api_key).await;
+    api.get("/v1/reactions?room_id=all&after_change_seq=0", &a.api_key)
+        .await;
+    server.shutdown().await.unwrap();
+
+    let logs = captured.text();
+    for secret in [body, label, glyph] {
+        assert!(!logs.contains(secret), "{secret} was logged");
+    }
+    let line = |what: &str| -> String {
+        let lines: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains(what) && line.contains("s16"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{what}: {logs}");
+        lines[0].to_owned()
+    };
+    for (what, change_seq) in [("reaction added", "1"), ("reaction removed", "2")] {
+        let entry = line(what);
+        for field in [
+            format!("message_id={message_id}"),
+            "agent_id=s16-reactor".to_owned(),
+            "kind=s16_kind".to_owned(),
+            format!("change_seq={change_seq}"),
+        ] {
+            assert!(entry.contains(&field), "{field}: {entry}");
+        }
+    }
+    let upserted = line("reaction kind upserted");
+    for field in ["slug=s16_kind", "enabled=true", "created"] {
+        assert!(upserted.contains(field), "{field}: {upserted}");
+    }
+}

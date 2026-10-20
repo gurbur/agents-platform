@@ -100,13 +100,17 @@ async fn migrations_create_all_tables() {
         .unwrap();
 
     // v2 adds columns only; v3 adds `agent_avatars` (S11); v5 adds `rooms`
-    // and `message_mentions` (S13); v7 adds `thread_participants` (S15).
+    // and `message_mentions` (S13); v7 adds `thread_participants` (S15);
+    // v8 adds the reaction tables (S16).
     let mut expected: Vec<&str> = V1_TABLES.to_vec();
     expected.extend([
         "agent_avatars",
         "rooms",
         "message_mentions",
         "thread_participants",
+        "reaction_kinds",
+        "reaction_events",
+        "reactions",
     ]);
     expected.sort_unstable();
     assert_eq!(tables, expected);

@@ -1,16 +1,20 @@
 //! Inbox pages and the read marker (`IF-DB-001` tables `agents.inbox_head`,
 //! `inbox_rows`, `messages`, `read_state`).
 //!
-//! Inbox rows are events with a `kind` (`IF-WIRE-012`); S13 writes only
-//! message events. A marker that moves up also runs the read-marker
+//! Inbox rows are events with a `kind` (`IF-WIRE-012`): message events
+//! (S13) and, from S16, reaction events, which point at their addition in
+//! `reaction_events` through `change_seq`. A marker that moves up also runs the read-marker
 //! delivery transition (`IF-DLV-001`) in the same transaction: at the last
 //! woken row, the agent is idle.
 
-use platform_wire::{AgentId, InboxItem, Seq};
+use platform_wire::{AgentId, InboxItem, ReactionEvent, Seq};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
+use super::agents::stored_agent_id;
 use super::delivery as delivery_queries;
 use super::messages::{MESSAGE_COLUMNS, StoredMessage, stored_seq};
+use super::reaction_kinds::stored_kind;
+use super::reactions::{self as reaction_queries, REACTION_EVENT};
 use super::threads as thread_queries;
 use crate::store::StoreError;
 
@@ -56,8 +60,9 @@ struct Cursor {
 
 /// One page of `query.agent_id`'s inbox, `after_seq < inbox_seq <=
 /// snapshot_head_seq` in ascending order, fetching `limit + 1` rows to learn
-/// `has_more`, with the summary of every root on the page. `None` when the
-/// agent does not exist. Reads only.
+/// `has_more`, with the summary of every root and the reactions of every
+/// message event on the page. `None` when the agent does not exist. Reads
+/// only.
 ///
 /// Every statement runs on the DB thread's single connection, the only
 /// writer, so the marker, head and rows form one consistent snapshot.
@@ -70,8 +75,10 @@ pub fn page(conn: &Connection, query: &InboxQuery) -> Result<Option<InboxSlice>,
 
     let fetch = i64::from(query.limit) + 1;
     let mut statement = conn.prepare(&format!(
-        "SELECT r.inbox_seq, r.kind, r.woke, {MESSAGE_COLUMNS}
+        "SELECT r.inbox_seq, r.kind, r.woke, {MESSAGE_COLUMNS},
+                e.change_seq, e.agent_id, e.kind, e.wake, e.created_at
          FROM inbox_rows r JOIN messages m ON m.message_id = r.message_id
+         LEFT JOIN reaction_events e ON e.change_seq = r.change_seq
          WHERE r.agent_id = ?1 AND r.inbox_seq > ?2 AND r.inbox_seq <= ?3
          ORDER BY r.inbox_seq ASC
          LIMIT ?4"
@@ -92,6 +99,10 @@ pub fn page(conn: &Connection, query: &InboxQuery) -> Result<Option<InboxSlice>,
     let has_more = items.len() > query.limit as usize;
     items.truncate(query.limit as usize);
     thread_queries::attach_summaries(conn, items.iter_mut().filter_map(InboxItem::as_message_mut))?;
+    reaction_queries::attach_summaries(
+        conn,
+        items.iter_mut().filter_map(InboxItem::as_message_mut),
+    )?;
 
     Ok(Some(InboxSlice {
         read_marker: cursor.read_marker,
@@ -146,35 +157,81 @@ fn cursor(conn: &Connection, agent_id: &AgentId) -> Result<Option<Cursor>, Store
     }))
 }
 
-/// An inbox row joined with its message, before validation.
+/// The column of the first `reaction_events` value in a page row: after
+/// the three row columns and the eleven [`MESSAGE_COLUMNS`].
+const CHANGE_COLUMN: usize = 14;
+
+/// An inbox row joined with its message and, for a reaction event, its
+/// addition, before validation.
 struct StoredItem {
     inbox_seq: i64,
     kind: String,
     woke: bool,
     message: StoredMessage,
+    change: Option<StoredChange>,
+}
+
+/// The `reaction_events` columns of a reaction row.
+struct StoredChange {
+    change_seq: i64,
+    agent_id: String,
+    kind: String,
+    wake: bool,
+    created_at: String,
 }
 
 impl StoredItem {
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        let change_seq: Option<i64> = row.get(CHANGE_COLUMN)?;
+        let change = match change_seq {
+            Some(change_seq) => Some(StoredChange {
+                change_seq,
+                agent_id: row.get(CHANGE_COLUMN + 1)?,
+                kind: row.get(CHANGE_COLUMN + 2)?,
+                wake: row.get(CHANGE_COLUMN + 3)?,
+                created_at: row.get(CHANGE_COLUMN + 4)?,
+            }),
+            None => None,
+        };
         Ok(Self {
             inbox_seq: row.get(0)?,
             kind: row.get(1)?,
             woke: row.get(2)?,
             message: StoredMessage::from_row(row, 3)?,
+            change,
         })
     }
 
     fn into_item(self) -> Result<InboxItem, StoreError> {
-        if self.kind != MESSAGE_EVENT {
+        let inbox_seq = stored_seq(self.inbox_seq, "inbox_rows.inbox_seq")?;
+        if self.kind == MESSAGE_EVENT {
+            return Ok(InboxItem::message(
+                inbox_seq,
+                self.woke,
+                self.message.into_message()?,
+            ));
+        }
+        if self.kind != REACTION_EVENT {
             return Err(StoreError::Invariant(format!(
                 "inbox_rows.kind '{}' is not written by this version",
                 self.kind
             )));
         }
-        Ok(InboxItem::message(
-            stored_seq(self.inbox_seq, "inbox_rows.inbox_seq")?,
-            self.woke,
-            self.message.into_message()?,
-        ))
+        let change = self.change.ok_or_else(|| {
+            StoreError::Invariant("a reaction inbox row has no reaction event".to_owned())
+        })?;
+        let target = self.message.into_message()?;
+        let reaction = ReactionEvent {
+            change_seq: stored_seq(change.change_seq, "inbox_rows.change_seq")?,
+            message_id: target.message_id,
+            room_id: target.room_id,
+            room_kind: target.room_kind,
+            thread_id: target.thread_id,
+            sender_id: stored_agent_id(change.agent_id)?,
+            reaction: stored_kind(change.kind)?,
+            wake: change.wake,
+            created_at: change.created_at,
+        };
+        Ok(InboxItem::reaction(inbox_seq, self.woke, reaction))
     }
 }

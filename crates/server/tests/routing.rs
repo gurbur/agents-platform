@@ -652,6 +652,7 @@ async fn inbox_and_history_items_carry_the_event_fields() {
             "wake",
             "mentions",
             "thread_summary",
+            "reactions",
             "created_at"
         ]
     );
@@ -671,7 +672,7 @@ async fn inbox_and_history_items_carry_the_event_fields() {
         )
         .await;
     let first = &history.body["items"][0];
-    assert_eq!(first.as_object().unwrap().len(), 13, "S15: thirteen keys");
+    assert_eq!(first.as_object().unwrap().len(), 14, "S16: fourteen keys");
     let single = api
         .get(
             &format!("/v1/messages/{}", original["message_id"].as_str().unwrap()),

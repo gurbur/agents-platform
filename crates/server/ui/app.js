@@ -35,6 +35,17 @@
 // mute a thread it takes part in. A correction is a new message with
 // `corrects` (own messages only), marked on both sides. No new timer or
 // storage.
+//
+// Slice S16 adds reactions. The kind registry is read with the directory
+// refresh (all kinds, so a disabled kind's chip still has its glyph; the
+// bar offers the enabled ones). A message shows its reactions as chips
+// (glyph and count, the names in the title, "나"'s own highlighted); the
+// hover menu (or a long press on touch) holds the reaction bar. "나" reacts
+// quietly: `sender_id` only, never `wake`. Opening a room takes the room's
+// reaction cursor; the existing feed poll then asks for the changes after it
+// and patches the chips on screen. A `claim` shows as "맡음: …", dimmed once
+// the same message has `done`. The owner edits kinds in a dialog next to
+// the directory. No new timer or storage.
 
 const TOKEN_STORAGE_KEY = 'agents-platform.owner-token';
 const PREF_STYLE = 'agents-console-style';
@@ -92,6 +103,10 @@ const API = Object.freeze({
   inbox: (agentId) => `/v1/agents/${encodeURIComponent(agentId)}/inbox`,
   thread: (rootId) => `/v1/threads/${encodeURIComponent(rootId)}`,
   participation: (rootId) => `/v1/threads/${encodeURIComponent(rootId)}/participation`,
+  reactionKinds: () => '/v1/reaction-kinds',
+  reactionKind: (slug) => `/v1/reaction-kinds/${encodeURIComponent(slug)}`,
+  reaction: (messageId, kind) => `/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(kind)}`,
+  reactions: () => '/v1/reactions',
 });
 
 const GENDER_LABEL = { female: '여성형', male: '남성형', none: '없음' };
@@ -100,6 +115,9 @@ const STATE_LABEL = { idle: 'idle', pending: 'pending', blocked: 'blocked' };
 const PRESENCE_LABEL = { online: '온라인', busy: '바쁨', offline: '오프라인' };
 const JOINED_LABEL = { root: '시작한 사람', opener: '첫 답글', poster: '답글', mentioned: '지목됨', barged: '끼어듦' };
 const NEVER_SEEN = '본 적 없음';
+// The reaction kinds the console reads as "맡음" and its end (ADR-0014).
+const CLAIM_KIND = 'claim';
+const DONE_KIND = 'done';
 const NONE_TEXT = '—';
 
 // The single piece of mutable state. `session` changes on connect and
@@ -159,6 +177,16 @@ const S = {
   roomError: null,
   mk: null,
   mkBusy: false,
+  // Every reaction kind (owner view, `all=true`) in registry order.
+  kinds: [],
+  kindsSignature: '',
+  // The current room's reaction feed cursor; null until it is known.
+  reactCursor: null,
+  // Reactions being sent, as `${message_id} ${kind}`.
+  reactBusy: new Set(),
+  // The last failed reaction: { messageId, failure }, or null.
+  reactError: null,
+  kindBusy: false,
   timers: [],
 };
 
@@ -725,6 +753,7 @@ function actions(message, where) {
   if (!canWrite()) return null;
   const prefix = where === 'thread' ? 'thread-' : '';
   return h('div', { class: 'actions' },
+    reactionBar(message),
     h('button', { data: { act: `${prefix}reply`, k: message.message_id } }, icon('reply'), '답장'),
     message.sender_id === S.me
       ? h('button', { data: { act: `${prefix}correct`, k: message.message_id } }, icon('fix'), '정정')
@@ -789,7 +818,7 @@ function flatMessage(item, room, where, corrections) {
     nodes.push(h('button', { class: 'quote', data: { act: 'jump', k: message.reply_to } },
       quote.sender ? av(quote.sender, 16) : null, quote.who ? h('b', { text: quote.who }) : null, h('span', { text: quote.text })));
   }
-  const content = [correctionMarks(message, corrections), textBody(message), repliesButton(message, where)];
+  const content = [correctionMarks(message, corrections), textBody(message), reactionChips(message), repliesButton(message, where)];
   if (item.head) {
     const name = h('span', { class: 'name', text: nameOf(message.sender_id), bg: null });
     name.style.color = colorOf(message.sender_id);
@@ -822,7 +851,312 @@ function bubbleMessage(item, room, where, corrections) {
         h('div', { class: 'bubble' }, bq, correctionMarks(message, corrections), textBody(message)),
         item.tail ? h('time', { class: 'b-time', datetime: message.created_at, text: clock(new Date(message.created_at)) }) : null,
         actions(message, where)),
+      reactionChips(message),
       repliesButton(message, where)));
+}
+
+// --------------------------------------------------------------- reactions
+
+const kindOf = (slug) => S.kinds.find((kind) => kind.slug === slug) || null;
+const glyphOf = (slug) => (kindOf(slug) ? kindOf(slug).glyph : slug);
+const labelOf = (slug) => (kindOf(slug) ? kindOf(slug).label : slug);
+const reactionsOf = (message) => message.reactions || [];
+const reactedByMe = (entry) => Boolean(S.me && entry && entry.agents.includes(S.me));
+
+// The registry (every kind: the owner's view). Returns whether it changed.
+async function loadKinds() {
+  let list;
+  try {
+    list = await request('GET', API.reactionKinds(), { params: { all: 'true' } });
+  } catch (_) {
+    return false;
+  }
+  S.kinds = list.kinds;
+  const signature = JSON.stringify(S.kinds);
+  if (signature === S.kindsSignature) return false;
+  S.kindsSignature = signature;
+  if ($('kinds').open) renderKinds();
+  return true;
+}
+
+// The reaction bar of the hover menu: the enabled kinds, "나"'s own lit.
+function reactionBar(message) {
+  const kinds = S.kinds.filter((kind) => kind.enabled);
+  if (!S.me || kinds.length === 0) return null;
+  return h('span', { class: 'rbar', role: 'group', 'aria-label': '반응' }, kinds.map((kind) => {
+    const mine = reactedByMe(reactionsOf(message).find((entry) => entry.kind === kind.slug));
+    return h('button', {
+      class: mine ? 'on' : null, title: kind.label, 'aria-label': kind.label, 'aria-pressed': String(mine),
+      data: { act: 'react', k: message.message_id, kind: kind.slug },
+    }, kind.glyph);
+  }));
+}
+
+// "맡음: <names>" when the message has a `claim`; dimmed once it has `done`.
+function claimBadge(message) {
+  const list = reactionsOf(message);
+  const claim = list.find((entry) => entry.kind === CLAIM_KIND);
+  if (!claim) return null;
+  const done = list.some((entry) => entry.kind === DONE_KIND);
+  return h('span', {
+    class: `claim${done ? ' done' : ''}`,
+    title: done ? '맡음 — 처리 끝' : '맡음',
+    text: `맡음: ${claim.agents.map(nameOf).join(', ')}`,
+  });
+}
+
+// The chips under a message: glyph and count, the names in the title.
+// "나"'s chip is highlighted and toggles it.
+function reactionChips(message) {
+  const list = reactionsOf(message);
+  const failed = S.reactError && S.reactError.messageId === message.message_id ? S.reactError.failure : null;
+  if (list.length === 0 && !failed) return null;
+  const writable = canWrite() && Boolean(S.me);
+  return h('div', { class: 'reacts' },
+    claimBadge(message),
+    list.map((entry) => {
+      const mine = reactedByMe(entry);
+      return h('button', {
+        class: `rchip${mine ? ' mine' : ''}`,
+        title: `${labelOf(entry.kind)} — ${entry.agents.map(nameOf).join(', ')}`,
+        'aria-pressed': String(mine), disabled: !writable,
+        data: { act: 'react', k: message.message_id, kind: entry.kind },
+      }, h('span', { class: 'g', text: glyphOf(entry.kind) }), h('span', { class: 'n', text: String(entry.count) }));
+    }),
+    failed ? h('span', { class: 'err', role: 'alert', text: failureText(failed) }) : null);
+}
+
+// Registry order: `sort`, then slug; an unknown kind goes last.
+function sortReactions(list) {
+  const rank = (slug) => (kindOf(slug) ? kindOf(slug).sort : Number.MAX_SAFE_INTEGER);
+  list.sort((a, b) => rank(a.kind) - rank(b.kind) || (a.kind < b.kind ? -1 : Number(a.kind > b.kind)));
+}
+
+// One addition or removal by `agentId` on a message's summary. Applying a
+// change twice changes nothing; returns whether this one did.
+function applyReaction(message, kind, agentId, removed) {
+  if (!message.reactions) message.reactions = [];
+  const list = message.reactions;
+  let entry = list.find((candidate) => candidate.kind === kind);
+  const present = Boolean(entry && entry.agents.includes(agentId));
+  if (present !== removed) return false;
+  if (removed) {
+    entry.agents = entry.agents.filter((id) => id !== agentId);
+    entry.count = entry.agents.length;
+    if (entry.count === 0) list.splice(list.indexOf(entry), 1);
+    return true;
+  }
+  if (!entry) {
+    entry = { kind, count: 0, agents: [] };
+    list.push(entry);
+  }
+  entry.agents = entry.agents.concat([agentId]).sort();
+  entry.count = entry.agents.length;
+  sortReactions(list);
+  return true;
+}
+
+// Every loaded copy of a message: the timeline's and the thread panel's.
+function copiesOf(id) {
+  const copies = new Set(S.msgs.filter((message) => message.message_id === id));
+  if (S.thread) for (const message of S.thread.msgs) if (message.message_id === id) copies.add(message);
+  return Array.from(copies);
+}
+
+// Patches the copies of a message; says which lists show it.
+function patchReactions(id, patch) {
+  let changed = false;
+  for (const message of copiesOf(id)) changed = patch(message) || changed;
+  return {
+    feedChanged: changed && S.msgs.some((message) => message.message_id === id),
+    threadChanged: changed && Boolean(S.thread && S.thread.msgs.some((message) => message.message_id === id)),
+  };
+}
+
+// The room's current reaction cursor: changes after it are the poll's.
+async function loadReactionCursor() {
+  const seq = S.feedSeq;
+  try {
+    const page = await request('GET', API.reactions(), { params: { room_id: S.room } });
+    if (seq === S.feedSeq) S.reactCursor = page.next_after_change_seq;
+  } catch (_) {
+    // The next poll asks again.
+  }
+}
+
+// The reaction changes of the room after the cursor (called by the feed
+// poll, never on a timer of its own). Null when the room changed meanwhile.
+async function pollReactions(seq) {
+  const changed = { feedChanged: false, threadChanged: false };
+  if (S.reactCursor === null) {
+    await loadReactionCursor();
+    return changed;
+  }
+  for (let page = 0; page < MAX_POLL_PAGES; page += 1) {
+    const result = await request('GET', API.reactions(), { params: { room_id: S.room, after_change_seq: S.reactCursor, limit: POLL_PAGE_SIZE } });
+    if (seq !== S.feedSeq) return null;
+    for (const change of result.items) {
+      const patched = patchReactions(change.message_id, (message) => applyReaction(message, change.kind, change.agent_id, change.removed));
+      changed.feedChanged = changed.feedChanged || patched.feedChanged;
+      changed.threadChanged = changed.threadChanged || patched.threadChanged;
+    }
+    S.reactCursor = result.next_after_change_seq;
+    if (!result.has_more) break;
+  }
+  return changed;
+}
+
+function rerenderReactions(changed) {
+  if (changed.feedChanged) rerenderFeed();
+  if (changed.threadChanged) {
+    rerenderThread();
+    renderThreadMeta();
+  }
+}
+
+// Adds "나"'s reaction, or removes it when "나" already has it. Quiet:
+// the owner names "나" and nothing else.
+async function toggleReaction(messageId, kind) {
+  if (!S.me || !canWrite()) return;
+  const key = `${messageId} ${kind}`;
+  if (S.reactBusy.has(key)) return;
+  const [message] = copiesOf(messageId);
+  const mine = Boolean(message) && reactedByMe(reactionsOf(message).find((entry) => entry.kind === kind));
+  S.reactBusy.add(key);
+  S.reactError = null;
+  let changed;
+  try {
+    if (mine) {
+      await request('DELETE', API.reaction(messageId, kind), { json: { sender_id: S.me } });
+      changed = patchReactions(messageId, (copy) => applyReaction(copy, kind, S.me, true));
+    } else {
+      const reacted = await request('PUT', API.reaction(messageId, kind), { json: { sender_id: S.me } });
+      changed = patchReactions(messageId, (copy) => {
+        copy.reactions = reacted.reactions;
+        return true;
+      });
+    }
+  } catch (error) {
+    S.reactError = { messageId, failure: asFailure(error) };
+    changed = { feedChanged: true, threadChanged: Boolean(S.thread) };
+  } finally {
+    S.reactBusy.delete(key);
+  }
+  rerenderReactions(changed);
+}
+
+// A long press on touch opens a message's menu (the hover menu elsewhere).
+function openActions(row) {
+  closeActions();
+  if (row.isConnected) row.classList.add('acts-open');
+}
+
+function closeActions() {
+  for (const open of document.querySelectorAll('.acts-open')) open.classList.remove('acts-open');
+}
+
+// Android fires contextmenu on a long press: the menu, not the browser's.
+function onRowContextMenu(event) {
+  if (!swipe || swipe.claimed) return;
+  event.preventDefault();
+  const { row } = swipe;
+  swipe = null;
+  openActions(row);
+  swallowNextClick();
+}
+
+// ------------------------------------------------------- reaction kinds
+
+function renderKinds() {
+  $('kindsCount').textContent = `종류 ${S.kinds.length}`;
+  $('kindsBody').replaceChildren(...S.kinds.map((kind) => h('tr', { class: kind.enabled ? null : 'off' },
+    h('td', { class: 'glyph', text: kind.glyph }),
+    h('td', null, h('span', { class: 'id', text: kind.slug })),
+    h('td', { text: kind.label }),
+    h('td', { text: String(kind.sort) }),
+    h('td', null, h('button', {
+      class: 'switch', role: 'switch', 'aria-checked': String(kind.enabled), 'aria-label': `${kind.slug} 켜짐`,
+      data: { act: 'kind-toggle', id: kind.slug }, disabled: S.kindBusy,
+    })),
+    h('td', { class: 'act' }, h('button', { class: 'btn sm', data: { act: 'kind-edit', id: kind.slug }, text: '수정' })))));
+}
+
+function openKinds() {
+  resetKindForm();
+  renderKinds();
+  $('kinds').showModal();
+  $('kinds').focus();
+  loadKinds().then((changed) => {
+    if (!changed) renderKinds();
+  });
+}
+
+function resetKindForm() {
+  $('kindForm').reset();
+  $('kindSlug').readOnly = false;
+  $('kindEnabled').checked = true;
+  $('kindFormTitle').textContent = '새 종류';
+  $('kindGo').textContent = '추가';
+  showFormError('kindError', null);
+}
+
+function editKind(slug) {
+  const kind = kindOf(slug);
+  if (!kind) return;
+  $('kindSlug').value = kind.slug;
+  $('kindSlug').readOnly = true;
+  $('kindGlyph').value = kind.glyph;
+  $('kindLabel').value = kind.label;
+  $('kindSort').value = String(kind.sort);
+  $('kindEnabled').checked = kind.enabled;
+  $('kindFormTitle').textContent = `${kind.slug} 수정`;
+  $('kindGo').textContent = '저장';
+  showFormError('kindError', null);
+  $('kindGlyph').focus();
+}
+
+// The registry changed: the dialog, the bars and the chips follow.
+async function afterKindChange() {
+  await loadKinds();
+  renderKinds();
+  rerenderFeed();
+  rerenderThread();
+}
+
+async function putKind(slug, body) {
+  if (S.kindBusy) return false;
+  S.kindBusy = true;
+  $('kindGo').disabled = true;
+  showFormError('kindError', null);
+  try {
+    await request('PUT', API.reactionKind(slug), { json: body });
+    return true;
+  } catch (error) {
+    showFormError('kindError', failureText(asFailure(error)));
+    return false;
+  } finally {
+    S.kindBusy = false;
+    $('kindGo').disabled = false;
+  }
+}
+
+// The glyph goes as typed (the hub refuses spaces rather than trimming); a
+// `sort` that is no integer goes as text so the hub names the field.
+async function submitKind() {
+  const slug = $('kindSlug').value.trim();
+  const body = { glyph: $('kindGlyph').value, label: $('kindLabel').value, enabled: $('kindEnabled').checked };
+  const sort = $('kindSort').value.trim();
+  if (sort !== '') body.sort = /^-?[0-9]+$/.test(sort) ? Number(sort) : sort;
+  if (!(await putKind(slug, body))) return;
+  resetKindForm();
+  await afterKindChange();
+}
+
+async function toggleKind(slug) {
+  const kind = kindOf(slug);
+  if (!kind) return;
+  if (!(await putKind(slug, { glyph: kind.glyph, label: kind.label, enabled: !kind.enabled }))) return;
+  await afterKindChange();
 }
 
 // Timeline rows are `m-<id>`, thread panel rows `t-<id>`.
@@ -961,6 +1295,10 @@ function historyParams(extra) {
 
 async function loadFeed() {
   const seq = S.feedSeq;
+  // The cursor first, so no change between it and the page is lost (a
+  // change seen twice changes nothing).
+  await loadReactionCursor();
+  if (seq !== S.feedSeq) return;
   try {
     const page = await request('GET', API.messages(), { params: historyParams({ limit: PAGE_SIZE }) });
     if (seq !== S.feedSeq) return;
@@ -1014,6 +1352,7 @@ async function pollFeed() {
   let feedChanged = false;
   let threadChanged = false;
   let arrived = 0;
+  let reacted = null;
   try {
     let after = newestSeq();
     for (let page = 0; page < MAX_POLL_PAGES; page += 1) {
@@ -1027,6 +1366,8 @@ async function pollFeed() {
       if (!result.has_more || !result.next_after_event_seq) break;
       after = result.next_after_event_seq;
     }
+    reacted = await pollReactions(seq);
+    if (!reacted) return;
   } catch (_) {
     // The next tick retries.
   } finally {
@@ -1037,6 +1378,7 @@ async function pollFeed() {
     rerenderThread();
     loadThreadView();
   }
+  if (reacted) rerenderReactions({ feedChanged: reacted.feedChanged && !feedChanged, threadChanged: reacted.threadChanged && !threadChanged });
   if (arrived === 0) return;
   // Replies to roots off screen count as seen too: they are in this room.
   markSeen(currentRoom());
@@ -1206,7 +1548,14 @@ function onSwipeEnd(event) {
   if (!swipe || event.pointerType !== 'touch' || !event.isPrimary) return;
   const state = swipe;
   swipe = null;
-  if (!state.claimed) return;
+  if (!state.claimed) {
+    // A finger held still and lifted: the message's menu.
+    if (event.type === 'pointerup' && event.timeStamp - state.at >= SWIPE_LONG_PRESS_MS) {
+      openActions(state.row);
+      swallowNextClick();
+    }
+    return;
+  }
   settleSwipe(state);
   swallowNextClick();
   if (event.type !== 'pointerup' || -state.offset < SWIPE_REPLY_PX) return;
@@ -1227,6 +1576,8 @@ function bindSwipe() {
   threadFeed.addEventListener('touchmove', onSwipeTouchMove, { passive: false });
   threadFeed.addEventListener('pointerup', onSwipeEnd, { passive: true });
   threadFeed.addEventListener('pointercancel', onSwipeEnd, { passive: true });
+  feed.addEventListener('contextmenu', onRowContextMenu);
+  threadFeed.addEventListener('contextmenu', onRowContextMenu);
 }
 
 // ---------------------------------------------------------------- composer
@@ -1548,6 +1899,9 @@ function renderThreadMeta() {
   const thread = S.thread;
   if (!thread) return;
   const nodes = [];
+  const root = thread.msgs.find((message) => message.message_id === thread.root) || findMessage(thread.root);
+  const claim = root ? claimBadge(root) : null;
+  if (claim) nodes.push(h('div', { class: 'claim-row' }, claim));
   const participants = thread.view ? thread.view.participants : [];
   if (participants.length > 0) {
     nodes.push(h('div', { class: 'chips', 'aria-label': '참여자' },
@@ -2350,17 +2704,20 @@ async function refreshDirectory() {
   } catch (_) {
     return;
   }
+  // The reaction kinds ride the directory's cadence.
+  const kindsChanged = await loadKinds();
   // The presence title changes with the state, the note and, for offline
   // agents, the coarse "n분 전" text, so it re-renders as time passes too.
   const signature = JSON.stringify(Array.from(S.agents.values()).map((agent) => [agent.agent_id, agent.name, agent.avatar && agent.avatar.sha256, presenceOf(agent).title]));
   ensureAvatars();
-  if (signature === S.directorySignature) return;
+  if (signature === S.directorySignature && !kindsChanged) return;
   S.directorySignature = signature;
   if ($('dir').open) renderDir();
   renderMe();
   renderTop();
   renderRooms();
   rerenderFeed();
+  if (kindsChanged) rerenderThread();
   renderInfoPassively();
 }
 
@@ -2411,6 +2768,8 @@ function resetRoomState() {
   S.newFrom = null;
   S.foldedSeq = '0';
   S.expanded.clear();
+  S.reactCursor = null;
+  S.reactError = null;
 }
 
 // `enter` shows the conversation on a phone; the first room after connecting
@@ -2564,6 +2923,8 @@ function logout(message) {
   S.quiet = false;
   S.roomError = null;
   S.mk = null;
+  S.kinds = [];
+  S.kindsSignature = '';
   resetRoomState();
   showGate(message || '');
 }
@@ -2571,6 +2932,7 @@ function logout(message) {
 // ----------------------------------------------------------------- events
 
 function onClick(event) {
+  if (!event.target.closest('.acts-open')) closeActions();
   const target = event.target.closest('[data-act]');
   if (!target) return;
   const id = target.dataset.id;
@@ -2657,6 +3019,25 @@ function onClick(event) {
       break;
     case 'reg-open':
       openRegister();
+      break;
+    case 'react':
+      closeActions();
+      toggleReaction(target.dataset.k, target.dataset.kind);
+      break;
+    case 'kinds-open':
+      openKinds();
+      break;
+    case 'kinds-close':
+      $('kinds').close();
+      break;
+    case 'kind-edit':
+      editKind(id);
+      break;
+    case 'kind-toggle':
+      toggleKind(id);
+      break;
+    case 'kind-new':
+      resetKindForm();
       break;
     case 'reg-close':
       $('reg').close();
@@ -2810,6 +3191,7 @@ function onSearch(event) {
 
 function onKeydown(event) {
   if (event.key !== 'Escape') return;
+  closeActions();
   const thread = S.thread;
   if (thread && (thread.replyTo || thread.correcting)) {
     thread.replyTo = null;
@@ -2873,6 +3255,10 @@ function init() {
     submitMake();
   });
   $('mk').addEventListener('close', onMakeClosed);
+  $('kindForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    submitKind();
+  });
   $('cred').addEventListener('close', onCredentialsClosed);
   $('loginForm').addEventListener('submit', (event) => {
     event.preventDefault();
