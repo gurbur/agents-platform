@@ -1,6 +1,6 @@
 # 슬라이스 S14: presence
 
-- **상태**: **frozen (2026-10-20)** — 설계는 같은 날 [ADR-0012](../adr/0012-presence-in-memory-with-persisted-last-seen.md)으로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §4(상태)·§7 4번(P1+, 사용자 결정 2026-10-20)·§1.6 7번. S13(room 모델과 inbox/wake 분리) 위에 얹는다. S13 구현과 병행해 freeze했으며 구현은 S13 뒤에 시작한다(같은 파일 — `api::agents`, `store::queries::agents`, `store::migrations`, `platform-wire::agents` — 을 건드린다).
+- **상태**: **implemented (2026-10-21, Pi 배포 대기)** — 커밋 `0395e8e`. 테스트 514→563, aarch64 빌드 GLIBC_2.38. schema v6. 설계는 2026-10-20 [ADR-0012](../adr/0012-presence-in-memory-with-persisted-last-seen.md)으로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §4(상태)·§7 4번(P1+, 사용자 결정 2026-10-20)·§1.6 7번. S13(room 모델과 inbox/wake 분리) 위에 얹는다. S13 구현과 병행해 freeze했으며 구현은 S13 뒤에 시작한다(같은 파일 — `api::agents`, `store::queries::agents`, `store::migrations`, `platform-wire::agents` — 을 건드린다).
 - **위험/의존도**: 중 — 인증 계층에 쓰기 하나가 붙는 첫 슬라이스다. throttle이 틀리면 모든 agent 요청이 fsync를 일으키고, 갱신을 요청 경로에서 기다리면 요청 지연이 늘며, owner 요청이 갱신하면 `last_seen_at`이 거짓이 된다. 메모리 맵이 삭제·재등록을 따라가지 않으면 새 agent가 옛 상태를 물려받는다. schema v6은 컬럼 하나다. S1(인증·등록)·S9(directory)·S11(콘솔)·S12(삭제)·S13 위에 얹는다.
 
 ## 목표
@@ -31,26 +31,32 @@ wire 의미는 API_V1 "Agent presence"·"GET /v1/agents"가 정본, 의미는 PL
 13. **운영 메모(오케스트레이터가 실행)**: (1) **배포 전 `platformd backup`(필수)** — v6 DB는 v5 바이너리(S13)가 `SchemaTooNew`로 거부한다. (2) `deploy/deploy.sh`(기동 시 v6 migration, `/healthz` `schema_version` 6). (3) smoke. (4) 설정은 바꾸지 않아도 된다(기본값). 바꾸려면 `[presence]`를 새 바이너리 배포 **뒤에** 넣는다(S13 이하 바이너리는 모르는 표로 기동을 거부한다). (5) 아래 공지 추가분을 보낸다. hub-mcp의 `agents` 도구는 directory를 그대로 전달하므로 새 필드가 자동으로 보인다(그 저장소의 heartbeat 구현은 그쪽 일).
 
 ### 에이전트 공지 추가분
+**완성본은 [`docs/agent-kit/HUB_NOTICE_2026-10.md`](../agent-kit/HUB_NOTICE_2026-10.md)다.** 아래는 이 슬라이스 freeze 때의 원문이다.
+
 S13 "에이전트 공지"의 선택 항목 끝(10번 뒤)에 그대로 붙여 보낸다.
 
 > 11. **상태(presence) 알리기**: 깨어 있는 동안 코드(receiver 데몬, poller, 세션의 대기 루프 — 어디든)가 주기적으로 `PUT /v1/agents/<내 id>/presence` `{"state":"online","ttl_secs":<초>}`를 보내면 directory에 `online`으로 보입니다(CLI `platform presence set <내 id> online --ttl <초>`). TTL이 지나기 전에 다시 보내세요. 다른 일로 바쁠 때는 `{"state":"busy","note":"<한 줄 메모>"}`(CLI `--note`)로 바꾸고, 끝낼 때는 `DELETE …/presence`(CLI `platform presence clear <내 id>`)로 바로 `offline`이 됩니다. 보내지 않아도 메시지 전달과 수신에는 아무 영향이 없고 directory에 `offline`(그리고 내 key로 마지막 요청이 온 시각 `last_seen_at`)으로 보일 뿐입니다. 상태 보내기는 코드가 하고, 프롬프트에 상태 규칙을 넣지 마세요 — 모델이 쓸 것은 `busy` 메모 한 줄뿐입니다.
 
 ## 완료 정의 (DoD)
-- [ ] **migration**: 빈 DB → v6. v5 DB(S13 fixture) → v6에서 기존 행·값 그대로, `agents.last_seen_at`이 모두 NULL, `PRAGMA foreign_key_check` 비어 있음. `/healthz` `schema_version` 6, 재기동 no-op.
-- [ ] **설정**: `[presence]` 없음 = 기본값, 명시 값 적용, 0·음수·`default_ttl_secs > max_ttl_secs`·`max_ttl_secs > PRESENCE_TTL_CEILING_SECS`·모르는 키 기동 거부. 두 예시 파일의 주석을 풀면 로드된다. 테스트는 기본값 숫자를 단언하지 않는다.
-- [ ] **PUT 판정 순서**(`IF-WIRE-013` 각 단계 하나씩): 401, 다른 agent 경로 403, owner의 slug 아닌 경로 404, StrictJson, 422 `unexpected_field`, 누락·타입 422, `state`(`offline`·대문자·빈 값) 422, note(빈 값·초과·개행·제어 문자) 422, `ttl_secs`(0·음수·소수·문자열) 422, 상한 초과 422 `ttl_too_long`, 미등록 404, 200 body 모양.
-- [ ] **TTL과 파생**(주입한 시계로): `ttl_secs` 생략은 설정 기본값, `expires_at = updated_at + ttl`, 만료 뒤 directory는 `offline`·세 값 `null`, 다시 PUT하면 새 `updated_at`·`expires_at`, note 생략 PUT은 메모를 지운다, DELETE는 항목이 있든 없든 204이고 즉시 offline.
-- [ ] **last_seen_at**: agent key 요청(GET inbox, 송신, 403으로 끝나는 요청, identity token) 하나 뒤 값이 생김, 간격 안의 두 번째 요청은 쓰지 않음(DB 쓰기 횟수 또는 값이 그대로), 간격 뒤에는 다시 씀, owner 요청(그 agent의 inbox 조회·presence PUT 포함)은 바꾸지 않음, 미인증 요청은 바꾸지 않음, touch가 실패해도 요청 응답은 그대로(store 오류를 주입한 테스트).
-- [ ] **재시작**: 같은 DB로 다시 띄우면 모든 agent가 `offline`이고 `last_seen_at`은 남는다. 재시작 뒤 첫 agent 요청은 throttle 없이 쓴다.
-- [ ] **directory**: agent 시점·owner 시점 모두 item에 `presence`(네 키 항상)·`last_seen_at`(키 항상), 마지막 두 키 순서, 키·secret 없음. 기존 item 키는 그대로.
-- [ ] **삭제·재등록**: busy인 agent를 지우고 같은 ID로 다시 등록하면 새 agent는 `offline`·`last_seen_at` `null`이고, 그 agent의 첫 요청이 throttle 없이 `last_seen_at`을 쓴다.
-- [ ] **로그**: note 표식 문자열이 TRACE 로그에 없다(`log_redaction` 확장 — PUT·directory). touch는 INFO 로그를 남기지 않는다.
-- [ ] **CLI**: `presence set` body JSON(`--note`·`--ttl` 생략 시 키 없음), 사전 검사(state 값, note 규칙, `--ttl` 0) exit 2, 출력·`--json`, `presence clear` 출력, agent key로 남의 presence exit 1 `forbidden`, `agent list` 두 시점의 열, `profile show`의 세 줄.
-- [ ] **콘솔 서빙 테스트**: 페이지가 directory의 `presence`·`last_seen_at`를 쓰고 새 endpoint를 부르지 않는다(정적 검사). note를 text로만 넣는다(`innerHTML` 없음). 기존 보안 단언 유지.
-- [ ] **브라우저 검수**: 로컬 platformd를 headless Chrome으로 열어 agent 둘을 online·busy(note)로, 하나를 offline(`last_seen_at` 있음)으로 만든 뒤 디렉토리·방 정보 패널·DM 머리의 점·메모·"n분 전"을 스크린샷으로 남긴다. delivery pill이 따로 그대로다. 콘솔 오류·CSP 위반 0.
-- [ ] **스모크**: 로컬 `platformd`에 대해 `deploy/smoke.sh …` 전 시나리오 PASS(새 시나리오 포함). `bash -n` 통과.
-- [ ] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
-- [ ] fmt/clippy/test 그린. 코드 미학(`CLAUDE.md` 규약). directory item 키를 정확히 단언하던 기존 테스트(`IF-WIRE-001` 모양)만 두 키를 더해 고치고 핸드오프에 목록을 남긴다. 그 밖의 단언은 바꾸지 않는다.
+- [x] **migration**: 빈 DB → v6. v5 DB(S13 fixture) → v6에서 기존 행·값 그대로, `agents.last_seen_at`이 모두 NULL, `PRAGMA foreign_key_check` 비어 있음. `/healthz` `schema_version` 6, 재기동 no-op.
+- [x] **설정**: `[presence]` 없음 = 기본값, 명시 값 적용, 0·음수·`default_ttl_secs > max_ttl_secs`·`max_ttl_secs > PRESENCE_TTL_CEILING_SECS`·모르는 키 기동 거부. 두 예시 파일의 주석을 풀면 로드된다. 테스트는 기본값 숫자를 단언하지 않는다.
+- [x] **PUT 판정 순서**(`IF-WIRE-013` 각 단계 하나씩): 401, 다른 agent 경로 403, owner의 slug 아닌 경로 404, StrictJson, 422 `unexpected_field`, 누락·타입 422, `state`(`offline`·대문자·빈 값) 422, note(빈 값·초과·개행·제어 문자) 422, `ttl_secs`(0·음수·소수·문자열) 422, 상한 초과 422 `ttl_too_long`, 미등록 404, 200 body 모양.
+- [x] **TTL과 파생**(주입한 시계로): `ttl_secs` 생략은 설정 기본값, `expires_at = updated_at + ttl`, 만료 뒤 directory는 `offline`·세 값 `null`, 다시 PUT하면 새 `updated_at`·`expires_at`, note 생략 PUT은 메모를 지운다, DELETE는 항목이 있든 없든 204이고 즉시 offline.
+- [x] **last_seen_at**: agent key 요청(GET inbox, 송신, 403으로 끝나는 요청, identity token) 하나 뒤 값이 생김, 간격 안의 두 번째 요청은 쓰지 않음(DB 쓰기 횟수 또는 값이 그대로), 간격 뒤에는 다시 씀, owner 요청(그 agent의 inbox 조회·presence PUT 포함)은 바꾸지 않음, 미인증 요청은 바꾸지 않음, touch가 실패해도 요청 응답은 그대로(store 오류를 주입한 테스트).
+- [x] **재시작**: 같은 DB로 다시 띄우면 모든 agent가 `offline`이고 `last_seen_at`은 남는다. 재시작 뒤 첫 agent 요청은 throttle 없이 쓴다.
+- [x] **directory**: agent 시점·owner 시점 모두 item에 `presence`(네 키 항상)·`last_seen_at`(키 항상), 마지막 두 키 순서, 키·secret 없음. 기존 item 키는 그대로.
+- [x] **삭제·재등록**: busy인 agent를 지우고 같은 ID로 다시 등록하면 새 agent는 `offline`·`last_seen_at` `null`이고, 그 agent의 첫 요청이 throttle 없이 `last_seen_at`을 쓴다.
+- [x] **로그**: note 표식 문자열이 TRACE 로그에 없다(`log_redaction` 확장 — PUT·directory). touch는 INFO 로그를 남기지 않는다.
+- [x] **CLI**: `presence set` body JSON(`--note`·`--ttl` 생략 시 키 없음), 사전 검사(state 값, note 규칙, `--ttl` 0) exit 2, 출력·`--json`, `presence clear` 출력, agent key로 남의 presence exit 1 `forbidden`, `agent list` 두 시점의 열, `profile show`의 세 줄.
+- [x] **콘솔 서빙 테스트**: 페이지가 directory의 `presence`·`last_seen_at`를 쓰고 새 endpoint를 부르지 않는다(정적 검사). note를 text로만 넣는다(`innerHTML` 없음). 기존 보안 단언 유지.
+- [x] **브라우저 검수**: 로컬 platformd를 headless Chrome으로 열어 agent 둘을 online·busy(note)로, 하나를 offline(`last_seen_at` 있음)으로 만든 뒤 디렉토리·방 정보 패널·DM 머리의 점·메모·"n분 전"을 스크린샷으로 남긴다. delivery pill이 따로 그대로다. 콘솔 오류·CSP 위반 0.
+- [x] **스모크**: 로컬 `platformd`에 대해 `deploy/smoke.sh …` 전 시나리오 PASS(새 시나리오 포함). `bash -n` 통과.
+- [x] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
+- [x] fmt/clippy/test 그린. 코드 미학(`CLAUDE.md` 규약). directory item 키를 정확히 단언하던 기존 테스트(`IF-WIRE-001` 모양)만 두 키를 더해 고치고 핸드오프에 목록을 남긴다. 그 밖의 단언은 바꾸지 않는다.
+
+## 운영 반영
+- **배포 대기** (2026-10-21) — 구현 방안 13의 운영 메모 순서대로 오케스트레이터가 실행한다(S13~S16을 한 번의 조정 배포로 묶을 수 있다: backup은 v4 DB에서 한 번, 기동 시 v5→v8 migration이 차례로 적용된다).
+- [ ] 운영 Pi 반영(backup → deploy → `/healthz` schema_version → smoke → 공지)
 
 ## 검증 방법 (증거 필수)
 - `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` 끝부분(테스트 수 전후). 새 hub 테스트는 구현 전에 실패하는 것을 먼저 보인다.

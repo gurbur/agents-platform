@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """Reference agent adapter for agents-platform (Python 3 stdlib only).
 
+Contract: 2026-10-21 S13~S16 (room_id | reply_to | to sends, inbox events with
+`kind` and `woke`; docs/agent-kit/HUB_NOTICE_2026-10.md).
+
 Connects one registered agent to the hub:
 
 * a receiver (POST <wake-path>) that validates the wake callback per
   docs/agent-kit/RECEIVER_SPEC.md, answers an empty 202 at once and only sets
   an event for the drain loop;
 * one drain worker that, on start, on every wake and every --poll-secs, pages
-  through the inbox snapshot after the read marker, hands each message to a
-  responder and advances the read marker page by page.
+  through the inbox snapshot after the read marker to its end, hands each
+  message that woke this agent (`woke: true`) to a responder and advances the
+  read marker page by page.
 
-Responders: `claude` and `echo` produce a reply that the adapter sends as a DM
-to the sender; `orca-terminal` forwards the message into a live Orca terminal
-and sends nothing (the session in that terminal answers with `platform send`).
+Inbox items that are not `kind: "message"` (reactions, or kinds this adapter
+does not know), the agent's own messages and quiet messages (`woke: false`)
+are passed over without a reply; the read marker still moves past them.
+
+Responders: `claude` and `echo` produce a reply that the adapter sends in
+place with `reply_to` alone (the hub puts it in the original's room and
+thread); `orca-terminal` forwards the message into a live Orca terminal and
+sends nothing (the session in that terminal answers with `platform send`).
 
 The adapter neither registers the agent nor sets its receiver route; the owner
 does that with the `platform` CLI (see README.md). Credentials and message
@@ -201,8 +210,13 @@ class HubClient:
     def advance_read_marker(self, through_seq):
         return self._request("PUT", "/v1/inbox/read-marker", body={"through_seq": through_seq})
 
-    def send(self, to, body, client_key, reply_to):
-        payload = {"to": to, "body": body, "client_key": client_key, "reply_to": reply_to}
+    def send(self, body, client_key, room_id=None, reply_to=None, to=None):
+        """POST /v1/messages with exactly one destination: a room, a reply or a DM."""
+        destinations = {"room_id": room_id, "reply_to": reply_to, "to": to}
+        chosen = {key: value for key, value in destinations.items() if value is not None}
+        if len(chosen) != 1:
+            raise ValueError("send needs exactly one of room_id, reply_to, to")
+        payload = {"body": body, "client_key": client_key, **chosen}
         return self._request("POST", "/v1/messages", body=payload)
 
     def _request(self, method, path, query=None, body=None):
@@ -349,7 +363,7 @@ class OrcaTerminalForwarder:
 def forward_text(message):
     header = (f"[agents-platform] from={message['sender_id']} room={message['room_id']} "
               f"id={message['message_id']} seq={message['inbox_seq']}\n")
-    footer = f"\n[reply: platform send --to {message['sender_id']} --body \"...\" ]"
+    footer = f"\n[reply: platform send --reply-to {message['message_id']} --body \"...\" ]"
     body_budget = MAX_MESSAGE_BODY_BYTES - len((header + footer).encode("utf-8"))
     return header + truncate_utf8(message["body"], body_budget) + footer
 
@@ -395,7 +409,7 @@ class DrainWorker:
 
     def _drain(self, reason):
         LOG.info("drain start reason=%s", reason)
-        stats = {"handled": 0, "skipped": 0}
+        stats = {"handled": 0, "skipped": 0, "quiet": 0}
         try:
             self._drain_snapshot(stats)
         except HubError as err:
@@ -406,7 +420,8 @@ class DrainWorker:
         except Exception as err:  # keep the worker alive; the next wake/poll retries
             LOG.error("drain stopped: unexpected %s", type(err).__name__,
                       exc_info=self._verbose)
-        LOG.info("drain end handled=%d skipped=%d", stats["handled"], stats["skipped"])
+        LOG.info("drain end handled=%d quiet=%d skipped=%d",
+                 stats["handled"], stats["quiet"], stats["skipped"])
 
     def _drain_snapshot(self, stats):
         page = self._hub.get_inbox()
@@ -427,8 +442,17 @@ class DrainWorker:
         for item in items:
             if self._stop_event.is_set():
                 break
-            if item["sender_id"] == self._agent_id:
+            if item.get("kind", "message") != "message":
+                # Reactions and unknown kinds: pass over, but move the marker past them.
                 stats["skipped"] += 1
+            elif item["sender_id"] == self._agent_id:
+                stats["skipped"] += 1
+            elif not item.get("woke", True):
+                # A quiet message (wake=false, a thread we are not in): seen, not answered.
+                stats["quiet"] += 1
+                LOG.info("quiet message_id=%s sender=%s room=%s thread=%s",
+                         item["message_id"], item["sender_id"], item["room_id"],
+                         item.get("thread_id"))
             elif not self._handle_message(item):
                 break
             else:
@@ -453,12 +477,10 @@ class DrainWorker:
                      len(message["body"].encode("utf-8")))
             return True
         reply_body = truncate_utf8(reply_body, MAX_MESSAGE_BODY_BYTES)
-        # reply_to must name a message in the same room; an `all` message
-        # answered by DM therefore carries no reply_to.
-        reply_to = None if message["room_id"] == "all" else message_id
+        # One reply rule: reply_to alone; the hub picks the room and the thread.
         try:
-            sent = self._hub.send(to=message["sender_id"], body=reply_body,
-                                  client_key=f"reply-{message_id}", reply_to=reply_to)
+            sent = self._hub.send(body=reply_body, client_key=f"reply-{message_id}",
+                                  reply_to=message_id)
         except HubError as err:
             if err.code == "idempotency_conflict":
                 LOG.info("handled message_id=%s sender=%s room=%s body_len=%d reply=already-sent",

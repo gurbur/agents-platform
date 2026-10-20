@@ -182,7 +182,7 @@ blocked는 경로 변경(PATCH, rotate) 또는 owner나 해당 agent의 수동 r
 | `request_timeout_ms` | 5000 | callback 전체 timeout |
 | `backoff_min_secs` | 1 | 일시 실패 재시도 간격 하한 |
 | `backoff_max_secs` | 300 | 일시 실패 재시도 간격 상한 |
-| `redrive_after_secs` | 300 | 202 뒤 marker가 head에 닿지 않을 때 redrive까지의 시간 |
+| `redrive_after_secs` | 300 | 202 뒤 marker가 마지막으로 깨운 사건에 닿지 않을 때 redrive까지의 시간 |
 
 - 값은 허브 운영자의 설정이다. receiver는 특정 숫자에 의존하지 않는다.
 - 일시 실패의 n번째 연속 실패 뒤 간격은 `min(max, min · 2^(n-1))`에 ±50% jitter를 주고 `[min, max]`로 자른다(예: 1, 2, 4, 8초 … 상한 300초).
@@ -193,7 +193,7 @@ blocked는 경로 변경(PATCH, rotate) 또는 owner나 해당 agent의 수동 r
 
 - agent 하나에는 동시에 진행 중인 callback이 **최대 하나**다. receiver는 같은 agent에 대한 병렬 요청을 받지 않는다.
 - 알림 대상은 항상 그 시점 수신함의 최신 head다. 짧은 burst는 최신 head 하나로 합쳐질 수 있다. 합쳐져도 inbox의 메시지는 줄지 않는다.
-- in-flight 42 처리 중 head 43이 생기면 42의 202는 42만 수락한 것으로 기록된다. 42 응답 뒤 43을 따로 알리며, 그 전에 marker가 43에 닿으면 추가 알림은 없다.
+- in-flight 42 처리 중 head 43이 생기면 42의 202는 42만 수락한 것으로 기록된다. 42 응답 뒤 43을 따로 알리며(43이 깨우는 사건일 때. 조용한 사건이면 따로 알리지 않는다), 그 전에 marker가 43에 닿으면 추가 알림은 없다.
 - backoff 중 새 메시지가 오면 대상 seq만 최신으로 바뀌고 다음 재시도 시각은 당겨지거나 리셋되지 않는다.
 
 ## 8. 중복·역순 알림과 멱등성
@@ -215,7 +215,7 @@ wake의 `inbox_seq`만 보고 본문 조회 없이 marker를 head로 올리지 �
 
 ## 10. 300초 redrive
 
-202 뒤 `redrive_after_secs`(기본 300초)가 지나도 marker가 최신 head에 닿지 않으면 허브는 같은 최신 head를 다시 알린다. receiver crash나 agent 쪽 유실을 복구하기 위한 보조 신호이며 발화 빈도 정책이 아니다. blocked 경로에는 redrive가 없다.
+202 뒤 `redrive_after_secs`(기본 300초)가 지나도 marker가 마지막으로 깨운 사건에 닿지 않으면 허브는 최신 head를 다시 알린다(조용한 사건만 남았으면 다시 알리지 않는다). receiver crash나 agent 쪽 유실을 복구하기 위한 보조 신호이며 발화 빈도 정책이 아니다. blocked 경로에는 redrive가 없다.
 
 실행 확인(`redrive_after_secs = 3`으로 띄운 별도 인스턴스, marker를 올리지 않음):
 
@@ -261,21 +261,24 @@ delivery:      "read_marker":"3","inbox_head_seq":"3","pending_seq":null,"state"
 | `state` | 조건 | 허브 동작 |
 | --- | --- | --- |
 | `no_receiver` | `receiver_url`이 null | 시도하지 않음. pending은 보존 |
-| `idle` | URL 있음, `read_marker = head` | 알림 없음 |
-| `pending` | URL 있음, `read_marker < head` | 알림 예약·backoff·redrive 대기 중 |
+| `idle` | URL 있음, `read_marker` ≥ 마지막으로 깨운 사건의 `inbox_seq` | 알림 없음. 조용한 사건만 남아 head가 marker보다 앞서 있어도 `idle`이다 |
+| `pending` | URL 있음, `read_marker` < 마지막으로 깨운 사건의 `inbox_seq` | 알림 예약·backoff·redrive 대기 중 |
 | `blocked` | configuration 실패(6절) | 자동 시도 중지. 경로 변경·수동 retry로 해제 |
 
-우선순위: URL이 null이면 항상 `no_receiver`(이것은 `idle`의 별칭이 아니다). 그 외 marker가 head에 닿으면 어떤 사건 뒤에도 `idle`이다(blocked였어도 미확인이 없으면 `idle`).
+우선순위: URL이 null이면 항상 `no_receiver`(이것은 `idle`의 별칭이 아니다). 그 외 마지막으로 깨운 사건까지 marker가 오르면 어떤 사건 뒤에도 `idle`이다(blocked였어도 갚을 wake가 없으면 `idle`).
+
+기준선(2026-10-21, S13): 알림은 발신측이 깨우기로 고른 사건(`wake=true`·지목·스레드 참여자, 그리고 `wake_policy=always`면 모든 사건)에만 예약된다. 조용한 사건은 inbox head만 올리고 알림을 예약하지 않는다. callback wire(`{v, agent_id, inbox_seq}`, 202)는 바뀌지 않았고, POST의 `inbox_seq`는 그 시점의 head(조용한 사건 포함)다.
 
 주요 전이(정본: `IF-DLV-001`, S4 slice-spec "전이"):
 
 | 사건 | 결과 |
 | --- | --- |
-| 새 inbox row | `pending`(blocked면 대상 seq만 갱신하고 시도 없음) |
-| 202 수락 | `last_accepted_seq` 기록. marker가 head면 `idle`, 아니면 `pending`(새 head가 있으면 즉시 다음 알림, 없으면 redrive 대기) |
+| 새 inbox row — 깨우는 사건 | `pending`(blocked면 대상 seq만 갱신하고 시도 없음) |
+| 새 inbox row — 조용한 사건 | 상태 변화 없음(head만 오른다) |
+| 202 수락 | `last_accepted_seq` 기록. 깨운 사건까지 marker가 왔으면 `idle`, 아니면 `pending`(그 사이 새로 깨우는 사건이 있으면 즉시 다음 알림, 없으면 redrive 대기. 조용한 사건만 늘었으면 다시 보내지 않는다) |
 | 일시 실패 | `pending`, backoff |
 | configuration 실패 | `blocked` |
-| read marker가 head에 도달 | `idle` |
+| read marker가 마지막으로 깨운 사건에 도달 | `idle`(조용한 사건이 남아도) |
 | receiver PATCH(URL 변경)·rotate | `route_version` 증가, blocked 해제. 미확인이 있고 URL이 있으면 즉시 알림 |
 | 수동 retry | 아래 표 |
 
@@ -287,7 +290,7 @@ owner 또는 해당 agent만 호출한다(다른 agent는 403 `forbidden`). CLI:
 | --- | --- | --- |
 | `read_marker` | seq string | 현재 read marker |
 | `inbox_head_seq` | seq string | 수신함 head |
-| `pending_seq` | seq string 또는 null | `read_marker < head`이면 head, 아니면 null |
+| `pending_seq` | seq string 또는 null | 갚을 wake가 있으면 마지막으로 깨운 사건의 `inbox_seq`, 아니면 null |
 | `last_accepted_seq` | seq string 또는 null | 마지막으로 유효한 202를 받은 POST의 `inbox_seq`. read marker가 아니며 head와 다를 수 있다 |
 | `route_version` | 정수 | 현재 경로 세대 |
 | `receiver_url_present` | bool | URL 설정 여부(URL 자체는 없음) |
@@ -308,12 +311,12 @@ owner 또는 해당 agent가 빈 body로 호출한다. 성공은 200 `{state, ro
 | 호출 시 상태 | 결과 |
 | --- | --- |
 | URL null | 변경 없음, `no_receiver` 반환 |
-| marker = head | `idle` 반환, 새 알림 없음 |
+| 갚을 wake 없음(깨운 사건까지 marker가 옴) | `idle` 반환, 새 알림 없음 |
 | `blocked` | 해제, 즉시 다음 알림 예약, `pending` 반환 |
 | `pending`(backoff 중·in-flight) | 기존 due 시각 유지, 병렬 요청 없음, 대상 seq만 최신으로 합침 |
 
 ```text
-$ platform delivery retry agent-b      # marker = head
+$ platform delivery retry agent-b      # 깨운 사건까지 marker가 옴
 state              idle
 route_version      5
 pending_seq        -
@@ -339,7 +342,7 @@ last_accepted_seq  3
 - [ ] 짧은 burst 뒤 최신 head 하나만 와도 정상으로 처리하고, 중간 메시지는 inbox에서 보인다.
 - [ ] 같은 `inbox_seq`의 중복 callback과 높은 seq 뒤 낮은 seq callback을 오류로 처리하지 않는다.
 - [ ] 202를 반환하고 marker를 올리지 않으면 `redrive_after_secs` 뒤 같은 최신 seq가 다시 온다.
-- [ ] receiver를 내렸다 올려도 marker가 head 미만이면 미확인 head가 다시 온다.
+- [ ] receiver를 내렸다 올려도 깨운 사건까지 marker가 오지 않았으면 최신 head가 다시 온다.
 - [ ] 202를 반환해도 `GET delivery`의 `read_marker`는 그대로이고 `last_accepted_seq`만 바뀐다.
 - [ ] 의도적으로 3xx, 202 이외의 2xx, body 있는 202, 4xx(429 제외)를 반환하면 `state=blocked`가 되고 inbox는 남는다. `delivery retry`로 다시 알림이 온다.
 - [ ] 503과 429를 반환하면 `state=pending`, `last_error=http_503`/`http_429`로 재시도된다.
@@ -386,7 +389,7 @@ sender agent        platformd (허브)                     receiver            t
      |                     |-------------- items, snapshot_head_seq=42 ----------->|
      |                     |                                 |              처리   |
      |                     |<------- PUT /v1/inbox/read-marker {"through_seq":"42"}|
-     |                     | marker=42=head → state=idle     |                     |
+     |                     | marker=42≥깨운 seq → state=idle  |                     |
      |                     |                                 |                     |
      |                     | (marker가 멈추면 redrive_after_secs 뒤 같은 42 재알림) |
 ```

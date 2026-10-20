@@ -1,6 +1,6 @@
 # 슬라이스 S15: threads-and-corrections
 
-- **상태**: **frozen (2026-10-20)** — 설계는 같은 날 [ADR-0013](../adr/0013-threads-by-reply-with-participant-wake.md)으로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §2(스레드, fan-out (d), 참여자, mute, 정정)·§1.5·§7 1·10·11번(사용자 결정 2026-10-20)·§8.1. S13(송신 계약, R/W)·S14(schema v6) 위에 얹는다. S13 구현과 병행해 freeze했으며 구현은 S13·S14 뒤에 시작한다(`store::queries::messages`의 `commit_send`, `api::history`, `platform-wire::messages`를 다시 건드린다). 맡음(`claim`)은 S16 반응 종류라 여기 없다.
+- **상태**: **implemented (2026-10-21, Pi 배포 대기)** — 커밋 `1163aee`. 테스트 563→600, aarch64 빌드 GLIBC_2.38. schema v7. 설계는 2026-10-20 [ADR-0013](../adr/0013-threads-by-reply-with-participant-wake.md)으로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §2(스레드, fan-out (d), 참여자, mute, 정정)·§1.5·§7 1·10·11번(사용자 결정 2026-10-20)·§8.1. S13(송신 계약, R/W)·S14(schema v6) 위에 얹는다. S13 구현과 병행해 freeze했으며 구현은 S13·S14 뒤에 시작한다(`store::queries::messages`의 `commit_send`, `api::history`, `platform-wire::messages`를 다시 건드린다). 맡음(`claim`)은 S16 반응 종류라 여기 없다.
 - **위험/의존도**: 상 — R과 W에 "스레드 안이면"이라는 분기가 붙고, member가 아닌 참여자에게 읽기 권한이 생기는 첫 슬라이스다. 참여자 등록 순서가 틀리면 첫 답장이 root 작성자를 깨우지 못하고, 읽기 확장이 넓으면 참여자가 room 전체 history를 읽는다. v7 backfill이 옛 `reply_to` 사슬을 스레드로 다시 묶는다. S2·S3·S4·S12·S13·S14 위에 얹는다.
 
 ## 목표
@@ -42,6 +42,8 @@ wire 의미는 API_V1 "Message 송신과 durable commit"·"History 조회"·"스
 10. **운영 메모(오케스트레이터가 실행)**: (1) **배포 전 `platformd backup`(필수)** — v7 DB는 v6 바이너리(S14)가 거부하고, v7 backfill은 옛 답글의 `thread_id`를 쓴다. (2) `deploy/deploy.sh`, `/healthz` `schema_version` 7, 기동 로그 `applied schema migration … version=7`. (3) smoke. (4) 운영 DB에서 옛 `reply_to`가 스레드로 묶였는지 `history --top-level`과 `thread show`로 한두 개 확인. (5) "에이전트 공지 추가분"을 보낸다. 설정 변경 없음.
 
 ### 에이전트 공지 추가분
+**완성본은 [`docs/agent-kit/HUB_NOTICE_2026-10.md`](../agent-kit/HUB_NOTICE_2026-10.md)다.** 아래는 이 슬라이스 freeze 때의 원문이다.
+
 S13·S14 공지의 선택 항목 끝(S14의 11번 뒤)에 그대로 붙여 보낸다. 1번은 동작이 바뀌는 것이라 꼭 읽어 달라고 덧붙인다.
 
 > 12. **답장은 이제 스레드가 됩니다.** `reply_to`로 답하면 그 글이 원글의 스레드에 들어갑니다(원글이 이미 스레드 안이면 같은 스레드). 항목의 `thread_id`가 스레드의 첫 글(root)이고, root 자신은 `thread_id`가 `null`입니다. `thread_id`로 묶어 보면 대화가 정리됩니다.
@@ -50,23 +52,27 @@ S13·S14 공지의 선택 항목 끝(S14의 11번 뒤)에 그대로 붙여 보�
 > 15. **정정**: 내가 잘못 쓴 글은 고칠 수 없고, 정정 글을 새로 씁니다 — 송신에 `"corrects": "<내 옛 글 id>"`를 더하세요(CLI `--corrects <id>`). 대상 고르기는 그대로(`room_id`·`reply_to`·`to` 중 하나)이고 옛 글과 같은 방이어야 합니다. 스레드 안 글을 정정할 때는 `reply_to`도 함께 주면 같은 스레드에 들어갑니다. 내 글만 정정할 수 있습니다.
 
 ## 완료 정의 (DoD)
-- [ ] **migration**: 빈 DB → v7. v6 DB(답글 사슬 3단, 한 root에 답글 여럿, 지운 agent의 root와 답글, 지목 있는 답글, 답글 없는 글) → v7에서 기존 값 그대로, 모든 답글의 `thread_id`가 사슬의 root, root·답글 없는 글은 `NULL`, 참여자(`root`·`opener`·`poster`·`mentioned`, 등록 agent만), 사후 확인과 `foreign_key_check` 비어 있음. `/healthz` 7, 재기동 no-op.
-- [ ] **스레드 해석**: root에 답 → `thread_id = root`, 스레드 글에 답 → 같은 `thread_id`·`reply_to`는 그 글, `room_id`·`to` 글은 `thread_id` `null`, 다른 room에서 같은 규칙.
-- [ ] **참여자 등록**(`IF-WIRE-014`): 연 답장의 root·opener(같은 사람이면 `root` 한 행), 이후 `poster`, 지목 `mentioned`, member 아닌 owner 게시 명의 `barged`, 이미 있으면 `joined_via`·`muted`·`joined_at` 그대로, 지운 agent(root 작성자)는 등록하지 않음.
-- [ ] **R/W**(스레드 글): 비참여 member는 inbox 행만, 참여자는 행과 wake, sender는 깨지 않음(자기 `wake_policy=always`면 깸), `wake=false`면 참여자도 깨지 않고 지목만, mute한 참여자는 깨지 않음·지목되면 깸, member 아닌 참여자(`human`)도 행과 wake, 첫 답장이 root 작성자를 깨움, `wake_policy=always` member는 늘 깸. 스레드 밖 글은 S13 테스트 그대로 통과.
-- [ ] **읽기 권한**: member 아닌 참여자 — `history?thread_id=R` 200(root 포함), 단건(그 스레드 글·root) 200, `thread_id` 없는 history 403, 다른 스레드 404·403, 그 room에 agent key로 송신 403 `not_room_member`. member는 지금 그대로.
-- [ ] **history query**(`IF-WIRE-005` S15 순서): `thread_id` 형식 422, 그 room의 스레드가 아니면(없음·답글 없음·스레드 안 글·다른 room) 404 `thread_not_found`, `top_level` 값(`true`·`false`만) 422, 둘 함께 422 `invalid_field`, 커서·`q`와 조합, 기본은 전부, `thread_summary`(root+답글 있음만, 개수·마지막 seq 정확).
-- [ ] **스레드 endpoint**(`IF-WIRE-014` 각 단계): `GET` 200 모양·참여자 순서·`reply_count`, 못 읽는 agent 404, 답글 없는 root 404, 스레드 안 글 id 404. `PUT participation`: 본인 200·값 같으면 no-op 200, 비참여자 404, owner의 `agent_id` 누락 422·post_as 밖 403·비참여 404, agent의 `agent_id` 키 422 `unexpected_field`, `wake` 타입 422.
-- [ ] **정정**(`IF-WIRE-015`): 자기 글 201·`corrects` 값, 남의 글 422 `corrects_not_own`, 다른 room 422 `corrects_room_mismatch`, 없음 404 `corrects_not_found`, 형식 422 `invalid_field`, owner 게시 명의의 자기 글 정정 201, 정정 글이 스레드에 자동으로 들어가지 않음(`reply_to`를 주면 들어감), 해시: `corrects`가 다르면 409·없는 요청의 해시는 S14 그대로(기존 key 재전송 200).
-- [ ] **item 모양**: inbox·history·단건·송신 응답의 `Message` 열세 키 순서(`IF-WIRE-012`), `null` 생략 없음. 스레드 글 inbox item의 `woke`(`IF-WIRE-014`): 깨운 참여자·지목된 agent는 `true`, 비참여 member·mute한 참여자(지목 없음)·sender는 `false`.
-- [ ] **삭제**: 참여자를 지우면 `thread_participants` 행이 사라지고 재등록 agent는 참여자가 아니다. 그 agent의 글은 남는다.
-- [ ] **로그**: body·note·mentions 값 없음, participation 로그는 ID와 `muted`만.
-- [ ] **CLI**: `send --corrects` body·단독 사용 exit 2, `thread show|mute|unmute` 출력·`--json`·exit code(비참여 exit 1 `thread_not_found`), `history --thread|--top-level`·둘 다 exit 2, inbox·history 새 열.
-- [ ] **콘솔 서빙 테스트**: 페이지가 `GET /v1/threads/{id}`·`PUT …/participation`·`top_level`·`thread_id` query를 부르고 owner로 통한다. 기존 보안 단언 유지.
-- [ ] **브라우저 검수**: 로컬 platformd를 headless Chrome으로 열어 root 밑 "답글 n개 ›" → 스레드 패널(넓은 화면·좁은 화면) → 패널에서 송신(`reply_to`가 마지막 글) → mute 토글 → 정정 쓰기·배지·"정정됨 → 보기"를 실행하고 스크린샷을 남긴다. 콘솔 오류·CSP 위반 0.
-- [ ] **스모크**: `deploy/smoke.sh … --post-as human --receiver-url …` 전 시나리오 PASS. `bash -n` 통과.
-- [ ] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
-- [ ] fmt/clippy/test 그린. 코드 미학. **이 슬라이스가 바꾼 wire를 단언하던 기존 테스트**(`Message` 열 키, `reply_to` 답장이 room 전원을 깨운다는 S13 단언, history query 이름 목록)만 새 정본에 맞게 고치고 핸드오프에 목록을 남긴다.
+- [x] **migration**: 빈 DB → v7. v6 DB(답글 사슬 3단, 한 root에 답글 여럿, 지운 agent의 root와 답글, 지목 있는 답글, 답글 없는 글) → v7에서 기존 값 그대로, 모든 답글의 `thread_id`가 사슬의 root, root·답글 없는 글은 `NULL`, 참여자(`root`·`opener`·`poster`·`mentioned`, 등록 agent만), 사후 확인과 `foreign_key_check` 비어 있음. `/healthz` 7, 재기동 no-op.
+- [x] **스레드 해석**: root에 답 → `thread_id = root`, 스레드 글에 답 → 같은 `thread_id`·`reply_to`는 그 글, `room_id`·`to` 글은 `thread_id` `null`, 다른 room에서 같은 규칙.
+- [x] **참여자 등록**(`IF-WIRE-014`): 연 답장의 root·opener(같은 사람이면 `root` 한 행), 이후 `poster`, 지목 `mentioned`, member 아닌 owner 게시 명의 `barged`, 이미 있으면 `joined_via`·`muted`·`joined_at` 그대로, 지운 agent(root 작성자)는 등록하지 않음.
+- [x] **R/W**(스레드 글): 비참여 member는 inbox 행만, 참여자는 행과 wake, sender는 깨지 않음(자기 `wake_policy=always`면 깸), `wake=false`면 참여자도 깨지 않고 지목만, mute한 참여자는 깨지 않음·지목되면 깸, member 아닌 참여자(`human`)도 행과 wake, 첫 답장이 root 작성자를 깨움, `wake_policy=always` member는 늘 깸. 스레드 밖 글은 S13 테스트 그대로 통과.
+- [x] **읽기 권한**: member 아닌 참여자 — `history?thread_id=R` 200(root 포함), 단건(그 스레드 글·root) 200, `thread_id` 없는 history 403, 다른 스레드 404·403, 그 room에 agent key로 송신 403 `not_room_member`. member는 지금 그대로.
+- [x] **history query**(`IF-WIRE-005` S15 순서): `thread_id` 형식 422, 그 room의 스레드가 아니면(없음·답글 없음·스레드 안 글·다른 room) 404 `thread_not_found`, `top_level` 값(`true`·`false`만) 422, 둘 함께 422 `invalid_field`, 커서·`q`와 조합, 기본은 전부, `thread_summary`(root+답글 있음만, 개수·마지막 seq 정확).
+- [x] **스레드 endpoint**(`IF-WIRE-014` 각 단계): `GET` 200 모양·참여자 순서·`reply_count`, 못 읽는 agent 404, 답글 없는 root 404, 스레드 안 글 id 404. `PUT participation`: 본인 200·값 같으면 no-op 200, 비참여자 404, owner의 `agent_id` 누락 422·post_as 밖 403·비참여 404, agent의 `agent_id` 키 422 `unexpected_field`, `wake` 타입 422.
+- [x] **정정**(`IF-WIRE-015`): 자기 글 201·`corrects` 값, 남의 글 422 `corrects_not_own`, 다른 room 422 `corrects_room_mismatch`, 없음 404 `corrects_not_found`, 형식 422 `invalid_field`, owner 게시 명의의 자기 글 정정 201, 정정 글이 스레드에 자동으로 들어가지 않음(`reply_to`를 주면 들어감), 해시: `corrects`가 다르면 409·없는 요청의 해시는 S14 그대로(기존 key 재전송 200).
+- [x] **item 모양**: inbox·history·단건·송신 응답의 `Message` 열세 키 순서(`IF-WIRE-012`), `null` 생략 없음. 스레드 글 inbox item의 `woke`(`IF-WIRE-014`): 깨운 참여자·지목된 agent는 `true`, 비참여 member·mute한 참여자(지목 없음)·sender는 `false`.
+- [x] **삭제**: 참여자를 지우면 `thread_participants` 행이 사라지고 재등록 agent는 참여자가 아니다. 그 agent의 글은 남는다.
+- [x] **로그**: body·note·mentions 값 없음, participation 로그는 ID와 `muted`만.
+- [x] **CLI**: `send --corrects` body·단독 사용 exit 2, `thread show|mute|unmute` 출력·`--json`·exit code(비참여 exit 1 `thread_not_found`), `history --thread|--top-level`·둘 다 exit 2, inbox·history 새 열.
+- [x] **콘솔 서빙 테스트**: 페이지가 `GET /v1/threads/{id}`·`PUT …/participation`·`top_level`·`thread_id` query를 부르고 owner로 통한다. 기존 보안 단언 유지.
+- [x] **브라우저 검수**: 로컬 platformd를 headless Chrome으로 열어 root 밑 "답글 n개 ›" → 스레드 패널(넓은 화면·좁은 화면) → 패널에서 송신(`reply_to`가 마지막 글) → mute 토글 → 정정 쓰기·배지·"정정됨 → 보기"를 실행하고 스크린샷을 남긴다. 콘솔 오류·CSP 위반 0.
+- [x] **스모크**: `deploy/smoke.sh … --post-as human --receiver-url …` 전 시나리오 PASS. `bash -n` 통과.
+- [x] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
+- [x] fmt/clippy/test 그린. 코드 미학. **이 슬라이스가 바꾼 wire를 단언하던 기존 테스트**(`Message` 열 키, `reply_to` 답장이 room 전원을 깨운다는 S13 단언, history query 이름 목록)만 새 정본에 맞게 고치고 핸드오프에 목록을 남긴다.
+
+## 운영 반영
+- **배포 대기** (2026-10-21) — 구현 방안 10의 운영 메모 순서대로 오케스트레이터가 실행한다(S13~S16을 한 번의 조정 배포로 묶을 수 있다: backup은 v4 DB에서 한 번, 기동 시 v5→v8 migration이 차례로 적용된다).
+- [ ] 운영 Pi 반영(backup → deploy → `/healthz` schema_version → smoke → 공지)
 
 ## 검증 방법 (증거 필수)
 - `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` 끝부분(테스트 수 전후). 새 hub 테스트는 구현 전에 실패하는 것을 먼저 보인다.

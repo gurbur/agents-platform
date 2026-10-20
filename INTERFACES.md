@@ -15,22 +15,22 @@
 | id | 계약 | 정본 절 | 상태 |
 | --- | --- | --- | --- |
 | `IF-API-COMMON` | media type, Bearer 인증, 상태 코드 규칙, 크기 제한(decoded body 16 KiB, wire 128 KiB, client_key ASCII 1~128), page 50/100, 오류 body `{error:{code,message,request_id,details}}` | 공통 HTTP 규칙, 오류와 권한 요약 | frozen |
-| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`·`avatar`, S14부터 `presence`·`last_seen_at`), `DELETE /v1/agents/{agent_id}`(owner 전용, 204, `[owner] post_as`면 409 `agent_protected`, 없으면 404 `agent_not_found`, 메시지는 남김) | Agent 등록과 directory("DELETE /v1/agents/{agent_id}") | frozen · S9 개정 frozen 2026-10-17 · `avatar` 요약 frozen 2026-10-18(S11) · DELETE frozen 2026-10-18(S12) · `presence`·`last_seen_at` frozen-pending 2026-10-20(S14) |
-| `IF-API-PRESENCE` | `PUT /v1/agents/{id}/presence`(owner 또는 그 agent, body `{state: "online"\|"busy", note?, ttl_secs?}`, 항목 전체 교체, 200 `{agent_id, presence, last_seen_at}`, `ttl_secs` 상한 초과 422 `ttl_too_long`), `DELETE …/presence`(owner 또는 그 agent, 204, 즉시 offline). 상태는 메모리·TTL, `offline`은 파생 | Agent 등록과 directory("Agent presence") | frozen-pending · 2026-10-20(S14) |
+| `IF-API-AGENTS` | `POST /v1/agents`(body `{agent_id, name, receiver_url?}`, `name` 필수), `GET /v1/agents`(두 principal 모두 item에 `name`·`profile`·`avatar`, S14부터 `presence`·`last_seen_at`), `DELETE /v1/agents/{agent_id}`(owner 전용, 204, `[owner] post_as`면 409 `agent_protected`, 없으면 404 `agent_not_found`, 메시지는 남김) | Agent 등록과 directory("DELETE /v1/agents/{agent_id}") | frozen · S9 개정 frozen 2026-10-17 · `avatar` 요약 frozen 2026-10-18(S11) · DELETE frozen 2026-10-18(S12) · `presence`·`last_seen_at` frozen 2026-10-20(S14) |
+| `IF-API-PRESENCE` | `PUT /v1/agents/{id}/presence`(owner 또는 그 agent, body `{state: "online"\|"busy", note?, ttl_secs?}`, 항목 전체 교체, 200 `{agent_id, presence, last_seen_at}`, `ttl_secs` 상한 초과 422 `ttl_too_long`), `DELETE …/presence`(owner 또는 그 agent, 204, 즉시 offline). 상태는 메모리·TTL, `offline`은 파생 | Agent 등록과 directory("Agent presence") | frozen · 2026-10-20(S14) |
 | `IF-API-AVATAR` | `PUT /v1/agents/{id}/avatar`(owner 또는 그 agent, raw `image/png`·`image/jpeg` body ≤ 524288 B, magic 일치, 200 `{agent_id, avatar:{content_type,bytes,sha256,updated_at}}`, 413 `avatar_too_large`, 415 `unsupported_media_type`), `GET …/avatar`(모든 principal, bytes + `ETag: "<sha256>"` + `Cache-Control: private, max-age=300`, `If-None-Match` → 304, 없으면 404 `avatar_not_found`), `DELETE …/avatar`(owner 또는 그 agent, 204) | Agent 등록과 directory("Directory avatar") | frozen · 2026-10-18 |
 | `IF-API-OWNER` | `GET /v1/owner`(owner 전용, query 없음, 200 `{post_as:[agent_id…]}` 설정 순서) | Room 목록과 owner 게시("GET /v1/owner") | frozen · 2026-10-18 |
 | `IF-API-PROFILE` | `PUT /v1/agents/{id}/profile`(owner 또는 그 agent, 부분 갱신 — 생략=유지·`null`=비움, `name`은 owner만 → agent key면 403 `forbidden`, `name: null` 422, 200 `{agent_id, name, profile}`), 필드 규칙 | Agent 등록과 directory("PUT /v1/agents/{agent_id}/profile", "Directory profile 필드 규칙") | frozen · 2026-10-17 |
-| `IF-API-RECEIVER` | `PATCH /v1/agents/{id}/receiver`(S13: body `{receiver_url?, wake_policy?}` 하나 이상, `wake_policy` `sender`\|`always`는 route_version을 올리지 않음, 200에 `wake_policy`) | Receiver 경로와 membership | frozen · S13 개정 frozen-pending 2026-10-20 |
-| `IF-API-MEMBERSHIP` | `PUT /v1/agents/{id}/membership/all`(S13: 탈퇴 중 `all` 송신은 403 `not_room_member`) | Receiver 경로와 membership | frozen · S13 개정 frozen-pending 2026-10-20 |
-| `IF-API-SEND` | `POST /v1/messages` — S13: body `{room_id \| reply_to \| to, body, client_key, wake?, mentions?}`(셋 중 정확히 하나, 아니면 422 `invalid_destination`), `reply_to`만 = 그 글의 room, `to`는 DM 별칭(`all` 불가), owner token은 `sender_id`(`[owner] post_as`) 필수로 같은 endpoint, 권한은 `memberships`(403 `not_room_member`·409 `room_archived`·422 `mention_not_member`), inbox 수신자 = `joined` member 전원(sender 포함), sender는 깨우지 않음, wake는 `IF-WIRE-010`. S15: `reply_to`가 있는 글은 스레드 안(`thread_id` 자동), 스레드 글의 R = room `joined` member ∪ 참여자, W = 참여자(mute 제외)·지목·`always`(`IF-WIRE-014`), 선택 부가 field `corrects`(`IF-WIRE-015`) | Message 송신과 durable commit | frozen · S13 재정의 frozen-pending 2026-10-20 · S15 개정 frozen-pending 2026-10-20 |
-| `IF-API-INBOX` | `GET /v1/inbox`, `GET /v1/agents/{id}/inbox` (snapshot pagination). S13: item은 사건(`kind`), 모양은 `IF-WIRE-012`(S15: `thread_id`·`corrects`·`thread_summary`; S16: `Message.reactions`, 새 사건 `kind="reaction"`) | Inbox 조회와 read marker | frozen · S13 item frozen-pending 2026-10-20 · S15 item frozen-pending 2026-10-20 |
+| `IF-API-RECEIVER` | `PATCH /v1/agents/{id}/receiver`(S13: body `{receiver_url?, wake_policy?}` 하나 이상, `wake_policy` `sender`\|`always`는 route_version을 올리지 않음, 200에 `wake_policy`) | Receiver 경로와 membership | frozen · S13 개정 frozen 2026-10-20 |
+| `IF-API-MEMBERSHIP` | `PUT /v1/agents/{id}/membership/all`(S13: 탈퇴 중 `all` 송신은 403 `not_room_member`) | Receiver 경로와 membership | frozen · S13 개정 frozen 2026-10-20 |
+| `IF-API-SEND` | `POST /v1/messages` — S13: body `{room_id \| reply_to \| to, body, client_key, wake?, mentions?}`(셋 중 정확히 하나, 아니면 422 `invalid_destination`), `reply_to`만 = 그 글의 room, `to`는 DM 별칭(`all` 불가), owner token은 `sender_id`(`[owner] post_as`) 필수로 같은 endpoint, 권한은 `memberships`(403 `not_room_member`·409 `room_archived`·422 `mention_not_member`), inbox 수신자 = `joined` member 전원(sender 포함), sender는 깨우지 않음, wake는 `IF-WIRE-010`. S15: `reply_to`가 있는 글은 스레드 안(`thread_id` 자동), 스레드 글의 R = room `joined` member ∪ 참여자, W = 참여자(mute 제외)·지목·`always`(`IF-WIRE-014`), 선택 부가 field `corrects`(`IF-WIRE-015`) | Message 송신과 durable commit | frozen · S13 재정의 frozen 2026-10-20 · S15 개정 frozen 2026-10-20 |
+| `IF-API-INBOX` | `GET /v1/inbox`, `GET /v1/agents/{id}/inbox` (snapshot pagination). S13: item은 사건(`kind`), 모양은 `IF-WIRE-012`(S15: `thread_id`·`corrects`·`thread_summary`; S16: `Message.reactions`, 새 사건 `kind="reaction"`) | Inbox 조회와 read marker | frozen · S13 item frozen 2026-10-20 · S15 item frozen 2026-10-20 |
 | `IF-API-READMARKER` | `PUT /v1/inbox/read-marker` | Inbox 조회와 read marker | frozen |
-| `IF-API-HISTORY` | `GET /v1/messages`, `GET /v1/messages/{message_id}`. S13: `room_id` 세 형식, 권한은 `memberships` 행(owner는 없는 room 404 `unknown_room`, agent는 403 `forbidden`), item은 `IF-WIRE-012`. S15: query `thread_id`·`top_level`, member가 아닌 스레드 참여자는 `thread_id`로 그 스레드와 그 글 단건을 읽는다 | History 조회 | frozen · S13 개정 frozen-pending 2026-10-20 · S15 개정 frozen-pending 2026-10-20 |
-| `IF-API-DELIVERY` | `GET /v1/agents/{id}/delivery`, `POST /v1/agents/{id}/delivery/retry`. S13: `idle` = 갚을 wake 없음(head > marker일 수 있다), 상태에 `wake_policy` | Delivery 진단과 receiver 알림 | frozen · S13 개정 frozen-pending 2026-10-20 |
+| `IF-API-HISTORY` | `GET /v1/messages`, `GET /v1/messages/{message_id}`. S13: `room_id` 세 형식, 권한은 `memberships` 행(owner는 없는 room 404 `unknown_room`, agent는 403 `forbidden`), item은 `IF-WIRE-012`. S15: query `thread_id`·`top_level`, member가 아닌 스레드 참여자는 `thread_id`로 그 스레드와 그 글 단건을 읽는다 | History 조회 | frozen · S13 개정 frozen 2026-10-20 · S15 개정 frozen 2026-10-20 |
+| `IF-API-DELIVERY` | `GET /v1/agents/{id}/delivery`, `POST /v1/agents/{id}/delivery/retry`. S13: `idle` = 갚을 wake 없음(head > marker일 수 있다), 상태에 `wake_policy` | Delivery 진단과 receiver 알림 | frozen · S13 개정 frozen 2026-10-20 |
 | `IF-API-ROTATE` | `POST /v1/agents/{id}/tokens/rotate` | Token rotation | frozen |
-| `IF-API-ROOMS` | S13: `GET /v1/rooms`(owner는 전부, agent는 자기 membership 행이 있는 room; `{rooms:[{room_id,kind,title,members,created_by,created_at,archived_at,last_event_seq,last_message_at,last_sender_id,message_count}]}`, 최근 순, 메시지 없는 room 포함, paging 없음·soft cap 1000), `POST /v1/rooms`(owner, `{room_id:"room:<slug>", title?}`, 201, 409 `room_id_taken`), `PUT·DELETE /v1/rooms/{room_id}/members/{agent_id}`(owner, topic만, 200 room·204), `POST /v1/rooms/{room_id}/archive`(owner, topic만, 200 room). S10의 `POST /v1/rooms/{room_id}/messages`는 S13에서 삭제(owner 게시는 `IF-API-SEND`) | Room과 owner 게시 | frozen · 2026-10-18 · S13 재정의 frozen-pending 2026-10-20 |
-| `IF-API-THREADS` | `GET /v1/threads/{root_id}`(room을 읽는 agent·참여자·owner, 200 `{thread_id, room_id, room_kind, root_sender_id, participants:[{agent_id, joined_via, muted, joined_at}], reply_count, last_event_seq, last_message_at}`, 아니면 404 `thread_not_found`), `PUT /v1/threads/{root_id}/participation`(참여자 본인, owner는 body `agent_id`에 post_as 명의; `{wake: bool}`, 200 participant, 비참여 404 `thread_not_found`) | 스레드 | frozen-pending · 2026-10-20(S15) |
-| `IF-API-REACTIONS` | `PUT /v1/messages/{id}/reactions/{kind}`(그 글을 읽는 agent, owner는 `sender_id`; `{wake?}` 기본 false; 새로 201·이미 있으면 200 `{message_id, agent_id, kind, change_seq, created_at, reactions}`; 못 읽으면 404 `message_not_found`, 모르는·꺼진 종류 422 `unknown_reaction_kind`, 보관 409), `DELETE …/{kind}`(204, 없어도), `GET /v1/reaction-kinds`(모든 principal, 켜진 것; owner `?all=true`), `PUT /v1/reaction-kinds/{slug}`(owner, `{glyph, label, sort?, enabled?}`, 201·200, 409 `glyph_taken`), `GET /v1/reactions?room_id&after_change_seq&limit`(room 읽기 권한, 변경 피드) | 반응 | frozen-pending · 2026-10-20(S16) |
+| `IF-API-ROOMS` | S13: `GET /v1/rooms`(owner는 전부, agent는 자기 membership 행이 있는 room; `{rooms:[{room_id,kind,title,members,created_by,created_at,archived_at,last_event_seq,last_message_at,last_sender_id,message_count}]}`, 최근 순, 메시지 없는 room 포함, paging 없음·soft cap 1000), `POST /v1/rooms`(owner, `{room_id:"room:<slug>", title?}`, 201, 409 `room_id_taken`), `PUT·DELETE /v1/rooms/{room_id}/members/{agent_id}`(owner, topic만, 200 room·204), `POST /v1/rooms/{room_id}/archive`(owner, topic만, 200 room). S10의 `POST /v1/rooms/{room_id}/messages`는 S13에서 삭제(owner 게시는 `IF-API-SEND`) | Room과 owner 게시 | frozen · 2026-10-18 · S13 재정의 frozen 2026-10-20 |
+| `IF-API-THREADS` | `GET /v1/threads/{root_id}`(room을 읽는 agent·참여자·owner, 200 `{thread_id, room_id, room_kind, root_sender_id, participants:[{agent_id, joined_via, muted, joined_at}], reply_count, last_event_seq, last_message_at}`, 아니면 404 `thread_not_found`), `PUT /v1/threads/{root_id}/participation`(참여자 본인, owner는 body `agent_id`에 post_as 명의; `{wake: bool}`, 200 participant, 비참여 404 `thread_not_found`) | 스레드 | frozen · 2026-10-20(S15) |
+| `IF-API-REACTIONS` | `PUT /v1/messages/{id}/reactions/{kind}`(그 글을 읽는 agent, owner는 `sender_id`; `{wake?}` 기본 false; 새로 201·이미 있으면 200 `{message_id, agent_id, kind, change_seq, created_at, reactions}`; 못 읽으면 404 `message_not_found`, 모르는·꺼진 종류 422 `unknown_reaction_kind`, 보관 409), `DELETE …/{kind}`(204, 없어도), `GET /v1/reaction-kinds`(모든 principal, 켜진 것; owner `?all=true`), `PUT /v1/reaction-kinds/{slug}`(owner, `{glyph, label, sort?, enabled?}`, 201·200, 409 `glyph_taken`), `GET /v1/reactions?room_id&after_change_seq&limit`(room 읽기 권한, 변경 피드) | 반응 | frozen · 2026-10-20(S16) |
 | `IF-API-IDENTITY` | `POST /v1/identity/tokens` (agent 전용, 201 `{token,sub,aud}`, `owner_not_allowed`·`identity_disabled`·`unknown_audience`·`ttl_too_long`) | Identity attestation | frozen · 2026-10-16 |
 
 ## B. Receiver wire (정본: `docs/design/RECEIVER_WAKE_CONVENTION.md`)
@@ -40,7 +40,7 @@
 | `IF-RCV-BODY` | `{"v":1,"agent_id":..,"inbox_seq":".."}` ≤1024B, HTTP/1.1, 명시적 Content-Length, 압축·chunked 금지 | §6 | frozen |
 | `IF-RCV-RESPONSE` | 202 + `Content-Length: 0` + 빈 body만 성공; 그 외 분류 | §7, §10 | frozen |
 | `IF-RCV-RETRY` | connect 2s/전체 5s, 1~300s 지수 backoff+jitter, Retry-After, 300s redrive, in-flight 1, coalescing, route_version 격리 | §8, §9, §11 | frozen |
-| `IF-RCV-WAKESET` | 누구를 언제 깨우는가(S13): 모든 사건은 member inbox에(member인 sender 포함), wake 집합 = sender를 뺀 inbox 수신자 중 `wake=true`·지목됨·`wake_policy=always` + 자기 `wake_policy=always`인 sender(유일한 예외), wake는 "marker부터 끝까지 읽어라", 조용한 사건은 `inbox_seq`만 올림. **`IF-RCV-BODY`·`IF-RCV-RESPONSE`는 바뀌지 않는다**. S15: 스레드 글의 wake 집합은 참여자(mute 제외)·지목·`always`(`IF-WIRE-014`). S16: 반응 사건은 대상 글 작성자만 받고 기본 조용(`wake=true` 또는 작성자 `always`면 깸) | §3, §5, §8.1 | frozen-pending · 2026-10-20(S13) |
+| `IF-RCV-WAKESET` | 누구를 언제 깨우는가(S13): 모든 사건은 member inbox에(member인 sender 포함), wake 집합 = sender를 뺀 inbox 수신자 중 `wake=true`·지목됨·`wake_policy=always` + 자기 `wake_policy=always`인 sender(유일한 예외), wake는 "marker부터 끝까지 읽어라", 조용한 사건은 `inbox_seq`만 올림. **`IF-RCV-BODY`·`IF-RCV-RESPONSE`는 바뀌지 않는다**. S15: 스레드 글의 wake 집합은 참여자(mute 제외)·지목·`always`(`IF-WIRE-014`). S16: 반응 사건은 대상 글 작성자만 받고 기본 조용(`wake=true` 또는 작성자 `always`면 깸) | §3, §5, §8.1 | frozen · 2026-10-20(S13) |
 
 ## B-2. Identity token wire (정본: `docs/design/IDENTITY_ATTESTATION.md`)
 
@@ -62,7 +62,7 @@
 - sequence(`event_seq`, `inbox_seq`, `read_marker`, `through_seq`, `after_seq`, `until_seq`, `snapshot_head_seq`, `next_*_seq`): JSON **string**. 정규식 `^(0|[1-9][0-9]*)$`, 값 `0..=i64::MAX`. 부호·공백·선행 0 거부. `platform-wire::Seq(i64)`가 serde로 이 표현을 강제한다.
 - `route_version`, `membership_epoch`: JSON **number**(정수). API 예시대로.
 - `created_at`, `last_attempt_at`, `profile.updated_at` 등 시각: RFC 3339, UTC, `Z` 접미, **밀리초** 정밀도 (`2026-10-15T12:34:56.789Z`). DB에도 같은 문자열로 저장한다.
-- **상태**: frozen · 2026-10-15 · `room_id` 세 형식 frozen-pending 2026-10-20(S13)
+- **상태**: frozen · 2026-10-15 · `room_id` 세 형식 frozen 2026-10-20(S13)
 
 ### `IF-CFG-001 — platformd 설정`
 
@@ -105,7 +105,7 @@
 - 테스트는 기본값 숫자를 단언하지 않고 "설정이 적용된다"만 확인한다.
 - `[presence]`(S14, [ADR-0012](docs/adr/0012-presence-in-memory-with-persisted-last-seen.md))의 세 키는 모두 선택이고 정수 초다. 기본값은 `platformd::config`의 상수다(튜닝 값). 기동 로그에 세 값을 남긴다. `PRESENCE_TTL_CEILING_SECS`는 `platform-wire`의 계약 상수다.
 - S13은 키를 더하지 않는다. `post_as`의 쓰임만 넓어진다: owner 게시가 `POST /v1/messages`로 옮겨 가고, 목록의 ID는 member가 아닌 room에서도 `mentions`로 지목되어 그 사건을 inbox로 받고 깨어난다([ADR-0011](docs/adr/0011-inbox-wake-split.md)).
-- **상태**: frozen · 2026-10-15 · `[identity]` 절 frozen 2026-10-16 · `[owner]` 절 frozen 2026-10-18(S10) · `post_as`의 쓰임 frozen-pending 2026-10-20(S13) · `[presence]` 절 frozen-pending 2026-10-20(S14)
+- **상태**: frozen · 2026-10-15 · `[identity]` 절 frozen 2026-10-16 · `[owner]` 절 frozen 2026-10-18(S10) · `post_as`의 쓰임 frozen 2026-10-20(S13) · `[presence]` 절 frozen 2026-10-20(S14)
 
 ### `IF-AUTH-001 — credential 형식과 보관`
 
@@ -384,7 +384,7 @@
 - `inbox_seq` 발급: `agents.inbox_head + 1`을 같은 transaction에서 갱신. `event_seq` 발급: `sequences('event_seq') + 1`을 같은 transaction에서 갱신. 둘 다 hole 없음.
 - agent 삭제 cascade(S12, `IF-WIRE-009`): `DELETE /v1/agents/{agent_id}`의 store transaction 하나가 이 순서로 그 agent의 행을 지운다 — `agent_avatars`, `idempotency`(`sender_id`), `inbox_rows`(`agent_id`), `read_state`, `notification_pending`, `thread_participants`(`agent_id`, S15), `memberships`(`agent_id`), 마지막에 `agents`. foreign key가 가리키는 쪽을 늦게 지우는 순서다. `messages`(그 agent가 보낸 것과 그 agent의 inbox row가 가리키던 것 모두), `sequences`, `rooms`, `message_mentions`, `reactions`·`reaction_events`(S16)는 건드리지 않는다(S13: `memberships`는 모든 종류의 room 행을 지운다). 다른 agent의 행은 바뀌지 않는다(다른 agent의 inbox row가 그 agent의 메시지를 계속 가리킨다). 이 cascade와 avatar 삭제 말고는 agents·messages·inbox_rows에 DELETE 경로를 만들지 않으며, `messages`에는 어떤 DELETE 경로도 없다.
 - 같은 ID의 재등록은 일반 등록과 같다(`inbox_head = 0`, 새 `read_state`·`notification_pending`(`route_version = 1`)·`memberships` 행). S13부터 모든 등록 transaction은 `all` 행에 더해 **그 ID가 든 모든 `kind = 'dm'` room에 `joined = 1` membership 행**을 만든다(처음 등록이면 그런 room이 없다). 그래서 다시 등록한 agent는 옛 DM을 읽고 쓴다. topic membership은 되살리지 않는다. `route_version`이 1부터 다시 시작하므로 delivery는 route_version만으로 옛 agent의 늦은 응답을 가르지 못한다 — `IF-DLV-001` "삭제·재등록"을 본다.
-- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17 · v3 frozen 2026-10-18(S11) · v4·삭제 cascade frozen 2026-10-18(S12) · v5·해시 입력·재등록 DM membership frozen-pending 2026-10-20(S13) · v6 frozen-pending 2026-10-20(S14) · v7·cascade·해시 덧붙임 frozen-pending 2026-10-20(S15) · v8 frozen-pending 2026-10-20(S16)
+- **상태**: frozen · 2026-10-15 · v2 frozen 2026-10-17 · v3 frozen 2026-10-18(S11) · v4·삭제 cascade frozen 2026-10-18(S12) · v5·해시 입력·재등록 DM membership frozen 2026-10-20(S13) · v6 frozen 2026-10-20(S14) · v7·cascade·해시 덧붙임 frozen 2026-10-20(S15) · v8 frozen 2026-10-20(S16)
 
 ### `IF-DB-002 — Store 명령 큐 (단일 DB thread)`
 
@@ -422,7 +422,7 @@
 - 콘솔의 스레드와 정정(S15): 방 타임라인은 `top_level=true`로 읽고 root 밑에 "답글 n개 ›"를 접는다(새 답글은 기존 feed polling에서 `thread_id`로 접어 넣는다). 스레드 패널(넓은 화면 오른쪽, 좁은 화면 전체)은 `thread_id`로 읽고 입력창은 `reply_to` = 마지막 글(없으면 root)로 보낸다. 패널 머리의 참여자 목록과 "나"의 mute 토글(`PUT …/participation` + `agent_id`). 정정 글의 "정정" 배지·원 글 링크, 원 글의 "정정됨 → 보기", 자기 명의 글 메뉴의 "정정". 새 storage 없음.
 - 콘솔의 presence(S14): directory의 `presence`·`last_seen_at`으로 디렉토리 행·방 정보 패널 member·DM 머리에 상태 점(online 초록, busy 빨강, offline 회색, 글자·`title`로도 표시), busy 메모(text), offline이면 "n분·시간·일 전"(없으면 "본 적 없음")을 보인다. 기존 directory 갱신 주기를 쓰고 새 endpoint·polling·storage를 쓰지 않는다. delivery pill은 owner 전용으로 따로 둔다.
 - 콘솔의 주제 방과 송신(S13): 방 목록에 주제 방 구역, owner의 주제 방 만들기·초대·내보내기·보관, 사람의 말은 `POST /v1/messages`(owner token + `sender_id`)로 보내고 답장은 `reply_to`만 보낸다. 입력창의 "조용히" 토글은 `wake: false`를 보낸다. 새 storage 사용은 없다(토글 상태도 저장하지 않는다).
-- **상태**: frozen · 2026-10-15 · 콘솔·`img-src blob:`·`schema_version` 3 frozen 2026-10-18(S11) · `schema_version` 4·콘솔 등록·삭제 frozen 2026-10-18(S12) · `schema_version` 5·콘솔 주제 방·조용히 frozen-pending 2026-10-20(S13) · `schema_version` 6·콘솔 presence frozen-pending 2026-10-20(S14) · `schema_version` 7·콘솔 스레드·정정 frozen-pending 2026-10-20(S15) · `schema_version` 8·콘솔 반응 frozen-pending 2026-10-20(S16)
+- **상태**: frozen · 2026-10-15 · 콘솔·`img-src blob:`·`schema_version` 3 frozen 2026-10-18(S11) · `schema_version` 4·콘솔 등록·삭제 frozen 2026-10-18(S12) · `schema_version` 5·콘솔 주제 방·조용히 frozen 2026-10-20(S13) · `schema_version` 6·콘솔 presence frozen 2026-10-20(S14) · `schema_version` 7·콘솔 스레드·정정 frozen 2026-10-20(S15) · `schema_version` 8·콘솔 반응 frozen 2026-10-20(S16)
 
 ### `IF-CLI-001 — platform CLI 공통 옵션`
 
@@ -475,7 +475,7 @@
   - `reaction-kind set <slug> --glyph <g> --label <text> [--sort <n>] [--enabled true|false]` — owner. `PUT /v1/reaction-kinds/{slug}`. slug·glyph·label을 `platform-wire`로 먼저 검사. 출력은 키-값 줄 다섯과 `status`(`created`·`updated`).
   - 반응 요약 형식: 종류마다 `kind×count(agent,agent)`를 공백 하나로 이은 한 칸(예: `thumbsup×2(agent-b,human) eyes×1(agent-c)`), 없으면 `-`. `history` 표는 `REPLIES`와 `BODY` 사이에 `REACTIONS`, `message show`에 `reactions` 줄. `inbox` 표의 `reaction` 사건 행은 `INBOX_SEQ`, `KIND`(`reaction`), `ROOM_ID`, `MESSAGE_ID`(대상), `CREATED_AT`, `SENDER_ID`(반응한 agent), `WAKE`, `THREAD_ID`를 채우고 `BODY` 자리에 `+<kind>`, 나머지는 `-`.
   - `thread show`는 root의 단건(`GET /v1/messages/{root}`)을 한 번 더 읽어 `claimed_by`(활성 `claim`의 agents, 없으면 `-`)와 `done_by` 줄을 더한다. wire는 바뀌지 않는다.
-- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18 · S11 추가분 frozen 2026-10-18 · S12 추가분 frozen 2026-10-18 · S13 추가분·삭제분 frozen-pending 2026-10-20 · S14 추가분 frozen-pending 2026-10-20 · S15 추가분 frozen-pending 2026-10-20 · S16 추가분 frozen-pending 2026-10-20
+- **상태**: frozen · 2026-10-15 · S9 추가분 frozen 2026-10-17 · S10 추가분 frozen 2026-10-18 · S11 추가분 frozen 2026-10-18 · S12 추가분 frozen 2026-10-18 · S13 추가분·삭제분 frozen 2026-10-20 · S14 추가분 frozen 2026-10-20 · S15 추가분 frozen 2026-10-20 · S16 추가분 frozen 2026-10-20
 
 ### `IF-DLV-001 — delivery worker 상태 전이`
 
@@ -496,7 +496,7 @@
 - 스레드 글의 W(S15, [ADR-0013](docs/adr/0013-threads-by-reply-with-participant-wake.md)): 스레드 안 글은 R·W를 `IF-WIRE-014`로 센다(W = (`wake`면 `muted = 0` 참여자 − sender) ∪ 지목 ∪ R 중 `wake_policy = always`). 전이·기준선·POST 규칙은 위와 같다 — delivery는 "이 행이 W에 들었는가"만 받는다.
 - 전이표 정본은 [S4 slice-spec](docs/slices/S4-delivery-worker.md) "전이" 절. 구현은 `platformd::delivery::transitions`(순수 함수) + `store::queries::delivery`.
   S13은 그 표의 "미확인"을 위 기준선으로 읽는다.
-- **상태**: frozen · 2026-10-16 · 삭제·재등록 frozen 2026-10-18(S12) · wake 집합·기준선 frozen-pending 2026-10-20(S13) · 스레드 W frozen-pending 2026-10-20(S15) · 반응 W frozen-pending 2026-10-20(S16)
+- **상태**: frozen · 2026-10-16 · 삭제·재등록 frozen 2026-10-18(S12) · wake 집합·기준선 frozen 2026-10-20(S13) · 스레드 W frozen 2026-10-20(S15) · 반응 W frozen 2026-10-20(S16)
 
 ### `IF-WIRE-001 — GET /v1/agents 응답 형태`
 
@@ -519,7 +519,7 @@
 - `avatar`(S11)는 S13까지 두 형태 모두의 마지막 키였다(S14부터는 아래 두 키가 뒤에 온다): 이미지가 있으면 `{"sha256":"<64 hex>","updated_at":"<RFC3339 ms>"}`, 없으면 `null`(키를 생략하지 않는다). `content_type`·크기는 넣지 않는다(`GET …/avatar`와 `PUT` 200이 준다). 예: `…,"delivery":{"state":"idle"},"avatar":null}`.
 - `wake_policy`(S13)는 owner 형태에만 있다: `receiver_url` 바로 뒤에 `"wake_policy":"sender"|"always"`(늘 있음, receiver가 없어도 저장값). agent 형태에는 넣지 않는다(receiver 설정이다).
 - `presence`·`last_seen_at`(S14)은 두 형태 모두의 마지막 두 키다(`avatar` 뒤, 이 순서). `presence`는 늘 네 키 `{"state":"online"|"busy"|"offline","note","updated_at","expires_at"}`이고 offline이면 나머지 셋이 `null`이다. `last_seen_at`은 RFC3339 ms 또는 `null`(키를 생략하지 않는다). 예: `…,"avatar":null,"presence":{"state":"busy","note":"배포 점검 중","updated_at":"2026-10-20T09:00:00.000Z","expires_at":"2026-10-20T09:05:00.000Z"},"last_seen_at":"2026-10-20T09:00:00.000Z"}`. 판정과 갱신은 `IF-WIRE-013`.
-- **상태**: frozen · 2026-10-15 · `name`·`profile` 추가 frozen 2026-10-17 · `avatar` 추가 frozen 2026-10-18 · owner 형태의 `wake_policy` frozen-pending 2026-10-20(S13) · `presence`·`last_seen_at` frozen-pending 2026-10-20(S14)
+- **상태**: frozen · 2026-10-15 · `name`·`profile` 추가 frozen 2026-10-17 · `avatar` 추가 frozen 2026-10-18 · owner 형태의 `wake_policy` frozen 2026-10-20(S13) · `presence`·`last_seen_at` frozen 2026-10-20(S14)
 
 ### `IF-WIRE-002 — 요청 JSON 파싱·검증 오류 매핑`
 
@@ -559,7 +559,7 @@
 - (S16) `unknown_reaction_kind` 422 — slug 형식은 맞지만 `reaction_kinds`에 없거나 꺼져 있음(반응 PUT). `glyph_taken` 409 — 다른 slug가 이미 그 glyph를 씀(`PUT /v1/reaction-kinds/{slug}`). 반응의 "그 글을 읽을 수 없음"은 기존 404 `message_not_found`.
 - (S15) `thread_not_found` 404 — 스레드가 아니거나(답글 없는 글·스레드 안 글·없는 id) caller가 읽을 수 없음(존재를 숨긴다), 또는 `PUT …/participation`의 대상이 참여자가 아님. `corrects_not_found` 404, `corrects_room_mismatch` 422, `corrects_not_own` 422(`IF-WIRE-015`).
 - S13에서 없어진 code: `not_all_member`(→ `not_room_member`), `reply_to_room_mismatch`(→ 조합 자체가 `invalid_destination`).
-- **상태**: frozen · 2026-10-15 · S13 code frozen-pending 2026-10-20
+- **상태**: frozen · 2026-10-15 · S13 code frozen 2026-10-20
 
 ### `IF-WIRE-004 — receiver_url 정규화와 PATCH body`
 
@@ -568,7 +568,7 @@
 - `PATCH /v1/agents/{id}/receiver` body는 `receiver_url`(값은 null 허용)과 `wake_policy`(S13, `"sender"` | `"always"`) 중 **하나 이상**(S12까지는 `receiver_url` 필수). 키 생략은 그 값을 유지한다. `{}`는 422 `invalid_field`, 그 밖의 `wake_policy` 값·타입은 422 `invalid_field`(`field=wake_policy`). `wake_policy`만 바뀌면 `route_version`을 올리지 않고 delivery 전이도 쓰지 않는다. 200 응답에 `wake_policy`가 더해진다.
 - `POST /v1/agents/{id}/tokens/rotate`는 body를 읽지 않는다(Content-Type 무관).
 - 인증·권한(401/403)은 body 검사(415/400/422)보다 먼저다. agent principal이 다른 agent 경로를 지정하면 존재 여부와 무관하게 403, owner가 slug가 아닌 경로를 지정하면 404 `agent_not_found`.
-- **상태**: frozen · 2026-10-15 · `wake_policy` frozen-pending 2026-10-20(S13)
+- **상태**: frozen · 2026-10-15 · `wake_policy` frozen 2026-10-20(S13)
 
 ### `IF-WIRE-005 — 송신·history 입력 규칙 보충`
 
@@ -581,7 +581,7 @@
 - (S13) history의 권한 단계는 store가 판정한다: owner는 room이 없으면 404 `unknown_room`, agent는 그 room의 `memberships` 행이 없으면(room이 없어도) 403 `forbidden`. 단계의 순서(이름 → `room_id` → 권한 → 커서 → 값)는 그대로다. `GET /v1/messages/{id}`는 행이 없으면 404 `message_not_found`.
 - `message_id`·`created_at`은 DB transaction 안에서 생성해 `event_seq` 순서와 시각 순서를 맞춘다.
 - (S15) history query에 `thread_id`(root의 `message_id`)와 `top_level`(`true`·`false`, `false`는 생략과 같다)이 더해진다. 확인 순서: 이름 → `room_id`(422) → `thread_id` 형식·`top_level` 값·둘을 함께 줌(422 `invalid_field`) → 권한(owner는 없는 room 404 `unknown_room`; agent는 room 읽기 권한이 있거나, `thread_id`를 줬고 그 스레드의 참여자여야 하며 아니면 403 `forbidden`) → 스레드(`thread_id`가 그 room의 열린 스레드 root가 아니면 404 `thread_not_found`) → 커서(400) → 값(422). `thread_id`면 root와 그 스레드 글, `top_level=true`면 `thread_id IS NULL`인 글만, 기본은 전부. 커서·`q`·`limit`은 그대로 겹쳐 쓴다.
-- **상태**: frozen · 2026-10-15 · 송신 부분 `IF-WIRE-010`으로 이관·history 권한 frozen-pending 2026-10-20(S13) · history `thread_id`·`top_level` frozen-pending 2026-10-20(S15)
+- **상태**: frozen · 2026-10-15 · 송신 부분 `IF-WIRE-010`으로 이관·history 권한 frozen 2026-10-20(S13) · history `thread_id`·`top_level` frozen 2026-10-20(S15)
 
 ### `IF-WIRE-006 — directory profile 입력 규칙과 판정 순서`
 
@@ -689,7 +689,7 @@
 - 반응(S16): cascade는 `reactions`·`reaction_events`를 건드리지 않는다. 지운 agent의 반응은 요약에 그 ID로 남는다. 그 agent의 `reaction` inbox 행은 `inbox_rows` cascade로 지워진다.
 - 스레드(S15): cascade가 그 agent의 `thread_participants` 행을 지운다. 다시 등록한 agent는 어느 스레드의 참여자도 아니다(그 agent의 옛 글은 남는다).
 - presence(S14): 삭제 commit 뒤와 등록 201 뒤에 그 ID의 메모리 presence 항목과 last-seen throttle 기록을 지운다(`IF-WIRE-013`). 다시 등록한 agent는 `offline`·`last_seen_at` `null`로 시작한다.
-- **상태**: frozen · 2026-10-18(S12) · 근거 [ADR-0009](docs/adr/0009-agent-deletion.md) · 재등록 DM membership frozen-pending 2026-10-20(S13) · presence 정리 frozen-pending 2026-10-20(S14)
+- **상태**: frozen · 2026-10-18(S12) · 근거 [ADR-0009](docs/adr/0009-agent-deletion.md) · 재등록 DM membership frozen 2026-10-20(S13) · presence 정리 frozen 2026-10-20(S14)
 
 ### `IF-WIRE-010 — 단일 송신 계약: 입력, 판정 순서, routing, wake 집합`
 
@@ -737,7 +737,7 @@
   - 쓰기(18)의 (c) 뒤에 (c') 참여자 등록(`IF-WIRE-014`)이 끼고, (d)·(e)의 R·W는 그 뒤의 참여자 표로 센다. 스레드 안 글이면 R·W는 `IF-WIRE-014`, 아니면 위 정의 그대로다.
   - 해시는 `corrects`가 있을 때만 덧붙인다(`IF-DB-001`).
 - 로그: `message_id`, `room_id`, `sender_id`, `event_seq`, R 수, W 수, `wake`, mentions 수. body와 mentions 값 금지.
-- **상태**: frozen-pending · 2026-10-20(S13)
+- **상태**: frozen · 2026-10-20(S13)
 
 ### `IF-WIRE-011 — room 목록과 주제 방 관리의 형태·판정 순서`
 
@@ -755,7 +755,7 @@
 - `POST /v1/rooms/{room_id}/archive`(body·query를 읽지 않는다): 401 → 403(agent) → 422 `invalid_field`(`field=room_id`; topic 아님) → (store) 404 `unknown_room` → 200 `RoomSummary`. 이미 보관됐으면 `archived_at`을 바꾸지 않고 200. 보관 해제는 없다.
 - 오류 code `room_id_taken`(409)은 `POST /v1/rooms`에서만, `room_archived`(409)는 송신과 초대·제거에서 쓴다.
 - 로그: `room_id`, 대상 `agent_id`, 동작 이름만. title은 남기지 않는다(자유 텍스트).
-- **상태**: frozen-pending · 2026-10-20(S13)
+- **상태**: frozen · 2026-10-20(S13)
 
 ### `IF-WIRE-012 — 메시지와 inbox 사건 item의 형태`
 
@@ -767,7 +767,7 @@
   - 그 밖의 `kind`는 이후 슬라이스가 정한다. `platform-wire`의 `InboxItem`은 **모르는 `kind`를 역직렬화 오류 없이** "알 수 없는 사건"(`inbox_seq`·`kind`만 아는 값)으로 받는다. 소비자는 그 항목을 건너뛰되 read marker는 그 위로 올린다.
 - 예(`kind = "message"`): `{"inbox_seq":"42","kind":"message","woke":true,"message_id":"msg-01J…","event_seq":"57","room_id":"dm:agent-a:agent-b","room_kind":"dm","sender_id":"agent-a","body":"…","reply_to":"msg-01J…","thread_id":"msg-01J…","corrects":null,"wake":false,"mentions":["human"],"thread_summary":null,"reactions":[],"created_at":"2026-10-20T09:00:00.000Z"}`. 예(`kind = "reaction"`): `{"inbox_seq":"43","kind":"reaction","woke":false,"change_seq":"7","message_id":"msg-01J…","room_id":"all","room_kind":"all","thread_id":null,"sender_id":"agent-b","reaction":"thumbsup","wake":false,"created_at":"2026-10-20T09:01:00.000Z"}`
 - `thread_id`·`corrects`·`thread_summary`는 S15가, `reactions`와 `reaction` 사건은 S16이 더했다.
-- **상태**: frozen-pending · 2026-10-20(S13) · S15 세 키 frozen-pending 2026-10-20 · S16 `reactions`·`reaction` 사건 frozen-pending 2026-10-20
+- **상태**: frozen · 2026-10-20(S13) · S15 세 키 frozen 2026-10-20 · S16 `reactions`·`reaction` 사건 frozen 2026-10-20
 
 ### `IF-WIRE-013 — presence 선언·파생·last_seen 갱신`
 
@@ -795,7 +795,7 @@
 - `last_seen_at` 갱신 지점: 인증 계층(`Principal` extractor)이 `Principal::Agent(id)`를 확정한 직후, 모든 agent 요청에 대해 한 곳에서. 그 ID의 마지막 기록이 없거나 `last_seen_interval_secs` 이상 지났으면 기록 시각을 메모리에 먼저 남기고 Store 명령 `touch_last_seen(id, now)`를 요청과 분리해 보낸다(요청은 기다리지 않는다). 실패는 `warn` 로그(`agent_id`, 오류 종류)만이고 요청 결과에 영향이 없다. owner principal·인증 실패는 갱신하지 않는다. presence PUT·DELETE를 owner가 부르면 그 agent의 `last_seen_at`은 바뀌지 않는다. 그 key가 사람 명의 agent(`human`)의 것이면 그 key를 쓰는 쪽(브리지 등)의 요청이 갱신한다 — 사람이 있었던 시각이 아니다.
 - presence는 routing·wake·delivery·권한·발화에 쓰지 않는다.
 - 로그: `presence set`(`agent_id`, `state`), `presence cleared`(`agent_id`). note 금지(`IF-WIRE-006` 관례). touch는 INFO 로그를 남기지 않는다.
-- **상태**: frozen-pending · 2026-10-20(S14)
+- **상태**: frozen · 2026-10-20(S14)
 
 ### `IF-WIRE-014 — 스레드: 해석, 참여자, R/W, 읽기 확장, endpoint`
 
@@ -815,7 +815,7 @@
 - `GET /v1/threads/{root_id}`(query 없음): 401 → 404 `thread_not_found`(`msg-`+ULID 형식 아님) → 422 `unexpected_field`(query) → (store) 404 `thread_not_found`(없음, 스레드 안 글, 답글 없음, 또는 caller가 room을 읽지 못하고 참여자도 아님; owner는 늘 읽는다) → 200 `{"thread_id", "room_id", "room_kind", "root_sender_id", "participants": [{"agent_id", "joined_via", "muted": bool, "joined_at"}…](joined_at 오름차순, 같으면 agent_id), "reply_count": number, "last_event_seq", "last_message_at"}`.
 - `PUT /v1/threads/{root_id}/participation` body `#[serde(deny_unknown_fields)]` `{wake: bool, agent_id?: String}`. 판정 순서: 401 → 404 `thread_not_found`(경로 형식) → `StrictJson` → 422 `unexpected_field`(agent principal의 `agent_id` 키 포함) → 422 `invalid_field`(`wake` 누락·boolean 아님, owner의 `agent_id` 누락) → 403 `forbidden`(owner이고 `agent_id`가 `[owner].post_as`에 없음, `details.field="agent_id"`) → (store) 404 `thread_not_found`(스레드가 아님, 또는 대상 agent가 그 스레드의 참여자가 아님) → 200 participant 객체 `{"thread_id", "agent_id", "joined_via", "muted", "joined_at"}`. `muted = !wake`. 값이 같으면 쓰지 않고 200. 비참여자를 참여시키는 경로가 아니다.
 - 로그: `thread participation`(`thread_id`, `agent_id`, `muted`). 송신 로그에 스레드면 `thread_id`를 더한다.
-- **상태**: frozen-pending · 2026-10-20(S15)
+- **상태**: frozen · 2026-10-20(S15)
 
 ### `IF-WIRE-015 — 정정(corrects)`
 
@@ -824,7 +824,7 @@
 - 판정(새 key일 때, `IF-WIRE-010` 17단계 뒤): 17a 404 `corrects_not_found`(그런 글 없음) → 17b 422 `corrects_room_mismatch`(대상 글의 `room_id` ≠ 해석된 room) → 17c 422 `corrects_not_own`(대상 글의 `sender_id` ≠ 이 글의 sender — owner 게시면 `sender_id` 명의 기준). 형식 오류는 8단계의 422 `invalid_field`(`field=corrects`).
 - 정정 글은 대상 글의 스레드에 자동으로 들어가지 않는다. `reply_to`를 주면 `IF-WIRE-014` 해석대로 들어간다. `corrects`는 routing·R·W·권한에 쓰지 않는다. 대상 글은 바뀌지 않는다(UPDATE·DELETE 없음). 정정의 정정은 허용한다.
 - 해시: `corrects`가 있을 때만 `0x00 corrects`를 덧붙인다(`IF-DB-001`).
-- **상태**: frozen-pending · 2026-10-20(S15)
+- **상태**: frozen · 2026-10-20(S15)
 
 ### `IF-WIRE-016 — 반응: 판정 순서, 상태, inbox 사건, 변경 피드`
 
@@ -850,7 +850,7 @@
 - 반응한 agent = agent principal이면 그 agent, owner면 `sender_id`. 자기 글에 반응할 수 있다(그때는 inbox 행이 없다).
 - `GET /v1/reactions?room_id=<id>[&after_change_seq=<seq>][&limit=<n>]`: 401 → 422 `unexpected_field`·`invalid_field`(이름·반복, `IF-WIRE-005` 관례) → 422 `room_id` 형식 → 권한(owner는 없는 room 404 `unknown_room`; agent는 그 room의 `memberships` 행이 없으면 403 `forbidden` — 스레드 참여만으로는 피드를 읽지 못한다) → 422 `after_change_seq`·`limit` 값(기본·최대는 `IF-API-COMMON` page) → 200 `{"items": [{"change_seq", "message_id", "agent_id", "kind", "removed": bool, "created_at"}…], "next_after_change_seq", "has_more"}`. items는 그 room 글의 `reaction_events`를 `change_seq` 오름차순으로, `after_change_seq` 초과. `after_change_seq`를 생략하면 items 없이 `next_after_change_seq` = 그 room의 현재 최대 `change_seq`(없으면 `"0"`), `has_more=false`(커서 잡기).
 - 로그: `reaction added`·`reaction removed`(`message_id`, `agent_id`, `kind`, `change_seq`). body·label·glyph 금지.
-- **상태**: frozen-pending · 2026-10-20(S16)
+- **상태**: frozen · 2026-10-20(S16)
 
 ### `IF-WIRE-017 — 반응 종류 registry`
 
@@ -862,7 +862,7 @@
 - `PUT /v1/reaction-kinds/{slug}` body `#[serde(deny_unknown_fields)]` `{glyph: String, label: String, sort?: integer, enabled?: bool}`. 판정 순서: 401 → 403(agent) → 422 `invalid_field`(`field=slug`, 경로 형식) → `StrictJson` → 422 `unexpected_field` → 422 `invalid_field`(누락·타입) → 422 `invalid_field`(값: `glyph` → `label` → `sort` ≥ 0) → (store) 409 `glyph_taken`(다른 slug가 같은 glyph) → 201(새 slug; `sort` 생략은 현재 최댓값 + 10, `enabled` 생략은 `true`, `created_at=now`) 또는 200(기존 slug; `glyph`·`label`은 바꾸고 생략한 `sort`·`enabled`는 유지; 바뀐 것이 없으면 쓰지 않는다). 응답은 `ReactionKindEntry` 하나. 삭제 경로는 없다.
 - 종류를 끄면(`enabled=false`) 새 반응 PUT만 422이고 기존 반응·요약·DELETE는 그대로다.
 - 로그: `reaction kind upserted`(`slug`, `enabled`, created·updated). label·glyph 금지.
-- **상태**: frozen-pending · 2026-10-20(S16)
+- **상태**: frozen · 2026-10-20(S16)
 
 ## 용어집
 

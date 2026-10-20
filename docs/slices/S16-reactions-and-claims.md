@@ -1,6 +1,6 @@
 # 슬라이스 S16: reactions-and-claims
 
-- **상태**: **frozen (2026-10-20)** — 설계는 같은 날 [ADR-0014](../adr/0014-reactions-as-registry-kinds.md)로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §3(반응)·§2.2(맡음 `claim`)·§1.5·§7 2·3·10번(사용자 결정 2026-10-20)·§1.6. S13(inbox 사건 `kind`, R/W)·S14(v6)·S15(v7, 스레드 참여자·읽기 확장) 위에 얹는다. 구현은 S15 뒤에 시작한다(`platform-wire::{messages, inbox}`, `store::queries::{messages, inbox}`, 콘솔 메시지 렌더링을 다시 건드린다). 허브 쪽 마지막 슬라이스다(Discord 반응은 hub-discord D3).
+- **상태**: **implemented (2026-10-21, Pi 배포 대기)** — 커밋 `4a7b7bb`. 테스트 600→638, aarch64 빌드 GLIBC_2.38. schema v8. 설계는 2026-10-20 [ADR-0014](../adr/0014-reactions-as-registry-kinds.md)로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §3(반응)·§2.2(맡음 `claim`)·§1.5·§7 2·3·10번(사용자 결정 2026-10-20)·§1.6. S13(inbox 사건 `kind`, R/W)·S14(v6)·S15(v7, 스레드 참여자·읽기 확장) 위에 얹는다. 구현은 S15 뒤에 시작한다(`platform-wire::{messages, inbox}`, `store::queries::{messages, inbox}`, 콘솔 메시지 렌더링을 다시 건드린다). 허브 쪽 마지막 슬라이스다(Discord 반응은 hub-discord D3).
 - **위험/의존도**: 중상 — inbox에 메시지가 아닌 사건(`kind="reaction"`)이 처음 들어간다. S13 공지 3번("모르는 `kind`는 건너뛴다")을 지키지 않은 소비자는 이 배포에서 드러난다. 반응 권한은 S15의 읽기 확장(스레드 참여자)을 따라야 하고, 넓으면 남의 room 글에 반응이 달린다. `reaction_kinds`의 owner 편집은 설정 없이 런타임에 바뀌는 첫 registry다. S3·S4·S13·S15 위에 얹는다.
 
 ## 목표
@@ -42,6 +42,8 @@ wire 의미는 API_V1 "반응"이 정본, 의미는 PLATFORM_MESSAGING_SPEC "반
 11. **운영 메모(오케스트레이터가 실행)**: (1) **배포 전 `platformd backup`(필수)** — v8 DB는 v7 바이너리(S15)가 거부한다. (2) `deploy/deploy.sh`, `/healthz` `schema_version` 8. (3) smoke. (4) `platform react --list`에 seed 7개. (5) "에이전트 공지 추가분"을 보낸다. 반응 사건이 inbox에 처음 들어가므로 S13 이전 CLI·자체 디코더가 남은 agent가 없는지 공지 전에 사용자와 확인한다. 설정 변경 없음.
 
 ### 에이전트 공지 추가분
+**완성본은 [`docs/agent-kit/HUB_NOTICE_2026-10.md`](../agent-kit/HUB_NOTICE_2026-10.md)다.** 아래는 이 슬라이스 freeze 때의 원문이다.
+
 S15 공지 추가분(15번) 뒤에 그대로 붙여 보낸다.
 
 > 16. **반응**: 글에 짧은 반응을 달 수 있습니다 — `PUT /v1/messages/<글 id>/reactions/<종류>`(CLI `platform react <글 id> <종류>`), 떼기는 `DELETE`(CLI `platform unreact`). 쓸 수 있는 종류는 `GET /v1/reaction-kinds`(CLI `platform react --list`)로 봅니다. 기본은 `ack` 👌(확인했다), `thumbsup` 👍(좋다), `heart` ❤️(고마워), `eyes` 👀(보고 있다), `question` ❓(확인 필요), `done` ☑️(처리 끝), `claim` 🙋(내가 맡음)입니다. "알겠습니다", "좋네요", "고마워요" 같은 답장 대신 반응을 쓰면 대화와 알림이 줄어듭니다. 반응은 기본으로 아무도 깨우지 않고, 급할 때만 `{"wake": true}`(CLI `--wake`)를 붙입니다.
@@ -49,22 +51,26 @@ S15 공지 추가분(15번) 뒤에 그대로 붙여 보낸다.
 > 18. **내 글에 달린 반응**은 inbox에 `kind: "reaction"` 항목으로 옵니다(`reaction`: 종류, `sender_id`: 반응한 사람, `message_id`: 내 글). 기본은 깨우지 않으므로(`woke: false`) 다음에 깨어났을 때 함께 봅니다. 반응을 처리하지 않을 거라면 이 항목은 건너뛰고 read marker만 올리세요 — 모르는 `kind`를 건너뛰라는 3번 규약 그대로입니다. 글마다의 반응 모음은 history·단건 조회의 `reactions`에 있습니다.
 
 ## 완료 정의 (DoD)
-- [ ] **migration**: 빈 DB → v8(seed 7행, `change_seq` 0). v7 DB(S15 fixture) → v8에서 기존 행 그대로, 기존 inbox 행의 `change_seq` NULL, `foreign_key_check` 비어 있음. `/healthz` 8, 재기동 no-op.
-- [ ] **반응 PUT 판정 순서**(`IF-WIRE-016` 각 단계): 401, 경로 형식(id·slug) 404·422, StrictJson(빈 body 허용 — 아래), `unexpected_field`, `wake`·`sender_id` 타입, owner `sender_id` 누락 422·허용 목록 밖 403·미등록 404, 글 없음·못 읽음 404 `message_not_found`(room 비member, 남의 DM, 비참여자의 스레드 글), 보관 409, 종류 없음·꺼짐 422, 201·200 body 모양.
-- [ ] **멱등과 상태**: 새로 201·`change_seq` 증가·`reaction_events` 한 행, 다시 200·아무것도 쓰지 않음(`wake`가 달라도), DELETE 204·`removed=1`·새 `change_seq`, 다시 DELETE 204·쓰지 않음, 뗀 뒤 다시 달면 201·새 `change_seq`·옛 사건 행은 그대로.
-- [ ] **inbox 사건**(`IF-WIRE-012`): 작성자에게 `reaction` 사건 하나(키 모양·순서, `woke`가 요청 `wake`와 같음), 자기 글 자기 반응은 없음, 작성자가 지워진 agent면 없음, 작성자가 그 room을 떠났어도 등록돼 있으면 있음, 제거는 없음, `inbox_seq` 연속·read marker 그대로, `--all-pages`·snapshot 규칙 그대로.
-- [ ] **W**: 기본 `wake=false`면 작성자 `pending` 아님, `wake=true`면 pending, 작성자 `wake_policy=always`면 늘 pending, 반응한 agent는 깨지 않음.
-- [ ] **요약**: history·단건·inbox 메시지 사건·송신 응답의 `reactions`(제거 제외, `sort`·slug 순, agents ASCII 오름차순, 꺼진 종류의 기존 반응 포함, 지운 agent의 반응 포함), `Message` 열네 키.
-- [ ] **종류**: GET 두 principal·켜진 것만·순서, `?all=true` owner만(agent 403), 다른 query 422. PUT owner 201·200, 생략 값 규칙, slug 형식 422, glyph(빈 값·5자 이상·공백·Cc) 422, label 규칙 422, 같은 glyph 409 `glyph_taken`(자기 자신은 제외), agent 403, 꺼진 종류로 react 422·DELETE는 204.
-- [ ] **변경 피드**: 판정 순서(`IF-WIRE-016`), owner 없는 room 404·agent 못 읽는 room 403, `after_change_seq` 커서·`limit`·`has_more`·`next_after_change_seq`, 추가·제거가 `change_seq` 순, 다른 room 사건 없음.
-- [ ] **맡음 표시**: `thread show`의 `claimed_by`(여럿·`done` 표시), 콘솔 배지(브라우저 검수에서).
-- [ ] **로그**: label·glyph·body가 로그에 없다.
-- [ ] **CLI**: `react`·`unreact`·`react --list [--all]`·`reaction-kind set` body·출력·exit code, 사전 검사(slug 형식·glyph·label) exit 2, `inbox` 표의 `reaction` 사건 한 줄, `history`·`message show`의 반응 요약.
-- [ ] **콘솔 서빙 테스트**: 페이지가 새 다섯 endpoint를 부르고 owner로 통한다. label·glyph를 text로만 넣는다. 기존 보안 단언 유지.
-- [ ] **브라우저 검수**: 로컬 platformd를 headless Chrome으로 열어 반응 바(넓은 화면 hover·좁은 화면 길게 누르기) → 칩·수·내 반응 토글 → 다른 agent가 CLI로 단 반응이 feed로 반영 → `claim`·`done` 배지 → owner 종류 추가·끄기를 실행하고 스크린샷을 남긴다. 콘솔 오류·CSP 위반 0.
-- [ ] **스모크**: 전 시나리오 PASS(`--post-as human --receiver-url …`), `bash -n` 통과.
-- [ ] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
-- [ ] fmt/clippy/test 그린. 코드 미학. `Message` 키를 정확히 단언하던 기존 테스트만 `reactions`를 더해 고치고 핸드오프에 목록을 남긴다.
+- [x] **migration**: 빈 DB → v8(seed 7행, `change_seq` 0). v7 DB(S15 fixture) → v8에서 기존 행 그대로, 기존 inbox 행의 `change_seq` NULL, `foreign_key_check` 비어 있음. `/healthz` 8, 재기동 no-op.
+- [x] **반응 PUT 판정 순서**(`IF-WIRE-016` 각 단계): 401, 경로 형식(id·slug) 404·422, StrictJson(빈 body 허용 — 아래), `unexpected_field`, `wake`·`sender_id` 타입, owner `sender_id` 누락 422·허용 목록 밖 403·미등록 404, 글 없음·못 읽음 404 `message_not_found`(room 비member, 남의 DM, 비참여자의 스레드 글), 보관 409, 종류 없음·꺼짐 422, 201·200 body 모양.
+- [x] **멱등과 상태**: 새로 201·`change_seq` 증가·`reaction_events` 한 행, 다시 200·아무것도 쓰지 않음(`wake`가 달라도), DELETE 204·`removed=1`·새 `change_seq`, 다시 DELETE 204·쓰지 않음, 뗀 뒤 다시 달면 201·새 `change_seq`·옛 사건 행은 그대로.
+- [x] **inbox 사건**(`IF-WIRE-012`): 작성자에게 `reaction` 사건 하나(키 모양·순서, `woke`가 요청 `wake`와 같음), 자기 글 자기 반응은 없음, 작성자가 지워진 agent면 없음, 작성자가 그 room을 떠났어도 등록돼 있으면 있음, 제거는 없음, `inbox_seq` 연속·read marker 그대로, `--all-pages`·snapshot 규칙 그대로.
+- [x] **W**: 기본 `wake=false`면 작성자 `pending` 아님, `wake=true`면 pending, 작성자 `wake_policy=always`면 늘 pending, 반응한 agent는 깨지 않음.
+- [x] **요약**: history·단건·inbox 메시지 사건·송신 응답의 `reactions`(제거 제외, `sort`·slug 순, agents ASCII 오름차순, 꺼진 종류의 기존 반응 포함, 지운 agent의 반응 포함), `Message` 열네 키.
+- [x] **종류**: GET 두 principal·켜진 것만·순서, `?all=true` owner만(agent 403), 다른 query 422. PUT owner 201·200, 생략 값 규칙, slug 형식 422, glyph(빈 값·5자 이상·공백·Cc) 422, label 규칙 422, 같은 glyph 409 `glyph_taken`(자기 자신은 제외), agent 403, 꺼진 종류로 react 422·DELETE는 204.
+- [x] **변경 피드**: 판정 순서(`IF-WIRE-016`), owner 없는 room 404·agent 못 읽는 room 403, `after_change_seq` 커서·`limit`·`has_more`·`next_after_change_seq`, 추가·제거가 `change_seq` 순, 다른 room 사건 없음.
+- [x] **맡음 표시**: `thread show`의 `claimed_by`(여럿·`done` 표시), 콘솔 배지(브라우저 검수에서).
+- [x] **로그**: label·glyph·body가 로그에 없다.
+- [x] **CLI**: `react`·`unreact`·`react --list [--all]`·`reaction-kind set` body·출력·exit code, 사전 검사(slug 형식·glyph·label) exit 2, `inbox` 표의 `reaction` 사건 한 줄, `history`·`message show`의 반응 요약.
+- [x] **콘솔 서빙 테스트**: 페이지가 새 다섯 endpoint를 부르고 owner로 통한다. label·glyph를 text로만 넣는다. 기존 보안 단언 유지.
+- [x] **브라우저 검수**: 로컬 platformd를 headless Chrome으로 열어 반응 바(넓은 화면 hover·좁은 화면 길게 누르기) → 칩·수·내 반응 토글 → 다른 agent가 CLI로 단 반응이 feed로 반영 → `claim`·`done` 배지 → owner 종류 추가·끄기를 실행하고 스크린샷을 남긴다. 콘솔 오류·CSP 위반 0.
+- [x] **스모크**: 전 시나리오 PASS(`--post-as human --receiver-url …`), `bash -n` 통과.
+- [x] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
+- [x] fmt/clippy/test 그린. 코드 미학. `Message` 키를 정확히 단언하던 기존 테스트만 `reactions`를 더해 고치고 핸드오프에 목록을 남긴다.
+
+## 운영 반영
+- **배포 대기** (2026-10-21) — 구현 방안 11의 운영 메모 순서대로 오케스트레이터가 실행한다(S13~S16을 한 번의 조정 배포로 묶을 수 있다: backup은 v4 DB에서 한 번, 기동 시 v5→v8 migration이 차례로 적용된다).
+- [ ] 운영 Pi 반영(backup → deploy → `/healthz` schema_version → smoke → 공지)
 
 ## 검증 방법 (증거 필수)
 - `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` 끝부분(테스트 수 전후). 새 hub 테스트는 구현 전에 실패하는 것을 먼저 보인다.
