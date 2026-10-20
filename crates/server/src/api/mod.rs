@@ -11,6 +11,7 @@ mod inbox;
 mod json;
 mod messages;
 mod owner;
+mod presence;
 mod query;
 mod receiver_url;
 mod request_id;
@@ -26,9 +27,11 @@ use platform_wire::{AgentId, HealthStatus, codes};
 use tracing::warn;
 
 use crate::auth::Authenticator;
-use crate::config::OwnerToken;
+use crate::clock::Clock;
+use crate::config::{OwnerToken, PresenceConfig};
 use crate::delivery::DeliverySignal;
 use crate::identity::Issuer;
+use crate::presence::PresenceBoard;
 use crate::store::{Store, migrations};
 
 pub use error::ApiError;
@@ -45,6 +48,12 @@ pub struct AppState {
     identity: Option<Arc<Issuer>>,
     /// `[owner] post_as`: the agents the owner may post as (`IF-CFG-001`).
     post_as: Arc<[AgentId]>,
+    /// Declared presence and the `last_seen_at` throttle (memory only).
+    presence: PresenceBoard,
+    /// `[presence]` TTL bounds (`IF-CFG-001`).
+    presence_config: PresenceConfig,
+    /// The time source of presence.
+    clock: Clock,
 }
 
 impl AppState {
@@ -54,14 +63,26 @@ impl AppState {
         delivery: DeliverySignal,
         identity: Option<Issuer>,
         post_as: Vec<AgentId>,
+        presence_config: PresenceConfig,
+        clock: Clock,
     ) -> Self {
-        let authenticator = Authenticator::new(owner_token, store.clone());
+        let presence = PresenceBoard::new();
+        let authenticator = Authenticator::new(
+            owner_token,
+            store.clone(),
+            presence.clone(),
+            clock.clone(),
+            presence_config.last_seen_interval,
+        );
         Self {
             store,
             authenticator,
             delivery,
             identity: identity.map(Arc::new),
             post_as: post_as.into(),
+            presence,
+            presence_config,
+            clock,
         }
     }
 }
@@ -77,6 +98,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .merge(agents::routes())
         .merge(avatar::routes())
+        .merge(presence::routes())
         .merge(delivery::routes())
         .merge(messages::routes())
         .merge(inbox::routes())

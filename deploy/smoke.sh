@@ -27,6 +27,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # How long the receiver scenario waits for the 202 to be recorded.
 readonly RECEIVER_WAIT_SECS=30
+# How long the presence scenario waits for last_seen_at, which the hub
+# writes off the request path.
+readonly LAST_SEEN_WAIT_SECS=10
 readonly PAGE_LIMIT=2
 readonly ULID_ALPHABET=0123456789abcdefghjkmnpqrstvwxyz
 readonly DEFAULT_IDENTITY_AUD=garage-docs
@@ -50,7 +53,7 @@ result_states=()
 result_notes=()
 
 # Filled in by the scenarios.
-agent_a="" agent_b="" agent_c="" agent_r="" agent_z=""
+agent_a="" agent_b="" agent_c="" agent_p="" agent_r="" agent_z=""
 all_message_id="" dm_message_id="" dm_room="" topic_room="" wake_room=""
 snapshot_head=""
 
@@ -848,6 +851,85 @@ check_agent_deletion() {
   note="401, 404s, history and room kept, re-register seq 1, agent 403, protected: $protected"
 }
 
+# ---- S14: presence ------------------------------------------------------------
+
+# The `.items[]` entry of AGENT in a directory JSON, compacted.
+directory_item() {
+  jq -c --arg agent "$2" '.items[] | select(.agent_id == $agent)' <<<"$1"
+}
+
+# Scenarios 22-24: a new agent P has never been seen and is offline; any
+# request with P's key sets last_seen_at (written off the request path, so
+# it is polled); P's busy declaration with --ttl 1 reaches A's directory
+# with its note and expiry and then reads offline; clear withdraws at once;
+# A's key may not declare for P (403); a ttl above the contract ceiling
+# (86400) is ttl_too_long whatever the hub's configuration, and
+# state "offline" is invalid_field. The note never goes into the notes.
+check_presence() {
+  local key_p key_a json item
+  register "$agent_p" || return 1
+  key_p="$(token_file "$agent_p")"
+  key_a="$(token_file "$agent_a")"
+  json="$(cli "$owner_token_file" agent list)" || {
+    note="agent list failed: $(cli_error)"
+    return 1
+  }
+  item="$(directory_item "$json" "$agent_p")"
+  expect_json "$item" '.last_seen_at == null and .presence == {state: "offline", note: null, updated_at: null, expires_at: null}' \
+    "new agent is not offline and never seen: $item" || return 1
+
+  cli "$key_p" inbox >/dev/null || {
+    note="inbox with the new key failed: $(cli_error)"
+    return 1
+  }
+  local deadline=$((SECONDS + LAST_SEEN_WAIT_SECS))
+  while :; do
+    json="$(cli "$owner_token_file" agent list)" || return 1
+    item="$(directory_item "$json" "$agent_p")"
+    jq -e '.last_seen_at | type == "string"' >/dev/null <<<"$item" && break
+    if ((SECONDS >= deadline)); then
+      note="last_seen_at not set ${LAST_SEEN_WAIT_SECS}s after a request with the key"
+      return 1
+    fi
+    sleep 1
+  done
+
+  json="$(cli "$key_p" presence set "$agent_p" busy --note "smoke note" --ttl 1)" || {
+    note="presence set failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" '.presence.state == "busy" and .presence.note == "smoke note" and (.presence.expires_at | type == "string")' \
+    "presence set answered without the busy declaration" || return 1
+  json="$(cli "$key_a" agent list)" || return 1
+  item="$(directory_item "$json" "$agent_p")"
+  expect_json "$item" '.presence.state == "busy" and .presence.note == "smoke note" and (.presence.expires_at | type == "string")' \
+    "another agent's directory lacks the busy declaration" || return 1
+  sleep 2
+  json="$(cli "$key_a" agent list)" || return 1
+  item="$(directory_item "$json" "$agent_p")"
+  expect_json "$item" '.presence == {state: "offline", note: null, updated_at: null, expires_at: null}' \
+    "the declaration did not expire after its ttl" || return 1
+
+  cli "$key_p" presence set "$agent_p" online >/dev/null || {
+    note="presence set online failed: $(cli_error)"
+    return 1
+  }
+  json="$(cli "$key_p" presence clear "$agent_p")" || {
+    note="presence clear failed: $(cli_error)"
+    return 1
+  }
+  json="$(cli "$owner_token_file" agent list)" || return 1
+  item="$(directory_item "$json" "$agent_p")"
+  expect_json "$item" '.presence.state == "offline"' "clear did not withdraw at once: $item" || return 1
+
+  expect_cli_error forbidden "another agent declares for P" "$key_a" presence set "$agent_p" online || return 1
+  expect_cli_error ttl_too_long "ttl above the ceiling" "$key_p" presence set "$agent_p" online --ttl 86401 || return 1
+  api PUT "/v1/agents/$agent_p/presence" "$key_p" '{"state":"offline"}'
+  expect_status 422 "state offline" || return 1
+  expect_json "$http_body" '.error.code == "invalid_field" and .error.details.field == "state"' "state offline code: $http_body" || return 1
+  note="never seen -> seen, busy -> expired, clear, 403, ttl_too_long, offline 422"
+}
+
 # ---- S13: topic rooms, reply_to routing, quiet sends, mentions, wake_policy ----
 
 # Runs `platform` and expects exit 1 with CODE on stderr.
@@ -1125,7 +1207,7 @@ check_cleanup() {
   if [[ -n "$wake_room" ]]; then
     cli "$owner_token_file" room archive "$wake_room" >/dev/null || failed=" $wake_room:$(cli_error)"
   fi
-  for agent in "$agent_a" "$agent_b" ${agent_c:+"$agent_c"} ${agent_r:+"$agent_r"}; do
+  for agent in "$agent_a" "$agent_b" ${agent_c:+"$agent_c"} ${agent_p:+"$agent_p"} ${agent_r:+"$agent_r"}; do
     cli "$owner_token_file" agent delete "$agent" --yes >/dev/null || failed="$failed $agent:$(cli_error)"
   done
   [[ -z "$failed" ]] || {
@@ -1144,7 +1226,7 @@ print_table() {
     printf '%-36s %-5s %s\n' "${result_names[$index]}" "${result_states[$index]}" "${result_notes[$index]}"
     [[ "${result_states[$index]}" != FAIL ]] || failures=$((failures + 1))
   done
-  printf '\nagents: %s %s %s %s%s\n' "$agent_a" "$agent_b" "$agent_c" "$agent_z" "${agent_r:+ $agent_r}"
+  printf '\nagents: %s %s %s %s %s%s\n' "$agent_a" "$agent_b" "$agent_c" "$agent_z" "$agent_p" "${agent_r:+ $agent_r}"
   if [[ "$failures" -gt 0 ]]; then
     printf 'smoke: %d FAIL\n' "$failures"
     return 1
@@ -1164,6 +1246,7 @@ main() {
   agent_b="smoke-$(new_ulid)"
   agent_z="smoke-$(new_ulid)"
   agent_c="smoke-$(new_ulid)"
+  agent_p="smoke-$(new_ulid)"
   log "smoke against $base_url as $agent_a, $agent_b"
 
   scenario "healthz / platform health" check_health
@@ -1194,6 +1277,7 @@ main() {
   fi
   scenario "identity token" check_identity_token
   scenario "agent deletion (16)" check_agent_deletion
+  scenario "presence (22-24)" check_presence
   scenario "topic room (17)" check_topic_room
   scenario "reply_to routing (18)" check_reply_to_routing
   if [[ -n "$receiver_url" ]]; then

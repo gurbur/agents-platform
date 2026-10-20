@@ -26,6 +26,14 @@ owner_token_file = "/etc/platformd/owner.token"
 #[owner]
 #post_as = []
 
+# Agent presence is optional; without [presence] the defaults documented in
+# platformd.example.toml apply. Add the table only after a binary that knows
+# it (S14 or later) is installed: older binaries refuse unknown tables.
+#[presence]
+#default_ttl_secs = 120
+#max_ttl_secs = 3600
+#last_seen_interval_secs = 60
+
 # Identity attestation is optional; without [identity] the token endpoint
 # answers 503 identity_disabled. To enable it, create the key with
 #   sudo platformd identity keygen --out /etc/platformd/identity.key

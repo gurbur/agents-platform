@@ -718,8 +718,7 @@ async fn an_empty_database_starts_at_v5_with_only_the_all_room() {
         .json()
         .await
         .unwrap();
-    assert_eq!(health["schema_version"], 5);
-    assert_eq!(LATEST_SCHEMA_VERSION, 5);
+    assert_eq!(health["schema_version"], LATEST_SCHEMA_VERSION);
     server.shutdown().await.unwrap();
 
     let (rooms, memberships, mentions) = fx
@@ -766,7 +765,7 @@ async fn a_v4_database_gains_rooms_dm_memberships_and_event_columns() {
         .json()
         .await
         .unwrap();
-    assert_eq!(health["schema_version"], 5);
+    assert_eq!(health["schema_version"], LATEST_SCHEMA_VERSION);
     server.shutdown().await.unwrap();
 
     let after = fx.read_db(|conn| v4_snapshot(conn)).await;
@@ -924,4 +923,184 @@ async fn a_v5_post_check_violation_rolls_back_and_refuses_to_start() {
         platformd::start(&fx.load_config()).await.is_err(),
         "startup is refused"
     );
+}
+
+// ---- v6 (S14): agents.last_seen_at -----------------------------------------------
+
+/// Every v5 column of every table, in a stable order: v6 adds only
+/// `agents.last_seen_at`, so the agents query names the v5 columns.
+const V5_ROWS: [(&str, &str); 12] = [
+    (
+        "agents",
+        "SELECT agent_id, api_key_hash, receiver_secret, receiver_url, route_version, inbox_head, created_at, name, gender_form, age_band, role, intro, profile_updated_at, wake_policy FROM agents ORDER BY agent_id",
+    ),
+    (
+        "memberships",
+        "SELECT room_id, agent_id, joined, epoch, effective_event_seq FROM memberships ORDER BY room_id, agent_id",
+    ),
+    (
+        "rooms",
+        "SELECT room_id, kind, title, created_by, created_at, archived_at FROM rooms ORDER BY room_id",
+    ),
+    (
+        "sequences",
+        "SELECT name, value FROM sequences ORDER BY name",
+    ),
+    (
+        "messages",
+        "SELECT message_id, event_seq, room_id, sender_id, body, reply_to, created_at, wake FROM messages ORDER BY event_seq",
+    ),
+    (
+        "message_mentions",
+        "SELECT message_id, agent_id FROM message_mentions ORDER BY message_id, agent_id",
+    ),
+    (
+        "inbox_rows",
+        "SELECT agent_id, inbox_seq, message_id, kind, wake, woke FROM inbox_rows ORDER BY agent_id, inbox_seq",
+    ),
+    (
+        "read_state",
+        "SELECT agent_id, read_marker FROM read_state ORDER BY agent_id",
+    ),
+    (
+        "idempotency",
+        "SELECT sender_id, client_key, request_hash, message_id FROM idempotency ORDER BY sender_id, client_key",
+    ),
+    (
+        "notification_pending",
+        "SELECT agent_id, route_version, state, target_seq, last_accepted_seq, attempt, next_due_at, redrive_due_at, last_attempt_at, last_error FROM notification_pending ORDER BY agent_id",
+    ),
+    (
+        "agent_avatars",
+        "SELECT agent_id, content_type, bytes, sha256, updated_at FROM agent_avatars ORDER BY agent_id",
+    ),
+    (
+        "schema_migrations",
+        "SELECT version, applied_at FROM schema_migrations WHERE version <= 5 ORDER BY version",
+    ),
+];
+
+fn v5_snapshot(conn: &rusqlite::Connection) -> Result<Rows, StoreError> {
+    V5_ROWS
+        .iter()
+        .map(|(table, sql)| Ok((*table, select_all(conn, sql)?)))
+        .collect()
+}
+
+/// S13 rows on top of the v4 fixture: a topic room with a member, a quiet
+/// message with a mention and an `always` wake policy.
+const V5_EXTRA: &str = "
+INSERT INTO rooms (room_id, kind, title, created_by, created_at, archived_at)
+  VALUES ('room:launch', 'topic', '출시', 'owner', '2026-10-20T00:00:00.000Z', NULL);
+INSERT INTO memberships (room_id, agent_id, joined, epoch, effective_event_seq)
+  VALUES ('room:launch', 'agent-a', 1, 1, 5);
+UPDATE sequences SET value = 6 WHERE name = 'event_seq';
+INSERT INTO messages (message_id, event_seq, room_id, sender_id, body, reply_to, created_at, wake)
+  VALUES ('msg-01M600000000000000000006T1', 6, 'room:launch', 'agent-a', 'quiet', NULL, '2026-10-20T00:00:01.000Z', 0);
+INSERT INTO message_mentions (message_id, agent_id) VALUES ('msg-01M600000000000000000006T1', 'agent-b');
+UPDATE agents SET wake_policy = 'always' WHERE agent_id = 'agent-b';
+";
+
+/// Builds a v5 database (the v4 fixture migrated, plus [`V5_EXTRA`]) and
+/// returns its rows.
+async fn write_v5_database(fx: &Fixture) -> Rows {
+    write_v4_database(fx, "").await;
+    let (store, thread) = Store::open(&fx.db_path()).unwrap();
+    let version = store
+        .run(|conn| migrations::apply_through(conn, 5))
+        .await
+        .unwrap();
+    assert_eq!(version, 5);
+    let snapshot = store
+        .transaction(|tx| {
+            tx.execute_batch(V5_EXTRA)?;
+            v5_snapshot(tx)
+        })
+        .await
+        .unwrap();
+    drop(store);
+    thread.shutdown(JOIN_LIMIT).await.unwrap();
+    snapshot
+}
+
+fn has_last_seen_column(conn: &rusqlite::Connection) -> Result<bool, StoreError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'last_seen_at'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count == 1)
+}
+
+#[tokio::test]
+async fn an_empty_database_starts_at_v6() {
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config()).await;
+    let health: Value = reqwest::get(server.url("/healthz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["schema_version"], 6);
+    assert_eq!(LATEST_SCHEMA_VERSION, 6);
+    let api = server.api();
+    api.register("agent-a", None).await;
+    let directory = api.get("/v1/agents", OWNER_TOKEN).await;
+    assert_eq!(directory.body["items"][0]["last_seen_at"], Value::Null);
+    server.shutdown().await.unwrap();
+
+    let (has_column, versions) = fx
+        .read_db(|conn| Ok((has_last_seen_column(conn)?, applied_migrations(conn)?)))
+        .await;
+    assert!(has_column);
+    let versions: Vec<u32> = versions.into_iter().map(|(version, _)| version).collect();
+    assert_eq!(versions, (1..=6).collect::<Vec<u32>>());
+}
+
+#[tokio::test]
+async fn a_v5_database_gains_an_empty_last_seen_at_column() {
+    let fx = Fixture::new();
+    let before = write_v5_database(&fx).await;
+    let config = fx.load_config();
+    let server = RunningServer::start(&config).await;
+    let health: Value = reqwest::get(server.url("/healthz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["schema_version"], 6);
+    // The migrated agents read as offline and never seen.
+    let directory = server.api().get("/v1/agents", OWNER_TOKEN).await;
+    for item in directory.body["items"].as_array().unwrap() {
+        assert_eq!(item["last_seen_at"], Value::Null, "{item}");
+        assert_eq!(item["presence"]["state"], "offline", "{item}");
+    }
+    server.shutdown().await.unwrap();
+
+    let (after, last_seen, violations, versions) = fx
+        .read_db(|conn| {
+            Ok((
+                v5_snapshot(conn)?,
+                select_all(conn, "SELECT DISTINCT last_seen_at FROM agents")?,
+                foreign_key_violations(conn)?,
+                applied_migrations(conn)?,
+            ))
+        })
+        .await;
+    assert_eq!(after, before, "every v5 row and value is unchanged");
+    assert_eq!(last_seen, [vec![SqlValue::Null]], "no backfill");
+    assert_eq!(violations, 0, "PRAGMA foreign_key_check is empty");
+    let numbers: Vec<u32> = versions.iter().map(|(version, _)| *version).collect();
+    assert_eq!(numbers, (1..=6).collect::<Vec<u32>>());
+
+    // Reopening is a no-op.
+    let server = RunningServer::start(&config).await;
+    server.shutdown().await.unwrap();
+    let (again, versions_again) = fx
+        .read_db(|conn| Ok((v5_snapshot(conn)?, applied_migrations(conn)?)))
+        .await;
+    assert_eq!(again, before);
+    assert_eq!(versions_again, versions, "nothing re-applied");
 }

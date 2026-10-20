@@ -123,7 +123,15 @@ async fn directory_never_contains_credentials() {
     for item in agent_items {
         assert_eq!(
             keys(item),
-            set(&["agent_id", "name", "joined_all", "profile", "avatar"])
+            set(&[
+                "agent_id",
+                "name",
+                "joined_all",
+                "profile",
+                "avatar",
+                "presence",
+                "last_seen_at"
+            ])
         );
         assert_eq!(item["joined_all"], true);
         assert_eq!(keys(&item["profile"]), set(&PROFILE_KEYS));
@@ -143,7 +151,9 @@ async fn directory_never_contains_credentials() {
                 "route_version",
                 "created_at",
                 "delivery",
-                "avatar"
+                "avatar",
+                "presence",
+                "last_seen_at"
             ])
         );
         assert_eq!(keys(&item["delivery"]), set(&["state"]));

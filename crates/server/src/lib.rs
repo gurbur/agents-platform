@@ -10,6 +10,7 @@ pub mod clock;
 pub mod config;
 pub mod delivery;
 pub mod identity;
+pub mod presence;
 pub mod store;
 
 use std::future::{Future, IntoFuture};
@@ -21,6 +22,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
+use crate::clock::Clock;
 use crate::config::Config;
 use crate::delivery::{CallbackClient, DeliverySignal, Worker, WorkerHandle};
 use crate::store::{Store, StoreError, StoreThread, migrations};
@@ -74,6 +76,12 @@ pub struct Server {
 /// the delivery worker, which resumes pending notifications from the
 /// database.
 pub async fn start(config: &Config) -> Result<Server, StartupError> {
+    start_with_clock(config, Clock::system()).await
+}
+
+/// [`start`] with presence reading its time from `clock`; tests pass an
+/// adjustable clock to let a TTL or the `last_seen_at` interval pass.
+pub async fn start_with_clock(config: &Config, clock: Clock) -> Result<Server, StartupError> {
     ensure_parent_dir(&config.db_path)?;
 
     let (store, store_thread) = Store::open(&config.db_path)?;
@@ -106,12 +114,21 @@ pub async fn start(config: &Config) -> Result<Server, StartupError> {
     // Agent ids are not secrets; the allowlist is worth seeing at startup.
     let post_as: Vec<&str> = config.owner.post_as.iter().map(|id| id.as_str()).collect();
     info!(?post_as, "owner room posting allowlist");
+    let presence = config.presence;
+    info!(
+        default_ttl_secs = presence.default_ttl.as_secs(),
+        max_ttl_secs = presence.max_ttl.as_secs(),
+        last_seen_interval_secs = presence.last_seen_interval.as_secs(),
+        "presence settings"
+    );
     let router = api::router(api::AppState::new(
         store,
         config.owner_token.clone(),
         delivery.clone(),
         identity,
         config.owner.post_as.clone(),
+        presence,
+        clock,
     ));
 
     Ok(Server {

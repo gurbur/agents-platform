@@ -8,9 +8,9 @@ use std::io::Write;
 use platform_wire::{
     AgentEntry, AgentId, AgentProfile, AvatarResponse, DeliveryRetryResponse, DeliveryState,
     DeliveryStatus, HealthStatus, HistoryCursor, HistoryPage, IdentityTokenResponse, InboxItem,
-    InboxPage, MembershipResponse, Message, MessageResponse, OwnerAgentEntry, ProfileResponse,
-    ReadMarkerResponse, ReceiverResponse, RegisterAgentResponse, RoomSummary, RotateTokensResponse,
-    Seq,
+    InboxPage, MembershipResponse, Message, MessageResponse, OwnerAgentEntry, Presence,
+    PresenceResponse, ProfileResponse, ReadMarkerResponse, ReceiverResponse, RegisterAgentResponse,
+    RoomSummary, RotateTokensResponse, Seq,
 };
 
 use crate::error::CliError;
@@ -209,6 +209,8 @@ pub fn owner_directory(agents: &[OwnerAgentEntry]) -> String {
         "AGENT_ID",
         "NAME",
         "JOINED_ALL",
+        "PRESENCE",
+        "LAST_SEEN",
         "DELIVERY",
         "ROUTE_VERSION",
         "CREATED_AT",
@@ -220,6 +222,8 @@ pub fn owner_directory(agents: &[OwnerAgentEntry]) -> String {
             agent.agent_id.to_string(),
             one_line(agent.name.as_deref()),
             agent.joined_all.to_string(),
+            agent.presence.state.to_string(),
+            or_none(agent.last_seen_at.as_deref()),
             state_name(agent.delivery.state).to_owned(),
             agent.route_version.to_string(),
             agent.created_at.clone(),
@@ -231,21 +235,51 @@ pub fn owner_directory(agents: &[OwnerAgentEntry]) -> String {
 }
 
 pub fn agent_directory(agents: &[AgentEntry]) -> String {
-    let mut table = Table::new(vec!["AGENT_ID", "NAME", "JOINED_ALL", "ROLE"]);
+    let mut table = Table::new(vec![
+        "AGENT_ID",
+        "NAME",
+        "JOINED_ALL",
+        "PRESENCE",
+        "LAST_SEEN",
+        "ROLE",
+    ]);
     for agent in agents {
         table.push(vec![
             agent.agent_id.to_string(),
             one_line(agent.name.as_deref()),
             agent.joined_all.to_string(),
+            agent.presence.state.to_string(),
+            or_none(agent.last_seen_at.as_deref()),
             one_line(agent.profile.role.as_deref()),
         ]);
     }
     table.render()
 }
 
-/// `profile show|set|set-name`: key-value lines, then `intro` as written
-/// (it may span lines), or `intro  -` when undeclared.
+/// `profile set|set-name`: key-value lines, then `intro` as written (it
+/// may span lines), or `intro  -` when undeclared.
 pub fn profile(entry: &ProfileResponse) -> String {
+    profile_with(entry, Vec::new())
+}
+
+/// `profile show`: [`profile`] with the directory's presence lines after
+/// `updated_at` (S14).
+pub fn directory_profile(
+    entry: &ProfileResponse,
+    presence: &Presence,
+    last_seen_at: Option<&str>,
+) -> String {
+    profile_with(
+        entry,
+        vec![
+            ("presence", presence.state.to_string()),
+            ("presence_note", one_line(presence.note.as_deref())),
+            ("last_seen_at", or_none(last_seen_at)),
+        ],
+    )
+}
+
+fn profile_with(entry: &ProfileResponse, extra: Vec<(&'static str, String)>) -> String {
     let AgentProfile {
         gender_form,
         age_band,
@@ -261,6 +295,7 @@ pub fn profile(entry: &ProfileResponse) -> String {
         ("role", one_line(role.as_deref())),
         ("updated_at", or_none(updated_at.as_deref())),
     ];
+    pairs.extend(extra);
     let Some(intro) = intro else {
         pairs.push(("intro", NONE.to_owned()));
         return key_values(&pairs);
@@ -270,6 +305,19 @@ pub fn profile(entry: &ProfileResponse) -> String {
     text.push_str(intro);
     text.push('\n');
     text
+}
+
+/// `presence set`: the declaration as the hub stored it.
+pub fn presence(declared: &PresenceResponse) -> String {
+    let presence = &declared.presence;
+    key_values(&[
+        ("agent_id", declared.agent_id.to_string()),
+        ("state", presence.state.to_string()),
+        ("note", one_line(presence.note.as_deref())),
+        ("updated_at", or_none(presence.updated_at.as_deref())),
+        ("expires_at", or_none(presence.expires_at.as_deref())),
+        ("last_seen_at", or_none(declared.last_seen_at.as_deref())),
+    ])
 }
 
 pub fn avatar(stored: &AvatarResponse) -> String {

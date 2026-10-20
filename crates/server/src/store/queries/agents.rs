@@ -66,6 +66,8 @@ pub struct AgentRecord {
     pub delivery_state: DeliveryState,
     /// `None` when the agent has no avatar.
     pub avatar: Option<AvatarSummary>,
+    /// `None` until the agent's key authenticates a request (S14).
+    pub last_seen_at: Option<String>,
 }
 
 /// An agent's display name and profile as stored.
@@ -172,7 +174,7 @@ pub fn list(conn: &Connection) -> Result<Vec<AgentRecord>, StoreError> {
     let mut statement = conn.prepare(
         "SELECT a.agent_id, m.joined, a.receiver_url, a.route_version, a.created_at, n.state,
                 a.name, a.gender_form, a.age_band, a.role, a.intro, a.profile_updated_at,
-                v.sha256, v.updated_at, a.wake_policy
+                v.sha256, v.updated_at, a.wake_policy, a.last_seen_at
          FROM agents a
          JOIN memberships m ON m.agent_id = a.agent_id AND m.room_id = ?1
          JOIN notification_pending n ON n.agent_id = a.agent_id
@@ -190,6 +192,7 @@ pub fn list(conn: &Connection) -> Result<Vec<AgentRecord>, StoreError> {
             StoredProfile::from_row(row, 6)?,
             avatar_summary(row.get(12)?, row.get(13)?),
             row.get::<_, String>(14)?,
+            row.get::<_, Option<String>>(15)?,
         ))
     })?;
     let mut records = Vec::new();
@@ -204,6 +207,7 @@ pub fn list(conn: &Connection) -> Result<Vec<AgentRecord>, StoreError> {
             stored,
             avatar,
             wake_policy,
+            last_seen_at,
         ) = row?;
         let delivery_state = display_state(receiver_url.as_deref(), &state)?;
         let ProfileRecord { name, profile } = stored.into_record()?;
@@ -218,9 +222,37 @@ pub fn list(conn: &Connection) -> Result<Vec<AgentRecord>, StoreError> {
             created_at,
             delivery_state,
             avatar,
+            last_seen_at,
         });
     }
     Ok(records)
+}
+
+/// Records that the agent's key authenticated a request at `at` (RFC 3339
+/// ms). The only writer of `last_seen_at` (`IF-DB-001` v6). An agent
+/// deleted in the meantime is no row and no error.
+pub fn touch_last_seen(conn: &Connection, agent_id: &AgentId, at: &str) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE agents SET last_seen_at = ?2 WHERE agent_id = ?1",
+        params![agent_id.as_str(), at],
+    )?;
+    Ok(())
+}
+
+/// The stored `last_seen_at` of a registered agent (`Some(None)` when
+/// never seen); `None` when the agent does not exist.
+pub fn last_seen_at(
+    conn: &Connection,
+    agent_id: &AgentId,
+) -> Result<Option<Option<String>>, StoreError> {
+    let found = conn
+        .query_row(
+            "SELECT last_seen_at FROM agents WHERE agent_id = ?1",
+            params![agent_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(found)
 }
 
 /// The avatar summary from the two `LEFT JOIN`ed columns: both are set
@@ -548,7 +580,7 @@ pub fn current_event_seq(conn: &Connection) -> Result<i64, StoreError> {
     Ok(value)
 }
 
-pub(crate) fn agent_exists(conn: &Connection, agent_id: &AgentId) -> Result<bool, StoreError> {
+pub fn agent_exists(conn: &Connection, agent_id: &AgentId) -> Result<bool, StoreError> {
     let found: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM agents WHERE agent_id = ?1",

@@ -19,6 +19,12 @@
 // `sender_id`). A reply sends `reply_to` only and lands in the original's
 // room. The "조용히" toggle sends `wake: false`; it is per room visit and
 // never stored.
+//
+// Slice S14 shows presence from the directory the page already refreshes:
+// a colored dot (green online, red busy, grey offline) that also says the
+// state in words, the busy note as text, and for offline agents how long
+// ago their key was last seen. No new endpoint, polling or storage; the
+// delivery pill stays a separate, owner-only signal.
 
 const TOKEN_STORAGE_KEY = 'agents-platform.owner-token';
 const PREF_STYLE = 'agents-console-style';
@@ -77,6 +83,8 @@ const API = Object.freeze({
 const GENDER_LABEL = { female: '여성형', male: '남성형', none: '없음' };
 const AGE_LABEL = { child: '어린이', teen: '10대', '20s': '20대', '30s_40s': '30~40대', '50s_plus': '50대 이상', none: '없음' };
 const STATE_LABEL = { idle: 'idle', pending: 'pending', blocked: 'blocked' };
+const PRESENCE_LABEL = { online: '온라인', busy: '바쁨', offline: '오프라인' };
+const NEVER_SEEN = '본 적 없음';
 const NONE_TEXT = '—';
 
 // The single piece of mutable state. `session` changes on connect and
@@ -424,6 +432,52 @@ function pill(agent, status) {
   return h('span', { class: `pill ${state}`, text: STATE_LABEL[state] || state });
 }
 
+// How long ago `iso` was, coarsely: "방금 전", "n분 전", "n시간 전", "n일 전".
+function ago(iso) {
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
+  if (minutes < 1) return '방금 전';
+  if (minutes < 60) return `${minutes}분 전`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}시간 전`;
+  return `${Math.floor(hours / 24)}일 전`;
+}
+
+// An agent's presence as shown: the state and the detail next to it (the
+// busy note, or when an offline agent's key was last seen). `null` for an
+// id the directory does not list.
+function presenceOf(agent) {
+  if (!agent) return null;
+  const presence = agent.presence || {};
+  const state = PRESENCE_LABEL[presence.state] ? presence.state : 'offline';
+  let detail = '';
+  if (state === 'busy') detail = presence.note || '';
+  if (state === 'offline') detail = agent.last_seen_at ? ago(agent.last_seen_at) : NEVER_SEEN;
+  const label = PRESENCE_LABEL[state];
+  return { state, label, detail, title: detail ? `${label} · ${detail}` : label };
+}
+
+// The dot alone; its title and label say the state in words as well.
+function dot(agent) {
+  const shown = presenceOf(agent);
+  if (!shown) return null;
+  return h('span', { class: `dot ${shown.state}`, role: 'img', title: shown.title, 'aria-label': shown.title });
+}
+
+// Dot, state and detail on one line. The note goes in as text only.
+function presenceLine(agent) {
+  const shown = presenceOf(agent);
+  if (!shown) return null;
+  return h('span', { class: `presence ${shown.state}`, title: shown.title },
+    h('span', { class: `dot ${shown.state}`, 'aria-hidden': 'true' }),
+    h('span', { class: 'state', text: shown.label }),
+    shown.detail ? h('span', { class: 'detail', text: shown.detail }) : null);
+}
+
+// An avatar with the presence dot on its corner.
+function avDot(id, size) {
+  return h('span', { class: 'avp' }, av(id, size), dot(agentOf(id)));
+}
+
 // ------------------------------------------------------------------- rooms
 
 function allRooms() {
@@ -459,7 +513,7 @@ function roomIcon(room, size) {
   const kind = roomKind(room);
   if (kind === 'all') return h('span', { class: 'hashbox' }, icon('hash'));
   if (kind === 'topic') return h('span', { class: 'hashbox' }, icon('topic'));
-  if (kind === 'dm') return av(peerOf(room), size);
+  if (kind === 'dm') return avDot(peerOf(room), size);
   return h('span', { class: 'pair' }, av(room.members[0], 20), av(room.members[1], 20));
 }
 
@@ -559,7 +613,7 @@ function renderTop() {
   const subs = {
     all: `멤버 ${room.members.length}명 · 모두에게 전달`,
     topic: isArchived(room) ? `${room.room_id} · 보관됨 · 읽기만` : `${room.room_id} · 멤버 ${room.members.length}명`,
-    dm: `@${peerOf(room)} · 나와의 DM`,
+    dm: [`@${peerOf(room)} · 나와의 DM`, (presenceOf(agentOf(peerOf(room))) || {}).title].filter(Boolean).join(' · '),
     pair: `에이전트끼리 · ${room.members.join(' ↔ ')}`,
   };
   const sub = subs[kind];
@@ -1135,8 +1189,8 @@ function renderInfo() {
     const block = h('div', { class: 'blk' }, h('h3', { text: `멤버 ${room.members.length}` }));
     for (const id of room.members) {
       const agent = agentOf(id);
-      block.append(h('button', { class: 'member', data: { act: 'member', id } }, av(id, 32),
-        h('span', { class: 'who' }, nameOf(id), h('small', { text: (agent && agent.profile.role) || id })), pill(agent)));
+      block.append(h('button', { class: 'member', data: { act: 'member', id } }, avDot(id, 32),
+        h('span', { class: 'who' }, nameOf(id), h('small', { text: (agent && agent.profile.role) || id }), presenceLine(agent)), pill(agent)));
     }
     if (room.members.length === 0) block.append(h('p', { class: 'muted flush', text: '가입한 에이전트가 없습니다' }));
     nodes.push(block);
@@ -1175,8 +1229,8 @@ function topicBlocks(room) {
     const agent = agentOf(id);
     const detail = id === S.me ? `나 · ${id}` : (agent && agent.profile.role) || id;
     members.append(h('div', { class: 'member-row' },
-      h('button', { class: 'member', data: { act: 'member', id } }, av(id, 32),
-        h('span', { class: 'who' }, nameOf(id), h('small', { text: detail }))),
+      h('button', { class: 'member', data: { act: 'member', id } }, avDot(id, 32),
+        h('span', { class: 'who' }, nameOf(id), h('small', { text: detail }), presenceLine(agent))),
       h('button', { class: 'btn sm ghost-bad', data: { act: 'kick', id }, disabled: locked, text: '내보내기' })));
   }
   if (room.members.length === 0) members.append(h('p', { class: 'muted flush', text: '아직 member가 없습니다. 아래에서 초대합니다.' }));
@@ -1237,7 +1291,7 @@ function profileBlock(agent) {
   const select = (key, labels, value) => h('select', { id: `f-${key}` },
     h('option', { value: '', text: '선언 안 함', selected: value === null }),
     Object.entries(labels).map(([option, text]) => h('option', { value: option, text, selected: value === option })));
-  const rows = [];
+  const rows = [h('dt', { text: '상태' }), h('dd', null, presenceLine(agent))];
   if (S.edit) rows.push(field('name', '이름', h('input', { id: 'f-name', value: agent.name || '' }), null));
   rows.push(field('gender', '성별형', select('gender_form', GENDER_LABEL, profile.gender_form), profile.gender_form ? GENDER_LABEL[profile.gender_form] : NONE_TEXT));
   rows.push(field('age', '나이대', select('age_band', AGE_LABEL, profile.age_band), profile.age_band ? AGE_LABEL[profile.age_band] : NONE_TEXT));
@@ -1246,7 +1300,7 @@ function profileBlock(agent) {
   intro.value = profile.intro || '';
   rows.push(field('intro', '소개', intro, profile.intro || NONE_TEXT));
   return h('div', { class: 'blk' },
-    h('div', { class: 'prof' }, av(id, 56), h('div', null, h('div', { class: 'nm', text: agent.name || id }), h('div', { class: 'id', text: id }))),
+    h('div', { class: 'prof' }, avDot(id, 56), h('div', null, h('div', { class: 'nm', text: agent.name || id }), h('div', { class: 'id', text: id }))),
     S.edit ? h('div', { class: 'row-start' },
       h('button', { class: 'btn sm', data: { act: 'avatar-upload', id }, text: '사진 바꾸기' }),
       h('button', { class: 'btn sm', data: { act: 'avatar-clear', id }, disabled: !agent.avatar, text: '사진 지우기' })) : null,
@@ -1623,9 +1677,10 @@ function renderDir() {
   const agents = Array.from(S.agents.values());
   $('dirCount').textContent = `에이전트 ${agents.length}`;
   $('dirBody').replaceChildren(...agents.map((agent) => h('tr', agent.agent_id === S.me || !S.me ? null : { data: { act: 'dm-open', id: agent.agent_id }, title: `${agent.name || agent.agent_id}와의 DM 열기` },
-    h('td', null, h('span', { class: 'cell' }, av(agent.agent_id, 28), h('span', null, agent.name || agent.agent_id, ' ', h('span', { class: 'id', text: agent.agent_id })))),
+    h('td', null, h('span', { class: 'cell' }, avDot(agent.agent_id, 28), h('span', null, agent.name || agent.agent_id, ' ', h('span', { class: 'id', text: agent.agent_id })))),
     h('td', { text: agent.profile.role || NONE_TEXT }),
     h('td', { text: agent.joined_all ? '예' : '아니요' }),
+    h('td', { class: 'pres' }, presenceLine(agent)),
     h('td', null, pill(agent)),
     h('td', { class: 'act' }, S.postAs.includes(agent.agent_id)
       ? h('span', { class: 'pill none', title: 'owner 게시 명의([owner] post_as)라 지울 수 없습니다', text: '보호됨' })
@@ -1784,10 +1839,13 @@ async function refreshDirectory() {
   } catch (_) {
     return;
   }
-  const signature = JSON.stringify(Array.from(S.agents.values()).map((agent) => [agent.agent_id, agent.name, agent.avatar && agent.avatar.sha256]));
+  // The presence title changes with the state, the note and, for offline
+  // agents, the coarse "n분 전" text, so it re-renders as time passes too.
+  const signature = JSON.stringify(Array.from(S.agents.values()).map((agent) => [agent.agent_id, agent.name, agent.avatar && agent.avatar.sha256, presenceOf(agent).title]));
   ensureAvatars();
   if (signature === S.directorySignature) return;
   S.directorySignature = signature;
+  if ($('dir').open) renderDir();
   renderMe();
   renderTop();
   renderRooms();

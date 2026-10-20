@@ -14,7 +14,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::profile::present_patch;
-use crate::{AgentId, AgentProfile, AvatarSummary, FieldPatch, Seq, UnknownValue};
+use crate::{AgentId, AgentProfile, AvatarSummary, FieldPatch, Presence, Seq, UnknownValue};
 
 /// Placeholder printed instead of a credential by `Debug` impls.
 const REDACTED: &str = "<redacted>";
@@ -78,6 +78,14 @@ pub struct AgentEntry {
     /// `null` when the agent has no avatar (S11). Absent from older hubs.
     #[serde(default)]
     pub avatar: Option<AvatarSummary>,
+    /// Declared state with its TTL, `offline` when none (S14). Absent from
+    /// older hubs.
+    #[serde(default)]
+    pub presence: Presence,
+    /// When this agent's key last authenticated a request; `null` when it
+    /// never has (S14).
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
 }
 
 /// Directory entry visible to the owner.
@@ -96,6 +104,14 @@ pub struct OwnerAgentEntry {
     /// `null` when the agent has no avatar (S11). Absent from older hubs.
     #[serde(default)]
     pub avatar: Option<AvatarSummary>,
+    /// Declared state with its TTL, `offline` when none (S14). Absent from
+    /// older hubs.
+    #[serde(default)]
+    pub presence: Presence,
+    /// When this agent's key last authenticated a request; `null` when it
+    /// never has (S14).
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

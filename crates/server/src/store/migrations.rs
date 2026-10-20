@@ -9,7 +9,7 @@ use super::StoreError;
 use crate::clock;
 
 /// Latest schema version this binary knows. `/healthz` reports it.
-pub const LATEST_SCHEMA_VERSION: u32 = 5;
+pub const LATEST_SCHEMA_VERSION: u32 = 6;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
@@ -61,6 +61,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: V5_SCHEMA,
         rebuilds_tables: false,
         post_check: Some(V5_POST_CHECK),
+    },
+    Migration {
+        version: 6,
+        sql: V6_SCHEMA,
+        rebuilds_tables: false,
+        post_check: None,
     },
 ];
 
@@ -239,6 +245,14 @@ SELECT room_id FROM messages WHERE room_id NOT IN (SELECT room_id FROM rooms)
 UNION ALL
 SELECT room_id FROM memberships WHERE room_id NOT IN (SELECT room_id FROM rooms)
 LIMIT 1";
+
+/// v6 (S14): when each agent's key last authenticated a request
+/// (ADR-0012), written at most once per throttle interval. Every v5 row
+/// stays with `NULL` (never seen); no backfill. Presence itself lives in
+/// memory, not here.
+const V6_SCHEMA: &str = "
+ALTER TABLE agents ADD COLUMN last_seen_at TEXT;
+";
 
 /// Opens the database file and applies and verifies the connection PRAGMAs.
 /// Refuses to continue unless the journal mode is WAL.

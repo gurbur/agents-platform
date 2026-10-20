@@ -29,6 +29,17 @@ redrive_after_secs = 300
 #[owner]
 #post_as = []
 
+# Agent presence (docs/adr/0012-presence-in-memory-with-persisted-last-seen.md).
+# Optional: every key has the default shown. default_ttl_secs is the TTL of a
+# PUT /v1/agents/{agent_id}/presence without ttl_secs; a larger ttl_secs than
+# max_ttl_secs is 422 ttl_too_long. 1 <= default_ttl_secs <= max_ttl_secs <=
+# 86400, or startup is refused. agents.last_seen_at is written at most once
+# per agent every last_seen_interval_secs (at least 1).
+#[presence]
+#default_ttl_secs = 120
+#max_ttl_secs = 3600
+#last_seen_interval_secs = 60
+
 # Identity attestation (docs/design/IDENTITY_ATTESTATION.md). Optional:
 # without this table POST /v1/identity/tokens answers 503 identity_disabled
 # and the rest of the API is unaffected. To enable, create the key with

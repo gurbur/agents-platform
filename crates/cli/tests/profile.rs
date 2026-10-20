@@ -216,6 +216,9 @@ async fn profile_show_prints_one_directory_item() {
             "age_band",
             "role",
             "updated_at",
+            "presence",
+            "presence_note",
+            "last_seen_at",
             "intro"
         ]
     );
@@ -272,7 +275,14 @@ async fn agent_list_has_name_and_role_columns_for_both_principals() {
     let agent_view = ok(&server.cli(&key_a, &["agent", "list"]).await);
     assert_eq!(
         header(&agent_view),
-        ["AGENT_ID", "NAME", "JOINED_ALL", "ROLE"]
+        [
+            "AGENT_ID",
+            "NAME",
+            "JOINED_ALL",
+            "PRESENCE",
+            "LAST_SEEN",
+            "ROLE"
+        ]
     );
     let row = agent_view.lines().nth(1).unwrap();
     assert!(row.starts_with("agent-a "), "{row}");
@@ -286,6 +296,8 @@ async fn agent_list_has_name_and_role_columns_for_both_principals() {
             "AGENT_ID",
             "NAME",
             "JOINED_ALL",
+            "PRESENCE",
+            "LAST_SEEN",
             "DELIVERY",
             "ROUTE_VERSION",
             "CREATED_AT",

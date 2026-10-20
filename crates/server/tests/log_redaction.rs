@@ -578,3 +578,81 @@ async fn s13_sends_and_room_management_log_no_bodies_titles_or_mentions() {
         assert!(committed[0].contains(field), "{field}: {}", committed[0]);
     }
 }
+
+/// S14: a presence note is free text other agents read, like a profile
+/// value, and never reaches the logs; the set and clear lines carry only
+/// the agent and the state, and recording `last_seen_at` logs nothing at
+/// INFO.
+#[tokio::test]
+async fn presence_notes_and_last_seen_writes_stay_out_of_the_logs() {
+    let captured = install_capture();
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config()).await;
+    let api = server.api();
+    let a = api.register("presence-a", None).await;
+    let b = api.register("presence-b", None).await;
+    let note = "S14-NOTE-MARKER-do-not-log";
+
+    let set = api
+        .put(
+            "/v1/agents/presence-a/presence",
+            &a.api_key,
+            json!({"state": "busy", "note": note, "ttl_secs": 60}),
+        )
+        .await;
+    assert_eq!(set.status.as_u16(), 200, "{}", set.body);
+    api.put(
+        "/v1/agents/presence-a/presence",
+        OWNER_TOKEN,
+        json!({"state": "busy", "note": format!("{note}\nsecond line")}),
+    )
+    .await
+    .assert_error(422, "invalid_field");
+    api.get("/v1/agents", &b.api_key).await;
+    api.get("/v1/agents", OWNER_TOKEN).await;
+    let cleared = api
+        .send(
+            Method::DELETE,
+            "/v1/agents/presence-a/presence",
+            Some(&a.api_key),
+            None,
+        )
+        .await;
+    assert_eq!(cleared.status.as_u16(), 204);
+    eventually(
+        Duration::from_secs(5),
+        "last_seen_at is recorded",
+        || async {
+            let item = api.get("/v1/agents", OWNER_TOKEN).await.body["items"][0].clone();
+            item["last_seen_at"].is_string().then_some(())
+        },
+    )
+    .await;
+    server.shutdown().await.unwrap();
+
+    let logs = captured.text();
+    assert!(
+        !logs.contains("S14-NOTE-MARKER"),
+        "a presence note was logged"
+    );
+    let set_lines: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("presence set") && line.contains("presence-a"))
+        .collect();
+    assert_eq!(set_lines.len(), 1, "{logs}");
+    assert!(
+        set_lines[0].contains("INFO") && set_lines[0].contains("state=busy"),
+        "{}",
+        set_lines[0]
+    );
+    assert!(
+        logs.lines()
+            .any(|line| line.contains("presence cleared") && line.contains("presence-a")),
+        "{logs}"
+    );
+    let touch_info: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("INFO") && line.contains("last_seen_at"))
+        .collect();
+    assert!(touch_info.is_empty(), "{touch_info:?}");
+}

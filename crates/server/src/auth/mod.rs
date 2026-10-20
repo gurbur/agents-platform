@@ -4,8 +4,15 @@
 //! bearer token with the owner token in constant time, then looks up the
 //! SHA-256 of the token among agent API keys. Anything else, including a
 //! receiver secret, is 401. Token text never reaches logs or error bodies.
+//!
+//! The extractor is also the one place that records `agents.last_seen_at`
+//! (`IF-WIRE-013`): every request an agent key authenticates, whatever its
+//! outcome, at most once per throttle interval, without the request
+//! waiting for the write. Owner requests record nothing.
 
 pub mod credential;
+
+use std::time::Duration;
 
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::HeaderMap;
@@ -13,9 +20,12 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use platform_wire::AgentId;
 use subtle::ConstantTimeEq;
+use tracing::warn;
 
 use crate::api::ApiError;
+use crate::clock::{Clock, format_rfc3339_ms};
 use crate::config::OwnerToken;
+use crate::presence::PresenceBoard;
 use crate::store::{Store, StoreError, queries};
 
 const BEARER_SCHEME: &str = "bearer";
@@ -56,16 +66,32 @@ impl Principal {
     }
 }
 
-/// Resolves bearer tokens to principals.
+/// Resolves bearer tokens to principals and records when each agent key
+/// was last seen (`IF-WIRE-013`).
 #[derive(Clone)]
 pub struct Authenticator {
     owner_token: OwnerToken,
     store: Store,
+    presence: PresenceBoard,
+    clock: Clock,
+    last_seen_interval: Duration,
 }
 
 impl Authenticator {
-    pub fn new(owner_token: OwnerToken, store: Store) -> Self {
-        Self { owner_token, store }
+    pub fn new(
+        owner_token: OwnerToken,
+        store: Store,
+        presence: PresenceBoard,
+        clock: Clock,
+        last_seen_interval: Duration,
+    ) -> Self {
+        Self {
+            owner_token,
+            store,
+            presence,
+            clock,
+            last_seen_interval,
+        }
     }
 
     /// `Ok(None)` when the token matches neither the owner nor any agent.
@@ -84,6 +110,31 @@ impl Authenticator {
             .await?;
         Ok(agent.map(Principal::Agent))
     }
+
+    /// Records that `agent_id`'s key authenticated a request, unless that
+    /// was already recorded within the interval. The throttle notes the
+    /// time first; the write runs on its own task so the request never
+    /// waits for it, and a failure is only a warning.
+    fn record_last_seen(&self, agent_id: &AgentId) {
+        let due =
+            self.presence
+                .should_touch(agent_id, self.clock.instant(), self.last_seen_interval);
+        if !due {
+            return;
+        }
+        let at = format_rfc3339_ms(self.clock.now());
+        let store = self.store.clone();
+        let agent_id = agent_id.clone();
+        tokio::spawn(async move {
+            let target = agent_id.clone();
+            let written = store
+                .run(move |conn| queries::agents::touch_last_seen(conn, &target, &at))
+                .await;
+            if let Err(err) = written {
+                warn!(agent_id = %agent_id, error = %err, "last_seen_at was not recorded");
+            }
+        });
+    }
 }
 
 impl<S> FromRequestParts<S> for Principal
@@ -98,10 +149,14 @@ where
             return Err(ApiError::unauthorized());
         };
         let authenticator = Authenticator::from_ref(state);
-        authenticator
+        let principal = authenticator
             .authenticate(token)
             .await?
-            .ok_or_else(ApiError::unauthorized)
+            .ok_or_else(ApiError::unauthorized)?;
+        if let Principal::Agent(agent_id) = &principal {
+            authenticator.record_last_seen(agent_id);
+        }
+        Ok(principal)
     }
 }
 

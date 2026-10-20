@@ -4,6 +4,7 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use common::{Api, Fixture, OWNER_TOKEN, RunningServer};
 use platform_wire::messages::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
@@ -484,6 +485,23 @@ async fn get_paths_commit_nothing() {
     let a = api.register("agent-a", None).await.api_key;
     let b = api.register("agent-b", None).await.api_key;
     broadcast(&api, &a, 1, 3).await;
+    // S14: the first request with each key records `last_seen_at`, a commit
+    // off the request path (IF-WIRE-013). Let those land first; within the
+    // throttle interval the GETs below record nothing more.
+    own_page(&api, &b, "").await;
+    common::eventually(
+        Duration::from_secs(5),
+        "last_seen_at of both keys",
+        || async {
+            let directory = api.get("/v1/agents", OWNER_TOKEN).await.body;
+            let items = directory["items"].as_array()?;
+            items
+                .iter()
+                .all(|item| item["last_seen_at"].is_string())
+                .then_some(())
+        },
+    )
+    .await;
     let probe = WriteProbe::open(&fx);
     let before = probe.data_version();
 

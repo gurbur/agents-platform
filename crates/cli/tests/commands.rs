@@ -71,7 +71,17 @@ async fn agent_register_list_inbox_and_token_rotation() {
         .unwrap()
         .split_whitespace()
         .collect();
-    assert_eq!(header, ["AGENT_ID", "NAME", "JOINED_ALL", "ROLE"]);
+    assert_eq!(
+        header,
+        [
+            "AGENT_ID",
+            "NAME",
+            "JOINED_ALL",
+            "PRESENCE",
+            "LAST_SEEN",
+            "ROLE"
+        ]
+    );
     assert!(!agent_list.contains("RECEIVER_URL"), "{agent_list}");
     assert_eq!(agent_list.lines().count(), 3, "{agent_list}");
 

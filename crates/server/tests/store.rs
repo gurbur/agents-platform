@@ -125,12 +125,15 @@ async fn v2_adds_nullable_profile_columns_to_agents() {
         .await
         .unwrap();
 
-    // v5 appends `wake_policy` after the six v2 columns (S13).
+    // v5 appends `wake_policy` after the six v2 columns (S13), v6
+    // `last_seen_at` after it (S14).
     let profile: Vec<&(String, String, bool)> = columns.iter().skip(7).take(6).collect();
-    assert_eq!(
-        columns.last().map(|(name, _, _)| name.as_str()),
-        Some("wake_policy")
-    );
+    let appended: Vec<&str> = columns
+        .iter()
+        .skip(13)
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    assert_eq!(appended, ["wake_policy", "last_seen_at"]);
     let expected = [
         "name",
         "gender_form",

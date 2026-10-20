@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use platformd::clock::Clock;
 use platformd::config::Config;
 use platformd::delivery::DeliverySignal;
 use platformd::store::{Store, StoreError};
@@ -87,6 +88,18 @@ impl Fixture {
         Config::load(&path).expect("valid config")
     }
 
+    /// Like [`Fixture::load_config`] with a `[presence]` table holding
+    /// `presence` (TOML `key = value` lines).
+    pub fn load_config_with_presence(&self, presence: &str) -> Config {
+        let path = self.write_config_text(&format!(
+            "listen = \"127.0.0.1:0\"\n\
+             db_path = \"data/platform.db\"\n\
+             owner_token_file = \"owner.token\"\n\
+             [presence]\n{presence}\n"
+        ));
+        Config::load(&path).expect("valid config")
+    }
+
     /// Like [`Fixture::load_config`] with an `[identity]` table holding
     /// `identity` (TOML `key = value` lines; `signing_key_file` is added) and
     /// a signing key generated into `identity.key`.
@@ -133,7 +146,15 @@ pub struct RunningServer {
 
 impl RunningServer {
     pub async fn start(config: &Config) -> Self {
-        let server = platformd::start(config).await.expect("server starts");
+        Self::start_with_clock(config, Clock::system()).await
+    }
+
+    /// Like [`RunningServer::start`] with presence on `clock` (an
+    /// adjustable one lets a test pass a TTL without waiting).
+    pub async fn start_with_clock(config: &Config, clock: Clock) -> Self {
+        let server = platformd::start_with_clock(config, clock)
+            .await
+            .expect("server starts");
         let addr = server.local_addr().expect("local addr");
         let delivery = server.delivery_signal();
         let (stop, stopped) = oneshot::channel::<()>();

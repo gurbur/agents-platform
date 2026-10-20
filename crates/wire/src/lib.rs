@@ -16,6 +16,7 @@ pub mod health;
 pub mod identity;
 pub mod inbox;
 pub mod messages;
+pub mod presence;
 pub mod profile;
 pub mod rooms;
 pub mod seq;
@@ -38,6 +39,11 @@ pub use inbox::{InboxEvent, InboxItem, InboxPage, ReadMarkerRequest, ReadMarkerR
 pub use messages::{
     HistoryCursor, HistoryPage, MAX_MENTIONS, Message, MessageId, MessageIdError, MessageResponse,
     RoomId, RoomIdError, RoomSlug, RoomSlugError, SendMessageRequest,
+};
+pub use presence::{
+    MAX_PRESENCE_NOTE_CHARS, PRESENCE_TTL_CEILING_SECS, Presence, PresenceDeclaration,
+    PresenceFieldError, PresenceNoteError, PresenceRequest, PresenceResponse, PresenceState,
+    validate_presence_note,
 };
 pub use profile::{
     AgeBand, AgentProfile, FieldPatch, GenderForm, MAX_INTRO_CHARS, MAX_NAME_CHARS, MAX_ROLE_CHARS,

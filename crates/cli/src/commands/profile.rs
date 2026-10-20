@@ -1,5 +1,6 @@
 //! `profile set|set-name|show` → `PUT /v1/agents/{id}/profile` and
-//! `GET /v1/agents` (`IF-CLI-001` S9, `IF-WIRE-006`).
+//! `GET /v1/agents` (`IF-CLI-001` S9, `IF-WIRE-006`; `show` adds the S14
+//! presence lines).
 //!
 //! `set` sends only the fields given on the command line, `--clear` as
 //! `null`, and refuses to send `{}`. Requests are checked with the
@@ -11,7 +12,8 @@ use std::path::PathBuf;
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Args, Subcommand};
 use platform_wire::{
-    AgeBand, AgentId, FieldPatch, GenderForm, ProfileField, ProfileResponse, UpdateProfileRequest,
+    AgeBand, AgentId, FieldPatch, GenderForm, Presence, ProfileField, ProfileResponse,
+    UpdateProfileRequest,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -169,6 +171,17 @@ struct ItemId {
     agent_id: String,
 }
 
+/// What `show` prints of an item: the profile and, from S14, presence.
+#[derive(Deserialize)]
+struct ShownItem {
+    #[serde(flatten)]
+    profile: ProfileResponse,
+    #[serde(default)]
+    presence: Presence,
+    #[serde(default)]
+    last_seen_at: Option<String>,
+}
+
 /// Picks the agent's item out of the directory. `--json` prints that item
 /// exactly as the server sent it (with the owner's extra fields for the
 /// owner).
@@ -192,12 +205,16 @@ async fn show(agent_id: &AgentId, context: &Context) -> Result<(), CliError> {
     if context.json {
         return output::emit_raw(item.get().as_bytes());
     }
-    let entry: ProfileResponse =
+    let shown: ShownItem =
         serde_json::from_str(item.get()).map_err(|err| CliError::UnexpectedResponse {
             status: reqwest::StatusCode::OK,
             detail: format!("cannot decode the directory item: {err}"),
         })?;
-    output::emit(&output::profile(&entry))
+    output::emit(&output::directory_profile(
+        &shown.profile,
+        &shown.presence,
+        shown.last_seen_at.as_deref(),
+    ))
 }
 
 #[cfg(test)]

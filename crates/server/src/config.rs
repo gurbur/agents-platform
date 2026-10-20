@@ -8,9 +8,10 @@
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use platform_wire::AgentId;
 use platform_wire::identity::MAX_TOKEN_LIFETIME_SECS;
+use platform_wire::{AgentId, PRESENCE_TTL_CEILING_SECS};
 use serde::Deserialize;
 
 use crate::identity::{self, IssuePolicy, Issuer, KeyFileError, SigningIdentity};
@@ -22,6 +23,11 @@ pub const OWNER_TOKEN_MIN_BYTES: usize = 32;
 /// tests never assert them.
 const DEFAULT_IDENTITY_TTL_SECS: u64 = 600;
 const DEFAULT_IDENTITY_MAX_TTL_SECS: u64 = 900;
+
+/// `[presence]` defaults (ADR-0012). Tuning values: tests never assert them.
+const DEFAULT_PRESENCE_TTL_SECS: i64 = 120;
+const DEFAULT_PRESENCE_MAX_TTL_SECS: i64 = 3600;
+const DEFAULT_LAST_SEEN_INTERVAL_SECS: i64 = 60;
 
 const DEFAULT_LISTEN: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7340));
 
@@ -80,6 +86,67 @@ pub struct Config {
     /// disabled.
     pub identity: Option<IdentityConfig>,
     pub owner: OwnerConfig,
+    pub presence: PresenceConfig,
+}
+
+/// `[presence]` after validation (`IF-CFG-001`, S14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresenceConfig {
+    /// TTL of a `PUT …/presence` without `ttl_secs`.
+    pub default_ttl: Duration,
+    /// Largest accepted `ttl_secs`; above it is 422 `ttl_too_long`.
+    pub max_ttl: Duration,
+    /// `agents.last_seen_at` is written at most once per agent per interval.
+    pub last_seen_interval: Duration,
+}
+
+/// On-disk `[presence]`; the table and each key are optional. Signed so a
+/// negative value is refused with a message rather than a parse error.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PresenceFile {
+    default_ttl_secs: i64,
+    max_ttl_secs: i64,
+    last_seen_interval_secs: i64,
+}
+
+impl Default for PresenceFile {
+    fn default() -> Self {
+        Self {
+            default_ttl_secs: DEFAULT_PRESENCE_TTL_SECS,
+            max_ttl_secs: DEFAULT_PRESENCE_MAX_TTL_SECS,
+            last_seen_interval_secs: DEFAULT_LAST_SEEN_INTERVAL_SECS,
+        }
+    }
+}
+
+impl PresenceFile {
+    /// Startup checks: `1 <= default_ttl_secs <= max_ttl_secs <=
+    /// PRESENCE_TTL_CEILING_SECS` and `last_seen_interval_secs >= 1`.
+    fn validate(self) -> Result<PresenceConfig, String> {
+        let ceiling = PRESENCE_TTL_CEILING_SECS;
+        let in_order = 1 <= self.default_ttl_secs
+            && self.default_ttl_secs <= self.max_ttl_secs
+            && self.max_ttl_secs.unsigned_abs() <= ceiling;
+        if !in_order {
+            return Err(format!(
+                "presence.default_ttl_secs ({}) and presence.max_ttl_secs ({}) must satisfy 1 <= default <= max <= {ceiling}",
+                self.default_ttl_secs, self.max_ttl_secs
+            ));
+        }
+        if self.last_seen_interval_secs < 1 {
+            return Err(format!(
+                "presence.last_seen_interval_secs ({}) must be at least 1",
+                self.last_seen_interval_secs
+            ));
+        }
+        // All three are positive here, so `unsigned_abs` is the value itself.
+        Ok(PresenceConfig {
+            default_ttl: Duration::from_secs(self.default_ttl_secs.unsigned_abs()),
+            max_ttl: Duration::from_secs(self.max_ttl_secs.unsigned_abs()),
+            last_seen_interval: Duration::from_secs(self.last_seen_interval_secs.unsigned_abs()),
+        })
+    }
 }
 
 /// `[owner]` after validation.
@@ -242,6 +309,8 @@ struct ConfigFile {
     identity: Option<IdentityFile>,
     #[serde(default)]
     owner: OwnerFile,
+    #[serde(default)]
+    presence: PresenceFile,
 }
 
 fn default_listen() -> SocketAddr {
@@ -269,6 +338,7 @@ impl Config {
             identity.validate().map_err(invalid)?;
         }
         let owner = file.owner.validate().map_err(invalid)?;
+        let presence = file.presence.validate().map_err(invalid)?;
 
         let base = config_dir(path);
         let db_path = base.join(&file.db_path);
@@ -287,6 +357,7 @@ impl Config {
             delivery: file.delivery,
             identity,
             owner,
+            presence,
         })
     }
 }
@@ -861,6 +932,139 @@ mod tests {
         assert!(file.owner.validate().unwrap().post_as.is_empty());
         let commented: ConfigFile = toml::from_str(&example).unwrap();
         assert!(commented.owner.post_as.is_empty());
+    }
+
+    // ---- [presence] ----------------------------------------------------------
+
+    fn presence_config(fx: &Fixture, table: &str) -> PathBuf {
+        fx.write("owner.token", VALID_TOKEN);
+        fx.config(&format!("{MINIMAL}{table}"))
+    }
+
+    #[test]
+    fn presence_defaults_without_the_table_are_in_bounds() {
+        let fx = Fixture::new();
+        let without = Config::load(&presence_config(&fx, "")).unwrap().presence;
+        let empty = Config::load(&presence_config(&fx, "[presence]\n"))
+            .unwrap()
+            .presence;
+        assert_eq!(without, empty, "an empty table is the defaults");
+        let ceiling = Duration::from_secs(PRESENCE_TTL_CEILING_SECS);
+        assert!(Duration::from_secs(1) <= without.default_ttl);
+        assert!(without.default_ttl <= without.max_ttl && without.max_ttl <= ceiling);
+        assert!(without.last_seen_interval >= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn presence_applies_explicit_values() {
+        let fx = Fixture::new();
+        let path = presence_config(
+            &fx,
+            "[presence]\ndefault_ttl_secs = 7\nmax_ttl_secs = 8\nlast_seen_interval_secs = 9\n",
+        );
+        assert_eq!(
+            Config::load(&path).unwrap().presence,
+            PresenceConfig {
+                default_ttl: Duration::from_secs(7),
+                max_ttl: Duration::from_secs(8),
+                last_seen_interval: Duration::from_secs(9),
+            }
+        );
+        let ceiling = PRESENCE_TTL_CEILING_SECS;
+        let path = presence_config(
+            &fx,
+            &format!("[presence]\ndefault_ttl_secs = {ceiling}\nmax_ttl_secs = {ceiling}\n"),
+        );
+        let presence = Config::load(&path).unwrap().presence;
+        assert_eq!(presence.max_ttl, Duration::from_secs(ceiling));
+    }
+
+    #[test]
+    fn presence_bounds_are_enforced() {
+        let ceiling = PRESENCE_TTL_CEILING_SECS;
+        let rejected = [
+            "default_ttl_secs = 0\nmax_ttl_secs = 1\n".to_owned(),
+            "default_ttl_secs = -1\nmax_ttl_secs = 1\n".to_owned(),
+            "default_ttl_secs = 2\nmax_ttl_secs = 1\n".to_owned(),
+            "max_ttl_secs = 0\n".to_owned(),
+            format!("default_ttl_secs = 1\nmax_ttl_secs = {}\n", ceiling + 1),
+            "last_seen_interval_secs = 0\n".to_owned(),
+            "last_seen_interval_secs = -60\n".to_owned(),
+        ];
+        for body in rejected {
+            let fx = Fixture::new();
+            let path = presence_config(&fx, &format!("[presence]\n{body}"));
+            let err = Config::load(&path).unwrap_err();
+            assert!(matches!(err, ConfigError::Invalid { .. }), "{body}: {err}");
+            assert!(err.to_string().contains("presence."), "{err}");
+        }
+    }
+
+    #[test]
+    fn presence_rejects_unknown_keys() {
+        let fx = Fixture::new();
+        let path = presence_config(&fx, "[presence]\nheartbeat_secs = 30\n");
+        assert!(matches!(
+            Config::load(&path),
+            Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    /// Uncomments every `#`-prefixed TOML line of the block that starts at
+    /// `header` (e.g. `#[owner]`) and ends at the first line that is not
+    /// commented TOML.
+    fn uncomment_block(example: &str, header: &str) -> String {
+        let start = example.find(header).expect("commented block");
+        let (before, block) = example.split_at(start);
+        let mut lines: Vec<String> = Vec::new();
+        let mut in_block = true;
+        for line in block.lines() {
+            match line.strip_prefix('#') {
+                Some(rest) if in_block && !rest.starts_with([' ', '#']) && !rest.is_empty() => {
+                    lines.push(rest.to_owned());
+                }
+                _ => {
+                    in_block = false;
+                    lines.push(line.to_owned());
+                }
+            }
+        }
+        format!("{before}{}\n", lines.join("\n"))
+    }
+
+    #[test]
+    fn example_presence_block_loads_once_uncommented() {
+        let example = include_str!("../../../platformd.example.toml");
+        let fx = Fixture::new();
+        fx.write("owner.token", VALID_TOKEN);
+        let enabled = uncomment_block(example, "#[presence]");
+        assert!(enabled.contains("\n[presence]\n"), "{enabled}");
+        for key in [
+            "default_ttl_secs",
+            "max_ttl_secs",
+            "last_seen_interval_secs",
+        ] {
+            assert!(
+                enabled.lines().any(|line| line.starts_with(key)),
+                "{key} uncommented"
+            );
+        }
+
+        let config = Config::load(&fx.config(&enabled)).unwrap();
+
+        assert!(config.identity.is_none(), "[identity] stays commented");
+    }
+
+    #[test]
+    fn pi_example_presence_block_parses_once_uncommented() {
+        let example = include_str!("../../../deploy/platformd.pi.example.toml")
+            .replace("100.x.y.z", "100.64.0.1");
+        let enabled = uncomment_block(&example, "#[presence]");
+        assert!(enabled.contains("\n[presence]\n"), "{enabled}");
+        let file: ConfigFile = toml::from_str(&enabled).unwrap();
+        file.presence.validate().unwrap();
+        let commented: ConfigFile = toml::from_str(&example).unwrap();
+        commented.presence.validate().unwrap();
     }
 
     #[test]

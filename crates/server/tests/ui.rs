@@ -237,6 +237,40 @@ fn script_never_parses_html_and_keeps_the_token_out_of_local_storage() {
     }
 }
 
+/// S14: presence comes from the directory the page already polls; the page
+/// never calls the presence endpoints and puts the note in as text.
+#[test]
+fn presence_is_read_from_the_directory_only() {
+    assert!(
+        APP_JS.contains(".presence"),
+        "the page reads the directory presence"
+    );
+    assert!(
+        APP_JS.contains(".last_seen_at"),
+        "the page reads last_seen_at"
+    );
+    assert!(
+        !APP_JS.contains("/presence"),
+        "no presence endpoint is called"
+    );
+    for state in ["online", "busy", "offline"] {
+        assert!(
+            APP_CSS.contains(&format!(".dot.{state}")),
+            "a {state} dot style"
+        );
+    }
+    // The note reaches the DOM through `h(…, { text: … })` or a text node
+    // only; innerHTML and friends are refused for the whole script above.
+    let note_lines: Vec<&str> = APP_JS
+        .lines()
+        .filter(|line| line.contains(".note"))
+        .collect();
+    assert!(!note_lines.is_empty());
+    for line in note_lines {
+        assert!(!line.contains("HTML"), "{line}");
+    }
+}
+
 /// Every `API.name(` the script calls, with the method it uses.
 fn request_pairs(source: &str) -> BTreeSet<(&str, &str)> {
     source

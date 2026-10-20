@@ -1,6 +1,8 @@
 //! Agent registration, directory and deletion, directory profile, receiver
 //! route, `all` membership and token rotation (`IF-API-AGENTS`,
 //! `IF-API-PROFILE`, `IF-API-RECEIVER`, `IF-API-MEMBERSHIP`, `IF-API-ROTATE`).
+//! The directory shows each agent's presence from memory next to the stored
+//! `last_seen_at` (S14).
 //!
 //! Authentication and permission run in `FromRequestParts` extractors, so a
 //! caller without permission gets 401/403 before the body is examined.
@@ -13,9 +15,9 @@ use axum::routing::{delete, patch, post, put};
 use axum::{Json, Router};
 use platform_wire::{
     AgentEntry, AgentId, AgentList, DeliverySummary, MembershipRequest, MembershipResponse,
-    OwnerAgentEntry, ProfileFieldError, ProfileResponse, ReceiverResponse, RegisterAgentRequest,
-    RegisterAgentResponse, RotateTokensResponse, Seq, UpdateProfileRequest, UpdateReceiverRequest,
-    WakePolicy, codes, validate_name,
+    OwnerAgentEntry, Presence, ProfileFieldError, ProfileResponse, ReceiverResponse,
+    RegisterAgentRequest, RegisterAgentResponse, RotateTokensResponse, Seq, UpdateProfileRequest,
+    UpdateReceiverRequest, WakePolicy, codes, validate_name,
 };
 use tracing::info;
 
@@ -141,6 +143,8 @@ async fn register(
         ));
     };
 
+    // A new agent with a reused id inherits no presence or throttle.
+    state.presence.forget(&agent.agent_id);
     info!(agent_id = %agent.agent_id, "agent registered");
     let body = RegisterAgentResponse {
         agent_id: agent.agent_id,
@@ -180,30 +184,37 @@ async fn delete_agent(
         .transaction(move |tx| agent_queries::delete(tx, &target))
         .await?
         .ok_or_else(ApiError::agent_not_found)?;
+    state.presence.forget(&agent_id);
 
     info!(agent_id = %agent_id, inbox_rows = deleted.inbox_rows, "agent deleted");
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `GET /v1/agents`: both views carry `name` and `profile` so agents can
-/// address each other; the owner view adds route and delivery fields
-/// (`IF-WIRE-001`).
+/// `GET /v1/agents`: both views carry `name`, `profile` and presence so
+/// agents can address each other; the owner view adds route and delivery
+/// fields (`IF-WIRE-001`). Presence is read after the store answered, at
+/// one instant for every item.
 async fn list(principal: Principal, State(state): State<AppState>) -> Result<Response, ApiError> {
     let records = state.store.run(|conn| agent_queries::list(conn)).await?;
+    let now = state.clock.now();
+    let shown = records.into_iter().map(|record| {
+        let presence = state.presence.view(&record.agent_id, now);
+        (record, presence)
+    });
     let response = match principal {
         Principal::Owner => Json(AgentList {
-            items: records.into_iter().map(owner_entry).collect(),
+            items: shown.map(owner_entry).collect(),
         })
         .into_response(),
         Principal::Agent(_) => Json(AgentList {
-            items: records.into_iter().map(agent_entry).collect(),
+            items: shown.map(agent_entry).collect(),
         })
         .into_response(),
     };
     Ok(response)
 }
 
-fn owner_entry(record: AgentRecord) -> OwnerAgentEntry {
+fn owner_entry((record, presence): (AgentRecord, Presence)) -> OwnerAgentEntry {
     OwnerAgentEntry {
         agent_id: record.agent_id,
         name: record.name,
@@ -217,16 +228,20 @@ fn owner_entry(record: AgentRecord) -> OwnerAgentEntry {
             state: record.delivery_state,
         },
         avatar: record.avatar,
+        presence,
+        last_seen_at: record.last_seen_at,
     }
 }
 
-fn agent_entry(record: AgentRecord) -> AgentEntry {
+fn agent_entry((record, presence): (AgentRecord, Presence)) -> AgentEntry {
     AgentEntry {
         agent_id: record.agent_id,
         name: record.name,
         joined_all: record.joined_all,
         profile: record.profile,
         avatar: record.avatar,
+        presence,
+        last_seen_at: record.last_seen_at,
     }
 }
 

@@ -1,12 +1,77 @@
 //! RFC 3339 UTC timestamps with millisecond precision (`IF-ID-001`),
-//! e.g. `2026-10-15T12:34:56.789Z`.
+//! e.g. `2026-10-15T12:34:56.789Z`, and the injectable [`Clock`] presence
+//! reads its time from.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SECS_PER_DAY: u64 = 86_400;
 
 pub fn now_rfc3339_ms() -> String {
     format_rfc3339_ms(SystemTime::now())
+}
+
+/// The time source of presence (TTLs, the `last_seen_at` throttle and its
+/// timestamps). The production clock is the system clock; an
+/// [`Clock::adjustable`] one runs with it shifted by an offset that only
+/// its [`ClockControl`] moves forward, so a test can pass a TTL or a
+/// throttle interval without waiting.
+#[derive(Debug, Clone, Default)]
+pub struct Clock {
+    /// Milliseconds added to the system clock; `None` for the system clock.
+    offset_ms: Option<Arc<AtomicU64>>,
+}
+
+/// Moves an adjustable [`Clock`] (and every clone of it) forward.
+#[derive(Debug, Clone)]
+pub struct ClockControl {
+    offset_ms: Arc<AtomicU64>,
+}
+
+impl Clock {
+    pub fn system() -> Self {
+        Self::default()
+    }
+
+    /// A clock that starts at the system time and can be moved forward.
+    pub fn adjustable() -> (Self, ClockControl) {
+        let offset_ms = Arc::new(AtomicU64::new(0));
+        let clock = Self {
+            offset_ms: Some(Arc::clone(&offset_ms)),
+        };
+        (clock, ClockControl { offset_ms })
+    }
+
+    fn offset(&self) -> Duration {
+        self.offset_ms.as_ref().map_or(Duration::ZERO, |offset| {
+            Duration::from_millis(offset.load(Ordering::Relaxed))
+        })
+    }
+
+    /// Wall-clock time, truncated to whole milliseconds so that a stored
+    /// time and its RFC 3339 text are the same instant.
+    pub fn now(&self) -> SystemTime {
+        truncate_to_millis(SystemTime::now() + self.offset())
+    }
+
+    /// Monotonic time for intervals.
+    pub fn instant(&self) -> Instant {
+        Instant::now() + self.offset()
+    }
+}
+
+impl ClockControl {
+    pub fn advance(&self, by: Duration) {
+        let millis = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
+        self.offset_ms.fetch_add(millis, Ordering::Relaxed);
+    }
+}
+
+fn truncate_to_millis(time: SystemTime) -> SystemTime {
+    let since_epoch = time.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    let millis = u64::try_from(since_epoch.as_millis()).unwrap_or(u64::MAX);
+    UNIX_EPOCH + Duration::from_millis(millis)
 }
 
 /// Formats `time` as `YYYY-MM-DDTHH:MM:SS.mmmZ`. Times before the Unix epoch
@@ -184,6 +249,27 @@ mod tests {
             assert_eq!(parse_rfc3339_ms(text), None, "{text:?}");
         }
         assert!(parse_rfc3339_ms("2024-02-29T00:00:00.000Z").is_some());
+    }
+
+    #[test]
+    fn an_adjustable_clock_moves_forward_with_its_control_only() {
+        let system = Clock::system();
+        let (clock, control) = Clock::adjustable();
+        let copy = clock.clone();
+        let before = clock.now();
+        let instant = clock.instant();
+        control.advance(Duration::from_secs(3600));
+        assert!(copy.now().duration_since(before).unwrap() >= Duration::from_secs(3600));
+        assert!(copy.instant() - instant >= Duration::from_secs(3600));
+        assert!(clock.now().duration_since(system.now()).unwrap() >= Duration::from_secs(3599));
+    }
+
+    #[test]
+    fn clock_time_is_whole_milliseconds() {
+        let now = Clock::system().now();
+        let since_epoch = now.duration_since(UNIX_EPOCH).unwrap();
+        assert_eq!(since_epoch.subsec_nanos() % 1_000_000, 0);
+        assert_eq!(parse_rfc3339_ms(&format_rfc3339_ms(now)), Some(now));
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::commands::history::HistoryArgs;
 use crate::commands::identity::IdentityCommand;
 use crate::commands::inbox::InboxArgs;
 use crate::commands::message::MessageCommand;
+use crate::commands::presence::PresenceCommand;
 use crate::commands::profile::ProfileCommand;
 use crate::commands::receiver::ReceiverCommand;
 use crate::commands::rooms::RoomCommand;
@@ -52,6 +53,9 @@ pub enum Command {
     /// Directory profile: display name and self-declared introduction
     #[command(subcommand)]
     Profile(ProfileCommand),
+    /// Agent presence: declare online or busy with a TTL, or withdraw it
+    #[command(subcommand)]
+    Presence(PresenceCommand),
     /// Receiver route of an agent
     #[command(subcommand)]
     Receiver(ReceiverCommand),
