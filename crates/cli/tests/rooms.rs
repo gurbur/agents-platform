@@ -246,16 +246,25 @@ async fn inbox_history_and_message_show_print_the_event_fields() {
             "CREATED_AT",
             "SENDER_ID",
             "WAKE",
+            "WOKE",
             "REPLY_TO",
             "MENTIONS",
             "BODY"
         ]
     );
     assert_eq!(rows[1][..3], ["1", "message", "dm:agent-a:agent-b"]);
-    assert_eq!(rows[1][6..], ["agent-a", "wake", "-", "-", "q"]);
+    // a's own row never wakes a; b's quiet answer names a, so it did.
+    assert_eq!(rows[1][6..], ["agent-a", "wake", "false", "-", "-", "q"]);
     assert_eq!(
         rows[2][6..],
-        ["agent-b", "quiet", first_id.as_str(), "agent-a", "a"]
+        [
+            "agent-b",
+            "quiet",
+            "true",
+            first_id.as_str(),
+            "agent-a",
+            "a"
+        ]
     );
 
     let history = ok(&server
@@ -293,7 +302,7 @@ async fn inbox_history_and_message_show_print_the_event_fields() {
 #[tokio::test]
 async fn inbox_all_pages_json_keeps_unknown_kinds_and_fields() {
     let message = json!({
-        "inbox_seq": "1", "kind": "message", "message_id": "msg-01J00000000000000000000000",
+        "inbox_seq": "1", "kind": "message", "woke": true, "message_id": "msg-01J00000000000000000000000",
         "event_seq": "5", "room_id": "room:launch", "room_kind": "topic", "sender_id": "agent-b",
         "body": "x", "reply_to": null, "wake": true, "mentions": [],
         "created_at": "2026-10-20T09:00:00.000Z", "thread_id": "t-1"
@@ -334,6 +343,8 @@ async fn inbox_all_pages_json_keeps_unknown_kinds_and_fields() {
     let rows = table(&text);
     assert_eq!(
         rows[1],
-        ["2", "reaction", "-", "-", "-", "-", "-", "-", "-", "-", "-"]
+        [
+            "2", "reaction", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"
+        ]
     );
 }

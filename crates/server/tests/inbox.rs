@@ -162,6 +162,7 @@ async fn snapshot_head_bounds_every_page_of_a_traversal() {
         BTreeSet::from([
             "inbox_seq",
             "kind",
+            "woke",
             "message_id",
             "event_seq",
             "room_id",

@@ -500,6 +500,86 @@ async fn a_mentioned_post_as_identity_gets_the_event_without_room_rights() {
     server.shutdown().await.unwrap();
 }
 
+/// `woke` (inbox only) is the sender's rule for this recipient:
+/// `recipient != sender && (wake || mentioned)`. A receiver's own
+/// `wake_policy = always` wakes it without making `woke` true.
+#[tokio::test]
+async fn inbox_items_say_whether_the_senders_rule_woke_the_recipient() {
+    let (fx, server, api) = start().await;
+    let a = api.register("agent-a", None).await;
+    let b = api.register("agent-b", None).await;
+    let c = api.register("agent-c", None).await;
+    let reply = api
+        .patch(
+            "/v1/agents/agent-c/receiver",
+            OWNER_TOKEN,
+            json!({"wake_policy": "always"}),
+        )
+        .await;
+    assert_eq!(reply.status.as_u16(), 200, "{}", reply.body);
+
+    /// `woke` of each agent's inbox item for `message`, in the given order.
+    async fn woke_of(api: &Api, agents: [&Registered; 3], message: &Value) -> Vec<Value> {
+        let mut values = Vec::new();
+        for agent in agents {
+            let page = api
+                .get("/v1/inbox?after_seq=0&limit=100", &agent.api_key)
+                .await;
+            let item = page.body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["message_id"] == message["message_id"])
+                .cloned()
+                .unwrap_or_else(|| panic!("no item for {message} in {}", page.body));
+            values.push(item["woke"].clone());
+        }
+        values
+    }
+    let agents = [&a, &b, &c];
+
+    let quiet = sent(
+        &api,
+        &a.api_key,
+        json!({"room_id": "all", "body": "fyi", "client_key": "k1", "wake": false}),
+    )
+    .await;
+    assert_eq!(
+        woke_of(&api, agents, &quiet).await,
+        [json!(false), json!(false), json!(false)],
+        "quiet: nobody by the sender's rule"
+    );
+    assert_eq!(
+        woken(&fx).await,
+        set(&["agent-c"]),
+        "always still wakes c, with woke=false"
+    );
+
+    let mention = sent(
+        &api,
+        &a.api_key,
+        json!({"room_id": "all", "body": "b?", "client_key": "k2", "wake": false, "mentions": ["agent-b"]}),
+    )
+    .await;
+    assert_eq!(
+        woke_of(&api, agents, &mention).await,
+        [json!(false), json!(true), json!(false)]
+    );
+
+    let loud = sent(
+        &api,
+        &a.api_key,
+        json!({"room_id": "all", "body": "all", "client_key": "k3"}),
+    )
+    .await;
+    assert_eq!(
+        woke_of(&api, agents, &loud).await,
+        [json!(false), json!(true), json!(true)],
+        "default wake: every recipient but the sender"
+    );
+    server.shutdown().await.unwrap();
+}
+
 // ---- item shapes --------------------------------------------------------------------
 
 #[tokio::test]
@@ -554,6 +634,7 @@ async fn inbox_and_history_items_carry_the_event_fields() {
         [
             "inbox_seq",
             "kind",
+            "woke",
             "message_id",
             "event_seq",
             "room_id",

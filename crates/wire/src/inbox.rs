@@ -17,9 +17,12 @@ pub const MESSAGE_KIND: &str = "message";
 /// What an inbox row records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboxEvent {
-    /// `kind = "message"`: the message's fields sit flat next to
-    /// `inbox_seq` and `kind`.
-    Message(Message),
+    /// `kind = "message"`: `woke`, then the message's fields flat next to
+    /// `inbox_seq` and `kind`. `woke` is per recipient: whether the
+    /// sender's rule (`wake` or a mention, never the sender itself) woke
+    /// this recipient. A recipient's own `wake_policy = always` does not
+    /// make it true, so history messages have no such field.
+    Message { woke: bool, message: Message },
     /// A `kind` this crate does not know (a later slice added it). Readers
     /// skip it and still move the read marker over it.
     Unknown { kind: String },
@@ -34,34 +37,43 @@ pub struct InboxItem {
 }
 
 impl InboxItem {
-    pub fn message(inbox_seq: Seq, message: Message) -> Self {
+    pub fn message(inbox_seq: Seq, woke: bool, message: Message) -> Self {
         Self {
             inbox_seq,
-            event: InboxEvent::Message(message),
+            event: InboxEvent::Message { woke, message },
         }
     }
 
     pub fn kind(&self) -> &str {
         match &self.event {
-            InboxEvent::Message(_) => MESSAGE_KIND,
+            InboxEvent::Message { .. } => MESSAGE_KIND,
             InboxEvent::Unknown { kind } => kind,
         }
     }
 
     pub fn as_message(&self) -> Option<&Message> {
         match &self.event {
-            InboxEvent::Message(message) => Some(message),
+            InboxEvent::Message { message, .. } => Some(message),
+            InboxEvent::Unknown { .. } => None,
+        }
+    }
+
+    /// `woke` of a message event; `None` for other kinds.
+    pub fn woke(&self) -> Option<bool> {
+        match &self.event {
+            InboxEvent::Message { woke, .. } => Some(*woke),
             InboxEvent::Unknown { .. } => None,
         }
     }
 }
 
-/// The serialized shape of a message event: `inbox_seq`, `kind`, then the
-/// ten message keys.
+/// The serialized shape of a message event: `inbox_seq`, `kind`, `woke`,
+/// then the ten message keys.
 #[derive(Serialize)]
 struct MessageEvent<'a> {
     inbox_seq: Seq,
     kind: &'static str,
+    woke: bool,
     #[serde(flatten)]
     message: &'a Message,
 }
@@ -75,9 +87,10 @@ struct UnknownEvent<'a> {
 impl Serialize for InboxItem {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match &self.event {
-            InboxEvent::Message(message) => MessageEvent {
+            InboxEvent::Message { woke, message } => MessageEvent {
                 inbox_seq: self.inbox_seq,
                 kind: MESSAGE_KIND,
+                woke: *woke,
                 message,
             }
             .serialize(serializer),
@@ -101,8 +114,9 @@ impl<'de> Deserialize<'de> for InboxItem {
                 event: InboxEvent::Unknown { kind },
             });
         }
+        let woke: bool = take(&mut fields, "woke")?;
         let message = Message::deserialize(Value::Object(fields)).map_err(D::Error::custom)?;
-        Ok(Self::message(inbox_seq, message))
+        Ok(Self::message(inbox_seq, woke, message))
     }
 }
 
@@ -161,6 +175,7 @@ mod tests {
             snapshot_head_seq: seq(44),
             items: vec![InboxItem::message(
                 seq(42),
+                true,
                 Message {
                     message_id: "msg-01J00000000000000000000000".parse().unwrap(),
                     event_seq: seq(42),
@@ -187,6 +202,7 @@ mod tests {
                 "items": [{
                     "inbox_seq": "42",
                     "kind": "message",
+                    "woke": true,
                     "message_id": "msg-01J00000000000000000000000",
                     "event_seq": "42",
                     "room_id": "all",

@@ -386,8 +386,9 @@ pub fn sent(response: &MessageResponse, client_key: &str) -> String {
     text
 }
 
-/// One row per inbox event. An event of a kind this CLI does not know
-/// shows only its sequence and kind.
+/// One row per inbox event. `WAKE` is the sender's choice, `WOKE` whether
+/// the sender's rule woke this recipient. An event of a kind this CLI does
+/// not know shows only its sequence and kind.
 fn inbox_table(items: &[InboxItem]) -> String {
     let mut table = Table::new(vec![
         "INBOX_SEQ",
@@ -398,6 +399,7 @@ fn inbox_table(items: &[InboxItem]) -> String {
         "CREATED_AT",
         "SENDER_ID",
         "WAKE",
+        "WOKE",
         "REPLY_TO",
         "MENTIONS",
         "BODY",
@@ -412,11 +414,12 @@ fn inbox_table(items: &[InboxItem]) -> String {
                 message.created_at.clone(),
                 message.sender_id.to_string(),
                 wake_cell(message.wake).to_owned(),
+                or_none(item.woke()),
                 or_none(message.reply_to.as_ref()),
                 id_list(&message.mentions),
                 escape_body(&message.body),
             ]),
-            None => row.extend(std::iter::repeat_n(NONE.to_owned(), 9)),
+            None => row.extend(std::iter::repeat_n(NONE.to_owned(), 10)),
         }
         table.push(row);
     }

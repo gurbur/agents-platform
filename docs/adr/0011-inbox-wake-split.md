@@ -25,6 +25,7 @@
 | inbox 수신자 R | 해석된 room의 `joined = 1` member **전원**(sender가 member면 sender 포함 — `all`의 지금 규칙을 DM·topic까지 넓힌다). 여기에 `mentions` 중 room member가 아닌 `[owner] post_as` identity(등록된 것)를 더한다. sender가 member가 아닌 owner 게시(끼어들기)에서는 sender의 행이 없다 |
 | inbox 행 | 사건 행이다: `kind`(지금은 `message` 하나, S16이 `reaction`을 더한다)와 `wake`(발신측이 고른 값). R의 모든 agent가 한 행씩 받고 `inbox_seq`가 오른다 |
 | `wake` | 송신 요청의 선택 boolean, 기본 `true`. 발신측의 의도를 그대로 저장하고 history·inbox item에 싣는다 |
+| `woke` | inbox item의 수신자별 boolean. item의 `wake`는 발신측 의도, `woke`는 그 수신자에 대한 결과다: 수신자 ≠ sender 이고 (`wake = true` 또는 지목됨). `wake_policy`는 반영하지 않는다. 저장은 `inbox_rows.woke`, history `Message`에는 없다. 실제 W = `woke` ∪ `wake_policy = always` |
 | `mentions` | 송신 요청의 선택 agent ID 배열(중복·자기 자신 금지, 상한 `MAX_MENTIONS`). 각 ID는 그 room의 `joined = 1` member이거나 등록된 `[owner] post_as` identity여야 한다(아니면 422 `mention_not_member`). 저장은 표 `message_mentions`, 응답은 ASCII 오름차순 |
 | 깨우는 집합 W | R − sender 중 `wake = true`이거나, `mentions`에 있거나, 자기 `wake_policy = always`인 agent, 그리고 **sender가 R에 있고 자기 `wake_policy = always`면 sender**. 이들만 delivery 전이(`pending`)를 받는다. `wake_policy = sender`인 sender는 자기 글로 절대 깨지 않는다(`wake`·`mentions`와 무관) |
 | `wake_policy` | receiver 설정의 `"sender"`(기본, 발신측이 고른 대로, 자기 글에는 깨지 않음) \| `"always"`(자기 글을 포함한 모든 inbox 행에 깨어남). `PATCH /v1/agents/{id}/receiver`로 바꾸고 route_version은 올리지 않는다. 바꾼 뒤 commit되는 사건부터 적용한다(이미 쌓인 조용한 행에 wake를 소급하지 않는다) |

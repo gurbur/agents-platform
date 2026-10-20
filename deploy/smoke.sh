@@ -440,6 +440,18 @@ head_of() {
   cli "$owner_token_file" delivery "$1" | jq -r .inbox_head_seq
 }
 
+# Whether AGENT's inbox item for MESSAGE_ID has `woke` WOKE (true|false):
+# the sender's rule for that recipient, never its own wake_policy (S13).
+item_woke_is() {
+  local agent="$1" message_id="$2" woke="$3" json
+  json="$(cli "$(token_file "$agent")" inbox --all-pages)" || return 1
+  jq -e --arg id "$message_id" --argjson woke "$woke" \
+    'any(.items[]; .message_id == $id and .woke == $woke)' >/dev/null <<<"$json" || {
+    note="$agent's item for $message_id does not have woke=$woke"
+    return 1
+  }
+}
+
 # Moves AGENT's marker to its head, so it owes no wake.
 ack_head() {
   local head
@@ -1023,13 +1035,15 @@ check_quiet_send() {
     return 1
   }
   expect_json "$json" '.wake == false' "quiet send output: $json" || return 1
+  item_woke_is "$agent_b" "$(jq -r .message_id <<<"$json")" false || return 1
   [[ "$(head_of "$agent_b")" == $((head + 1)) ]] || {
     note="the quiet row did not move $agent_b's head"
     return 1
   }
   stays_quiet "$agent_b" "$last" || return 1
-  cli "$key_a" send --to "$agent_b" --body "smoke wake" >/dev/null || return 1
+  json="$(cli "$key_a" send --to "$agent_b" --body "smoke wake")" || return 1
   wait_accepted "$agent_b" "$((head + 2))" || return 1
+  item_woke_is "$agent_b" "$(jq -r .message_id <<<"$json")" true || return 1
   note="head moved, idle for ${RECEIVER_WAIT_SECS}s, then 202 at $((head + 2))"
 }
 
@@ -1056,12 +1070,15 @@ check_mention_wake() {
   }
   last_c="$(delivery_field "$agent_c" last_accepted_seq)" || return 1
   head_b="$(head_of "$agent_b")" || return 1
-  cli "$key_a" send --room "$wake_room" --quiet --mention "$agent_b" --body "smoke b?" >/dev/null || {
+  local mentioned
+  mentioned="$(cli "$key_a" send --room "$wake_room" --quiet --mention "$agent_b" --body "smoke b?" |
+    jq -r .message_id)" || {
     note="quiet send with --mention failed: $(cli_error)"
     return 1
   }
   wait_accepted "$agent_b" "$((head_b + 1))" || return 1
   stays_quiet "$agent_c" "$last_c" || return 1
+  item_woke_is "$agent_b" "$mentioned" true && item_woke_is "$agent_c" "$mentioned" false || return 1
   api POST /v1/messages "$key_a" \
     "$(jq -nc --arg to "$agent_b" --arg c "$agent_c" '{to: $to, body: "x", client_key: "smoke-outsider", mentions: [$c]}')"
   expect_status 422 "mention of a non-member" || return 1
@@ -1085,8 +1102,11 @@ check_wake_policy_always() {
   ack_head "$agent_b" || return 1
   last_b="$(delivery_field "$agent_b" last_accepted_seq)" || return 1
   head_c="$(head_of "$agent_c")" || return 1
-  cli "$key_a" send --room "$wake_room" --quiet --body "smoke fyi" >/dev/null || return 1
+  local fyi
+  fyi="$(cli "$key_a" send --room "$wake_room" --quiet --body "smoke fyi" | jq -r .message_id)" || return 1
   wait_accepted "$agent_c" "$((head_c + 1))" || return 1
+  # Woken by its own wake_policy, not by the sender's rule.
+  item_woke_is "$agent_c" "$fyi" false || return 1
   stays_quiet "$agent_b" "$last_b" || return 1
   if [[ -z "$receiver_log" ]]; then
     note="$agent_c woken, $agent_b idle (wake body keys unchecked: no --receiver-log)"

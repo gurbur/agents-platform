@@ -783,7 +783,7 @@ async fn a_v4_database_gains_rooms_dm_memberships_and_event_columns() {
                     conn,
                     "SELECT room_id, agent_id, joined, epoch, effective_event_seq FROM memberships WHERE room_id <> 'all' ORDER BY room_id, agent_id",
                 )?,
-                select_all(conn, "SELECT DISTINCT kind, wake FROM inbox_rows")?,
+                select_all(conn, "SELECT DISTINCT kind, wake, woke FROM inbox_rows")?,
                 select_all(conn, "SELECT DISTINCT wake FROM messages")?,
                 select_all(conn, "SELECT DISTINCT wake_policy FROM agents")?,
                 select_all(conn, "SELECT * FROM message_mentions")?,
@@ -844,7 +844,15 @@ async fn a_v4_database_gains_rooms_dm_memberships_and_event_columns() {
         ],
         "only registered members"
     );
-    assert_eq!(inbox, [vec![text("message"), SqlValue::Integer(1)]]);
+    assert_eq!(
+        inbox,
+        [vec![
+            text("message"),
+            SqlValue::Integer(1),
+            SqlValue::Integer(1)
+        ]],
+        "every v4 row was a woken row"
+    );
     assert_eq!(messages, [vec![SqlValue::Integer(1)]]);
     assert_eq!(policies, [vec![text("sender")]]);
     assert!(mentions.is_empty());
@@ -865,6 +873,7 @@ async fn a_v4_database_gains_rooms_dm_memberships_and_event_columns() {
     let item = api.get("/v1/inbox?after_seq=0&limit=1", KEY_A).await;
     assert_eq!(item.body["items"][0]["kind"], "message");
     assert_eq!(item.body["items"][0]["wake"], true);
+    assert_eq!(item.body["items"][0]["woke"], true);
     assert_eq!(item.body["items"][0]["mentions"], json!([]));
     server.shutdown().await.unwrap();
 

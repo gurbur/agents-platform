@@ -188,7 +188,8 @@ CREATE INDEX messages_room_event ON messages(room_id, event_seq);
 
 /// v5 (S13): rooms as a table with `all` and every DM that has a message,
 /// a joined membership for each registered DM member, and event columns
-/// on messages, inbox rows and agents (ADR-0010, ADR-0011). One transaction,
+/// on messages, inbox rows and agents (ADR-0010, ADR-0011). Every v4 inbox
+/// row woke its recipient, so the backfill sets `woke = 1`. One transaction,
 /// no table rebuild; every v4 row stays. `agent_id` never contains `:`, so
 /// the prefix and suffix comparisons find DM members exactly (`LIKE` would
 /// treat `_` as a wildcard).
@@ -227,6 +228,8 @@ CREATE TABLE message_mentions (
 );
 ALTER TABLE inbox_rows ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';
 ALTER TABLE inbox_rows ADD COLUMN wake INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE inbox_rows ADD COLUMN woke INTEGER NOT NULL DEFAULT 0;
+UPDATE inbox_rows SET woke = 1;
 ALTER TABLE agents ADD COLUMN wake_policy TEXT NOT NULL DEFAULT 'sender';
 ";
 

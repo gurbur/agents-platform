@@ -283,17 +283,20 @@ fn authorize(
     }))
 }
 
-/// One inbox recipient and whether it is woken.
+/// One inbox recipient: `woke` is the sender's rule for it (stored on the
+/// row and shown in the inbox item), `woken` the actual wake set W, which
+/// adds the recipient's own `wake_policy = always`.
 struct Recipient {
     agent_id: AgentId,
+    woke: bool,
     woken: bool,
 }
 
 /// Step 17 and the sets R and W (`IF-WIRE-010`): R is every joined member
-/// plus mentioned registered `post_as` identities outside the room; W is R
-/// minus the sender, by `wake`, a mention or `wake_policy = always`. The
-/// sender's own row wakes it only under its own `wake_policy = always`.
-/// R is in ASCII order.
+/// plus mentioned registered `post_as` identities outside the room. `woke`
+/// is R minus the sender by `wake` or a mention; W is `woke` or the
+/// recipient's own `wake_policy = always`, so the sender's own row wakes it
+/// only under that policy. R is in ASCII order.
 fn recipients(
     conn: &Connection,
     command: &SendCommand,
@@ -315,12 +318,13 @@ fn recipients(
     let mut recipients = Vec::with_capacity(receivers.len());
     for agent_id in receivers {
         let always = wake_policy(conn, &agent_id)? == WakePolicy::Always;
-        let woken = if agent_id == command.sender {
-            always
-        } else {
-            command.wake || command.mentions.contains(&agent_id) || always
-        };
-        recipients.push(Recipient { agent_id, woken });
+        let woke =
+            agent_id != command.sender && (command.wake || command.mentions.contains(&agent_id));
+        recipients.push(Recipient {
+            agent_id,
+            woke,
+            woken: woke || always,
+        });
     }
     Ok(Ok(recipients))
 }
@@ -400,7 +404,7 @@ fn commit_new(
         )?;
     }
     for recipient in recipients {
-        append_inbox_row(tx, &recipient.agent_id, &message)?;
+        append_inbox_row(tx, recipient, &message)?;
     }
     let now = SystemTime::now();
     let mut woken = 0;
@@ -529,27 +533,29 @@ fn insert_message(tx: &Transaction, message: &Message) -> Result<(), StoreError>
     Ok(())
 }
 
-/// Issues the agent's next `inbox_seq` (its new `inbox_head`) and writes
-/// the message event row in the caller's transaction.
+/// Issues the recipient's next `inbox_seq` (its new `inbox_head`) and
+/// writes the message event row in the caller's transaction.
 fn append_inbox_row(
     tx: &Transaction,
-    agent_id: &AgentId,
+    recipient: &Recipient,
     message: &Message,
 ) -> Result<(), StoreError> {
+    let agent_id = &recipient.agent_id;
     let inbox_seq: i64 = tx.query_row(
         "UPDATE agents SET inbox_head = inbox_head + 1 WHERE agent_id = ?1 RETURNING inbox_head",
         params![agent_id.as_str()],
         |row| row.get(0),
     )?;
     tx.execute(
-        "INSERT INTO inbox_rows (agent_id, inbox_seq, message_id, kind, wake)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO inbox_rows (agent_id, inbox_seq, message_id, kind, wake, woke)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             agent_id.as_str(),
             inbox_seq,
             message.message_id.as_str(),
             MESSAGE_EVENT,
-            message.wake
+            message.wake,
+            recipient.woke
         ],
     )?;
     Ok(())

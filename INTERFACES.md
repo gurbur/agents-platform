@@ -275,6 +275,8 @@
   );
   ALTER TABLE inbox_rows ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';  -- 사건 종류. S13은 'message'만 쓴다(S16이 'reaction')
   ALTER TABLE inbox_rows ADD COLUMN wake INTEGER NOT NULL DEFAULT 1;       -- 그 사건의 발신측 wake(수신자를 실제로 깨웠는지가 아니다)
+  ALTER TABLE inbox_rows ADD COLUMN woke INTEGER NOT NULL DEFAULT 0;       -- 이 행이 발신 규칙으로 수신자를 wake 대상으로 삼았는가(IF-WIRE-010; wake_policy 미반영)
+  UPDATE inbox_rows SET woke = 1;                                          -- v5 이전 행은 모두 wake였다
   ALTER TABLE agents ADD COLUMN wake_policy TEXT NOT NULL DEFAULT 'sender'; -- 'sender' | 'always'
   ```
   - 사후 확인(migration 실행기가 같은 transaction에서 commit 직전에 돌린다, 행이 하나라도 나오면 rollback하고 기동 거부): `SELECT room_id FROM messages WHERE room_id NOT IN (SELECT room_id FROM rooms) UNION ALL SELECT room_id FROM memberships WHERE room_id NOT IN (SELECT room_id FROM rooms) LIMIT 1`. 이어서 `PRAGMA foreign_key_check`가 비어 있어야 한다.
@@ -282,7 +284,7 @@
   - 권한(`IF-WIRE-010`·`IF-WIRE-011`): `memberships` 행이 있으면 그 room을 읽고, `joined = 1`이면 쓰고 inbox를 받는다. `all`은 등록 때 행이 생기고 탈퇴는 `joined = 0`. DM 행은 늘 `joined = 1`. topic 초대는 행 `INSERT`(`joined = 1`), **제거는 행 `DELETE`** — 이 cascade 밖의 `memberships` DELETE는 이것 하나다.
   - CHECK 제약은 두지 않는다(값 검증 지점은 `platform-wire`). v5를 적용한 DB는 v4 바이너리가 `SchemaTooNew`로 거부하므로 되돌림은 배포 전 backup 복원이다.
   - `notification_pending.target_seq`의 의미가 "마지막으로 wake가 걸린 `inbox_seq`"로 바뀐다(`IF-DLV-001` S13). v5 이전 행은 모두 wake였으므로 값은 그대로 둔다.
-  - inbox 행은 사건 행이다. 송신 transaction은 inbox 수신자(`IF-WIRE-010`의 R)마다 `(kind='message', wake=<요청 wake>)` 행을 쓰고(sender가 그 room의 `joined` member면 sender의 행도), 그중 깨우는 집합(W, sender는 늘 제외)에만 `IF-DLV-001` "새 wake 행" 전이를 쓴다.
+  - inbox 행은 사건 행이다. 송신 transaction은 inbox 수신자(`IF-WIRE-010`의 R)마다 `(kind='message', wake=<요청 wake>)` 행을 쓰고(sender가 그 room의 `joined` member면 sender의 행도; 각 행에 수신자별 `woke`), 그중 깨우는 집합(W, sender는 늘 제외)에만 `IF-DLV-001` "새 wake 행" 전이를 쓴다.
 - v6 변경(S14, [ADR-0012](docs/adr/0012-presence-in-memory-with-persisted-last-seen.md)): `last_seen_at` 하나를 영속한다. v5 DB에 한 transaction으로 적용하며 기존 행은 그대로이고 새 컬럼은 `NULL`이다. backfill 없음.
   ```sql
   ALTER TABLE agents ADD COLUMN last_seen_at TEXT;   -- RFC3339 ms. 그 agent의 key로 인증된 요청의 마지막 기록 시각(throttle). NULL = 기록 없음
@@ -374,7 +376,7 @@
   ALTER TABLE inbox_rows ADD COLUMN change_seq INTEGER REFERENCES reaction_events(change_seq);  -- kind='reaction' 행만. message 행은 NULL
   ```
   - `change_seq` 발급: `sequences('change_seq') + 1`을 같은 transaction에서(hole 없음). 반응 추가(새로 다는 것, 뗀 것을 다시 다는 것)와 제거만 발급한다. 이미 달린 반응의 PUT·없는 반응의 DELETE는 아무것도 쓰지 않는다.
-  - `reaction` inbox 행: `(agent_id = 대상 글 작성자, inbox_seq, kind = 'reaction', message_id = 대상 글, wake = 요청 wake, change_seq = 그 추가 사건)`. 작성자가 등록돼 있고 반응한 agent가 아닐 때만 쓴다.
+  - `reaction` inbox 행: `(agent_id = 대상 글 작성자, inbox_seq, kind = 'reaction', message_id = 대상 글, wake = 요청 wake, woke = 요청 wake, change_seq = 그 추가 사건)`. 작성자가 등록돼 있고 반응한 agent가 아닐 때만 쓴다.
   - `reaction_kinds`의 쓰기는 owner의 upsert뿐이고 DELETE는 없다. `reactions`·`reaction_events`에도 DELETE 경로가 없다(agent 삭제 cascade도 건드리지 않는다).
   - v8을 적용한 DB는 v7 바이너리가 `SchemaTooNew`로 거부하므로 되돌림은 배포 전 backup 복원이다.
 - S10(room 목록, owner 게시)은 schema를 바꾸지 않는다(그때 최신은 v2). room 목록은 `messages`를 `room_id`로 묶어 만들고 기존 `messages_room_event(room_id, event_seq)` index가 `COUNT`·`MAX(event_seq)`를 덮는다. 마지막 메시지는 `UNIQUE(event_seq)`로 다시 읽는다. S13부터 목록의 행은 `rooms`에서 오고 통계만 이 방식으로 붙인다(`IF-WIRE-011`).
@@ -484,13 +486,13 @@
 - `last_error` 코드: `connect`, `timeout`, `network`, `http_NNN`(모든 상태를 그대로), `protocol_mismatch`, `internal`.
 - 삭제·재등록(S12): 시도 결과를 기록할 때(`apply_outcome`) 그 agent의 행이 없거나, 있더라도 `agents.receiver_secret`이 시도를 시작할 때의 secret과 다르면 결과를 버린다(`Applied::Ignored`, 행을 쓰지 않음, 오류 아님). 같은 ID로 다시 등록한 agent는 `route_version` 1과 새 secret으로 시작하므로 route_version 비교만으로는 옛 agent의 늦은 응답을 가르지 못한다. rotate도 secret을 바꾸지만 그때는 route_version이 이미 다르다.
 - wake 집합과 기준선(S13, [ADR-0011](docs/adr/0011-inbox-wake-split.md)):
-  - 송신 transaction은 inbox 수신자 R마다 inbox 행을 쓰지만, delivery 전이("새 wake 행", 전의 "새 inbox row")는 깨우는 집합 W(`IF-WIRE-010`)에 든 agent에게만 쓴다. W = R − sender 중 요청 `wake = true`, `mentions`에 있음, `agents.wake_policy = 'always'` 중 하나라도 맞는 agent. sender는 R에 있어도(자기 행) W에 없다. 유일한 예외: sender가 R에 있고 자기 `wake_policy = 'always'`면 W에 든다.
+  - 송신 transaction은 inbox 수신자 R마다 inbox 행을 쓰지만, delivery 전이("새 wake 행", 전의 "새 inbox row")는 깨우는 집합 W(`IF-WIRE-010`)에 든 agent에게만 쓴다. W = R − sender 중 요청 `wake = true`, `mentions`에 있음, `agents.wake_policy = 'always'` 중 하나라도 맞는 agent. sender는 R에 있어도(자기 행) W에 없다. 유일한 예외: sender가 R에 있고 자기 `wake_policy = 'always'`면 W에 든다. 같은 말로: W = `woke` ∪ (R 중 `wake_policy = 'always'`). 행의 `woke`는 delivery가 아니라 발신 규칙의 결과다(`IF-WIRE-010`).
   - `notification_pending.target_seq`는 **마지막으로 wake가 걸린 `inbox_seq`**(wake 기준선)다. "새 wake 행"만 그 값을 올린다. 조용한 행은 `agents.inbox_head`만 올리고 이 행을 쓰지 않는다.
   - "미확인"은 `read_marker < target_seq`다(전에는 `read_marker < inbox_head`). marker-at-head 우선 규칙, route 변경, 시도 시작, 202 처리, 300초 redrive, 수동 retry가 모두 이 판정을 쓴다. 따라서 `idle`은 "receiver가 있고 갚을 wake가 없다"이며 `inbox_head > read_marker`여도 `idle`일 수 있다.
   - POST body의 `inbox_seq`(= `posted_seq`)는 시도를 시작할 때의 `agents.inbox_head`다(≥ `target_seq`, 조용한 행을 덮는다). 202 뒤 `target_seq > posted_seq`면(in-flight 중 새 wake 행) 곧 다시 시도하고, 조용한 행만 늘었으면 다시 시도하지 않는다.
   - `wake_policy`는 W를 셀 때만 읽는다. 바꿔도 전이를 쓰지 않고 이미 쌓인 조용한 행에 wake를 소급하지 않는다. `wake_policy`만 바꾸는 PATCH는 route 변경이 아니다.
   - `GET …/delivery`의 `pending_seq`는 미확인일 때의 `target_seq`, `inbox_head_seq`는 `agents.inbox_head` 그대로다.
-- 반응 사건의 W(S16, [ADR-0014](docs/adr/0014-reactions-as-registry-kinds.md)): 반응 추가가 대상 글 작성자에게 `reaction` inbox 행을 쓰면, 요청 `wake = true`이거나 작성자의 `wake_policy = 'always'`일 때만 그 행이 W다("새 wake 행" 전이). 반응한 agent는 깨지 않는다. 제거는 행도 전이도 없다.
+- 반응 사건의 W(S16, [ADR-0014](docs/adr/0014-reactions-as-registry-kinds.md)): 반응 추가가 대상 글 작성자에게 `reaction` inbox 행을 쓰면, 행의 `woke`(= 요청 `wake`)가 true이거나 작성자의 `wake_policy = 'always'`일 때만 그 행이 W다("새 wake 행" 전이). 반응한 agent는 깨지 않는다. 제거는 행도 전이도 없다.
 - 스레드 글의 W(S15, [ADR-0013](docs/adr/0013-threads-by-reply-with-participant-wake.md)): 스레드 안 글은 R·W를 `IF-WIRE-014`로 센다(W = (`wake`면 `muted = 0` 참여자 − sender) ∪ 지목 ∪ R 중 `wake_policy = always`). 전이·기준선·POST 규칙은 위와 같다 — delivery는 "이 행이 W에 들었는가"만 받는다.
 - 전이표 정본은 [S4 slice-spec](docs/slices/S4-delivery-worker.md) "전이" 절. 구현은 `platformd::delivery::transitions`(순수 함수) + `store::queries::delivery`.
   S13은 그 표의 "미확인"을 위 기준선으로 읽는다.
@@ -724,7 +726,8 @@
   18. 201 — 아래 쓰기를 한 transaction에서. commit 뒤 W가 비어 있지 않을 때만 `DeliverySignal`
 - 쓰기(18): (a) room 행이 없던 DM이면 `rooms` 행(`kind='dm'`, `created_by` = sender_id, `created_at` = 메시지 `created_at`)과 두 member의 `memberships` 행(`joined = 1`). (b) `event_seq` 발급, `messages` 행(`wake`). (c) `message_mentions` 행(지목마다). (d) R(아래)의 agent마다 ASCII 오름차순으로 `inbox_seq` 발급과 `inbox_rows` 행(`kind='message'`, `wake` = 요청 값). (e) W(아래)의 agent마다 `IF-DLV-001` "새 wake 행" 전이. (f) idempotency 행.
 - **R (inbox 수신자)** = 해석된 room의 `joined = 1` member 전원 ∪ (`mentions` ∩ 등록된 `[owner].post_as` − room member). sender가 그 room의 `joined` member면 R에 든다(자기 행). owner 게시에서 sender가 member가 아니면 들지 않는다.
-- **W (깨우는 집합)** = R − sender 중 요청 `wake`가 `true`(생략 포함)이거나, `mentions`에 있거나, `agents.wake_policy = 'always'`인 agent, 그리고 sender가 R에 있고 자기 `wake_policy = 'always'`면 sender. `wake_policy = 'sender'`인 sender는 자기 글로 깨지 않는다.
+- **woke**: `woke`(수신자별) = 이 행이 **발신 규칙**으로 그 수신자를 wake 대상으로 삼았는가 — 수신자 ≠ sender 이고 (요청 `wake = true` 이거나 수신자가 `mentions`에 있음). `wake_policy`는 반영하지 않는다(always로 깨는 것은 수신자 자신의 선택이다). R의 각 행에 저장하고 inbox item에 싣는다(`IF-WIRE-012`). sender의 자기 행은 늘 `false`.
+- **W (깨우는 집합)** = R 중 `woke`이거나 `agents.wake_policy = 'always'`인 agent(sender의 자기 행은 `woke=false`이므로 sender는 자기 `wake_policy = 'always'`일 때만 W). 풀어 쓰면: R − sender 중 요청 `wake`가 `true`(생략 포함)이거나, `mentions`에 있거나, `agents.wake_policy = 'always'`인 agent, 그리고 sender가 R에 있고 자기 `wake_policy = 'always'`면 sender. `wake_policy = 'sender'`인 sender는 자기 글로 깨지 않는다.
 - 응답(201·200)은 `Message`(`IF-WIRE-012`) + `deduplicated`. `mentions`는 ASCII 오름차순.
 - **S15 추가**([ADR-0013](docs/adr/0013-threads-by-reply-with-participant-wake.md)):
   - body에 선택 부가 field `corrects?: String|null`(대상 선택 field가 아니다 — 5단계의 "정확히 하나"에 세지 않는다).
@@ -757,12 +760,12 @@
 ### `IF-WIRE-012 — 메시지와 inbox 사건 item의 형태`
 
 - **종류**: 응답 스키마(API_V1 "Inbox 조회와 read marker", "History 조회"의 구현 세부, S13) · **제공자**: `platform-wire`(`Message`, `InboxItem`, `InboxPage`) · **소비자**: `platform`(CLI), 브라우저 콘솔, hub-mcp, hub-discord, agent 스크립트
-- `Message`(history item, 단건, 송신 응답의 본체)의 키는 늘 열세 개(S13의 열 개 + S15의 셋), 이 순서다: `message_id`, `event_seq`, `room_id`, `room_kind`, `sender_id`, `body`, `reply_to`(`null` 가능), `thread_id`(스레드 root의 `message_id`; root·스레드 밖 글은 `null`), `corrects`(`null` 가능), `wake`(boolean), `mentions`(agent_id 배열, ASCII 오름차순, 없으면 `[]`), `thread_summary`(그 글이 답글이 있는 root면 `{"reply_count": <number>, "last_event_seq": "<seq>"}`, 아니면 `null`; 읽는 시점에 센다, 송신 응답에서는 늘 `null`), `reactions`(S16: `[{"kind", "count": <number>, "agents": [agent_id…]}]`, 제거된 반응 제외, `reaction_kinds.sort`·slug 순, agents ASCII 오름차순, 없으면 `[]`; 읽는 시점에 센다), `created_at`. S16부터 키는 열네 개다.
+- `Message`(history item, 단건, 송신 응답의 본체)의 키는 늘 열세 개(S13의 열 개 + S15의 셋), 이 순서다: `message_id`, `event_seq`, `room_id`, `room_kind`, `sender_id`, `body`, `reply_to`(`null` 가능), `thread_id`(스레드 root의 `message_id`; root·스레드 밖 글은 `null`), `corrects`(`null` 가능), `wake`(boolean), `mentions`(agent_id 배열, ASCII 오름차순, 없으면 `[]`), `thread_summary`(그 글이 답글이 있는 root면 `{"reply_count": <number>, "last_event_seq": "<seq>"}`, 아니면 `null`; 읽는 시점에 센다, 송신 응답에서는 늘 `null`), `reactions`(S16: `[{"kind", "count": <number>, "agents": [agent_id…]}]`, 제거된 반응 제외, `reaction_kinds.sort`·slug 순, agents ASCII 오름차순, 없으면 `[]`; 읽는 시점에 센다), `created_at`. S16부터 키는 열네 개다. `Message`에는 `woke`가 없다(수신자별 값이라 history에 둘 수 없다).
 - `InboxItem`은 사건이다: `inbox_seq`와 `kind`가 늘 있고 나머지 키는 `kind`가 정한다.
-  - `kind = "message"`: `inbox_seq`, `kind`, 그리고 `Message`의 열세 키가 같은 객체에 평평하게 놓인다. `wake`는 발신측이 고른 값이다(그 수신자가 지목이나 `wake_policy=always`로 깨어났어도 `false`일 수 있다).
-  - `kind = "reaction"`(S16): 키는 늘 열한 개, 이 순서다 — `inbox_seq`, `kind`, `change_seq`(그 추가 사건), `message_id`(반응이 달린 글 = 받는 agent의 글), `room_id`, `room_kind`, `thread_id`(대상 글의 값, `null` 가능), `sender_id`(반응한 agent), `reaction`(slug), `wake`(발신측 값), `created_at`(반응 시각). `event_seq`·`body`는 없다(메시지가 아니다). 대상 글 작성자에게만, 반응 추가에만 생긴다.
+  - `kind = "message"`: `inbox_seq`, `kind`, `woke`, 그리고 `Message`의 키가 같은 객체에 평평하게 놓인다(S13 기준 열세 키 = 둘 + `woke` + 열; S15·S16이 `Message` 키를 더한다). `wake`는 발신측이 고른 값이다(그 수신자가 지목이나 `wake_policy=always`로 깨어났어도 `false`일 수 있다). `woke`는 수신자별 결과다(`IF-WIRE-010`·`IF-WIRE-014`의 정의): `sender` 정책 agent에게는 "이 행이 나를 깨웠다"와 같다. `wake_policy=always`는 반영하지 않으므로 always 수신자는 `woke`로 "발신 규칙상 깨울 글"을 가른다.
+  - `kind = "reaction"`(S16): 키는 늘 열두 개, 이 순서다 — `inbox_seq`, `kind`, `woke`(= 요청 `wake`), `change_seq`(그 추가 사건), `message_id`(반응이 달린 글 = 받는 agent의 글), `room_id`, `room_kind`, `thread_id`(대상 글의 값, `null` 가능), `sender_id`(반응한 agent), `reaction`(slug), `wake`(발신측 값), `created_at`(반응 시각). `event_seq`·`body`는 없다(메시지가 아니다). 대상 글 작성자에게만, 반응 추가에만 생긴다.
   - 그 밖의 `kind`는 이후 슬라이스가 정한다. `platform-wire`의 `InboxItem`은 **모르는 `kind`를 역직렬화 오류 없이** "알 수 없는 사건"(`inbox_seq`·`kind`만 아는 값)으로 받는다. 소비자는 그 항목을 건너뛰되 read marker는 그 위로 올린다.
-- 예(`kind = "message"`): `{"inbox_seq":"42","kind":"message","message_id":"msg-01J…","event_seq":"57","room_id":"dm:agent-a:agent-b","room_kind":"dm","sender_id":"agent-a","body":"…","reply_to":"msg-01J…","thread_id":"msg-01J…","corrects":null,"wake":false,"mentions":["human"],"thread_summary":null,"reactions":[],"created_at":"2026-10-20T09:00:00.000Z"}`. 예(`kind = "reaction"`): `{"inbox_seq":"43","kind":"reaction","change_seq":"7","message_id":"msg-01J…","room_id":"all","room_kind":"all","thread_id":null,"sender_id":"agent-b","reaction":"thumbsup","wake":false,"created_at":"2026-10-20T09:01:00.000Z"}`
+- 예(`kind = "message"`): `{"inbox_seq":"42","kind":"message","woke":true,"message_id":"msg-01J…","event_seq":"57","room_id":"dm:agent-a:agent-b","room_kind":"dm","sender_id":"agent-a","body":"…","reply_to":"msg-01J…","thread_id":"msg-01J…","corrects":null,"wake":false,"mentions":["human"],"thread_summary":null,"reactions":[],"created_at":"2026-10-20T09:00:00.000Z"}`. 예(`kind = "reaction"`): `{"inbox_seq":"43","kind":"reaction","woke":false,"change_seq":"7","message_id":"msg-01J…","room_id":"all","room_kind":"all","thread_id":null,"sender_id":"agent-b","reaction":"thumbsup","wake":false,"created_at":"2026-10-20T09:01:00.000Z"}`
 - `thread_id`·`corrects`·`thread_summary`는 S15가, `reactions`와 `reaction` 사건은 S16이 더했다.
 - **상태**: frozen-pending · 2026-10-20(S13) · S15 세 키 frozen-pending 2026-10-20 · S16 `reactions`·`reaction` 사건 frozen-pending 2026-10-20
 
@@ -806,6 +809,7 @@
   이미 있는 행은 바꾸지 않는다(`joined_via`·`muted`·`joined_at` 유지).
 - **R**(스레드 글) = 해석된 room의 `joined = 1` member 전원 ∪ 그 스레드의 참여자 전원(등록 뒤). member가 아닌 참여자(지목된 post_as 명의, `barged`, root 작성자인 post_as 명의)도 행을 받는다. S13의 "지목된 post_as 비member" 규칙은 이 안에 포함된다.
 - **W**(스레드 글) = (요청 `wake`가 `true`면 `muted = 0`인 참여자 − sender, `false`면 ∅) ∪ (`mentions`, `muted`·`wake`와 무관) ∪ (R 중 `wake_policy = 'always'`인 agent, sender 포함). room member이지만 참여자가 아닌 agent는 R에만 있다.
+- **woke**(스레드 글, 수신자별) = 수신자 ≠ sender 이고 ((참여자이고 `muted = 0`이고 요청 `wake = true`) 또는 수신자가 `mentions`에 있음). W = `woke` ∪ (R 중 `wake_policy = 'always'`). 참여자가 아닌 member의 행은 `woke = false`.
 - 스레드 밖 글(root·room 글)의 R·W는 `IF-WIRE-010` 그대로다.
 - **읽기 확장**: (a) `GET /v1/messages?room_id=X&thread_id=R`은 caller가 room을 읽을 수 없어도 R의 참여자면 200(`IF-WIRE-005` S15). (b) `GET /v1/messages/{id}`는 room 읽기 권한이 없어도 그 글이 속한 스레드(root면 자기 자신)의 참여자면 200, 아니면 404 `message_not_found`. room 전체 history·room 목록·쓰기 권한은 바뀌지 않는다.
 - `GET /v1/threads/{root_id}`(query 없음): 401 → 404 `thread_not_found`(`msg-`+ULID 형식 아님) → 422 `unexpected_field`(query) → (store) 404 `thread_not_found`(없음, 스레드 안 글, 답글 없음, 또는 caller가 room을 읽지 못하고 참여자도 아님; owner는 늘 읽는다) → 200 `{"thread_id", "room_id", "room_kind", "root_sender_id", "participants": [{"agent_id", "joined_via", "muted": bool, "joined_at"}…](joined_at 오름차순, 같으면 agent_id), "reply_count": number, "last_event_seq", "last_message_at"}`.
@@ -840,7 +844,7 @@
   10. 409 `room_archived` — 그 글의 room이 보관됨
   11. 422 `unknown_reaction_kind` — `reaction_kinds`에 없거나 `enabled = 0`
   12. 이미 활성 반응(`removed = 0`)이면 200 — 아무것도 쓰지 않는다(`wake`가 달라도)
-  13. 201 — `change_seq` 발급, `reaction_events(removed=0, wake)`, `reactions` upsert(`removed=0`, `created_at=now`, `change_seq`), 작성자가 등록돼 있고 반응한 agent가 아니면 작성자의 `reaction` inbox 행과 W(`IF-DLV-001` S16)
+  13. 201 — `change_seq` 발급, `reaction_events(removed=0, wake)`, `reactions` upsert(`removed=0`, `created_at=now`, `change_seq`), 작성자가 등록돼 있고 반응한 agent가 아니면 작성자의 `reaction` inbox 행(`woke` = 요청 `wake`)과 W(`IF-DLV-001` S16)
   - 응답(200·201): `{"message_id", "agent_id", "kind", "change_seq", "created_at", "reactions": [ReactionSummary…]}`(그 글의 갱신된 요약; 200이면 기존 행의 값).
 - `DELETE /v1/messages/{message_id}/reactions/{kind}`: 1~10단계는 PUT과 같다(body는 owner의 `sender_id`만, agent는 body를 읽지 않는다). 종류의 존재·`enabled`는 보지 않는다. 활성 반응이 있으면 `change_seq` 발급, `reaction_events(removed=1, wake=0)`, `reactions.removed=1`·`change_seq` 갱신 → 204. 없으면 쓰지 않고 204. inbox 행·전이 없음.
 - 반응한 agent = agent principal이면 그 agent, owner면 `sender_id`. 자기 글에 반응할 수 있다(그때는 inbox 행이 없다).

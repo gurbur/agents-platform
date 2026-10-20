@@ -68,7 +68,7 @@ pub fn page(conn: &Connection, query: &InboxQuery) -> Result<Option<InboxSlice>,
 
     let fetch = i64::from(query.limit) + 1;
     let mut statement = conn.prepare(&format!(
-        "SELECT r.inbox_seq, r.kind, {MESSAGE_COLUMNS}
+        "SELECT r.inbox_seq, r.kind, r.woke, {MESSAGE_COLUMNS}
          FROM inbox_rows r JOIN messages m ON m.message_id = r.message_id
          WHERE r.agent_id = ?1 AND r.inbox_seq > ?2 AND r.inbox_seq <= ?3
          ORDER BY r.inbox_seq ASC
@@ -147,6 +147,7 @@ fn cursor(conn: &Connection, agent_id: &AgentId) -> Result<Option<Cursor>, Store
 struct StoredItem {
     inbox_seq: i64,
     kind: String,
+    woke: bool,
     message: StoredMessage,
 }
 
@@ -155,7 +156,8 @@ impl StoredItem {
         Ok(Self {
             inbox_seq: row.get(0)?,
             kind: row.get(1)?,
-            message: StoredMessage::from_row(row, 2)?,
+            woke: row.get(2)?,
+            message: StoredMessage::from_row(row, 3)?,
         })
     }
 
@@ -168,6 +170,7 @@ impl StoredItem {
         }
         Ok(InboxItem::message(
             stored_seq(self.inbox_seq, "inbox_rows.inbox_seq")?,
+            self.woke,
             self.message.into_message()?,
         ))
     }

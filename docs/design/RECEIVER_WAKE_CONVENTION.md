@@ -165,7 +165,7 @@ endpoint가 null이었다가 다시 설정되면 갚을 wake가 있을 때 최�
 
 `GET /v1/inbox?after_seq=17`은 17보다 큰 보존 메시지를 조회한다.
 
-항목은 사건이며 `kind`, `room_id`, `room_kind`, `reply_to`, `wake`, `mentions` 같은 필드를 가진다. 정확한 모양은 [API_V1.md](./API_V1.md#inbox-조회와-read-marker)가 정본이다. 소비자는 모르는 `kind`나 필드를 만나면 그 항목을 건너뛰되 멈추지 않고, 그 위로 read marker를 올린다.
+항목은 사건이며 `kind`, `room_id`, `room_kind`, `reply_to`, `wake`, `woke`, `mentions` 같은 필드를 가진다. `woke`는 그 항목이 발신 규칙으로 나를 깨울 대상이었는지(수신자별, `wake_policy` 미반영)이므로, 깨어난 소비자는 `woke`로 깨운 항목과 조용한 항목을 가른다. 정확한 모양은 [API_V1.md](./API_V1.md#inbox-조회와-read-marker)가 정본이다. 소비자는 모르는 `kind`나 필드를 만나면 그 항목을 건너뛰되 멈추지 않고, 그 위로 read marker를 올린다.
 
 GET은 수신함, read marker, browser cursor를 변경하지 않는다. 조회 결과의 prefix를 확인한 주체만 별도의 read marker API를 호출할 수 있다. 페이지 경계의 `snapshot_head_seq`, `until_seq`, `next_after_seq` 규칙은 [API_V1.md의 GET /v1/inbox snapshot pagination 정본](./API_V1.md#inbox-조회와-read-marker)을 따른다.
 

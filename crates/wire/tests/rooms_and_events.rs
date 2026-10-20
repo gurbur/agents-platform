@@ -216,21 +216,29 @@ fn a_message_has_ten_keys_in_order_and_keeps_nulls_and_empty_mentions() {
 
 #[test]
 fn a_message_event_is_flat_and_round_trips() {
-    let item = InboxItem::message(Seq::new(42).unwrap(), sample_message());
+    let item = InboxItem::message(Seq::new(42).unwrap(), true, sample_message());
     let value = serde_json::to_value(&item).unwrap();
     assert_eq!(
         value,
-        json!({"inbox_seq": "42", "kind": "message", "message_id": "msg-01J00000000000000000000000",
+        json!({"inbox_seq": "42", "kind": "message", "woke": true, "message_id": "msg-01J00000000000000000000000",
                "event_seq": "57", "room_id": "dm:agent-a:agent-b", "room_kind": "dm",
                "sender_id": "agent-a", "body": "…", "reply_to": null, "wake": false,
                "mentions": ["human"], "created_at": "2026-10-20T09:00:00.000Z"})
     );
     let order = ordered_keys(&serde_json::to_string(&item).unwrap());
-    assert_eq!(order[..3], ["inbox_seq", "kind", "message_id"]);
-    assert_eq!(order.len(), 12);
+    assert_eq!(order[..4], ["inbox_seq", "kind", "woke", "message_id"]);
+    assert_eq!(order.len(), 13);
     let back: InboxItem = serde_json::from_value(value).unwrap();
     assert_eq!(back, item);
     assert_eq!(back.kind(), "message");
+    assert_eq!(back.woke(), Some(true));
+    // `woke` is per recipient: a history message never carries it.
+    let history = serde_json::to_value(sample_message()).unwrap();
+    assert!(history.get("woke").is_none());
+    // A message event without `woke` is malformed.
+    let mut missing = serde_json::to_value(&item).unwrap();
+    missing.as_object_mut().unwrap().remove("woke");
+    assert!(serde_json::from_value::<InboxItem>(missing).is_err());
     assert_eq!(back.as_message(), Some(&sample_message()));
 }
 
@@ -245,8 +253,12 @@ fn an_unknown_event_kind_is_accepted_not_an_error() {
     assert_eq!(item.kind(), "reaction");
     assert_eq!(item.as_message(), None);
     // A known kind with an extra field still reads.
-    let mut extended =
-        serde_json::to_value(InboxItem::message(Seq::new(1).unwrap(), sample_message())).unwrap();
+    let mut extended = serde_json::to_value(InboxItem::message(
+        Seq::new(1).unwrap(),
+        false,
+        sample_message(),
+    ))
+    .unwrap();
     extended["thread_id"] = json!("t-1");
     assert!(serde_json::from_value::<InboxItem>(extended).is_ok());
     // Without its sequence or kind an item is still malformed.

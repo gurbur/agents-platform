@@ -58,7 +58,7 @@ S13·S14 공지의 선택 항목 끝(S14의 11번 뒤)에 그대로 붙여 보�
 - [ ] **history query**(`IF-WIRE-005` S15 순서): `thread_id` 형식 422, 그 room의 스레드가 아니면(없음·답글 없음·스레드 안 글·다른 room) 404 `thread_not_found`, `top_level` 값(`true`·`false`만) 422, 둘 함께 422 `invalid_field`, 커서·`q`와 조합, 기본은 전부, `thread_summary`(root+답글 있음만, 개수·마지막 seq 정확).
 - [ ] **스레드 endpoint**(`IF-WIRE-014` 각 단계): `GET` 200 모양·참여자 순서·`reply_count`, 못 읽는 agent 404, 답글 없는 root 404, 스레드 안 글 id 404. `PUT participation`: 본인 200·값 같으면 no-op 200, 비참여자 404, owner의 `agent_id` 누락 422·post_as 밖 403·비참여 404, agent의 `agent_id` 키 422 `unexpected_field`, `wake` 타입 422.
 - [ ] **정정**(`IF-WIRE-015`): 자기 글 201·`corrects` 값, 남의 글 422 `corrects_not_own`, 다른 room 422 `corrects_room_mismatch`, 없음 404 `corrects_not_found`, 형식 422 `invalid_field`, owner 게시 명의의 자기 글 정정 201, 정정 글이 스레드에 자동으로 들어가지 않음(`reply_to`를 주면 들어감), 해시: `corrects`가 다르면 409·없는 요청의 해시는 S14 그대로(기존 key 재전송 200).
-- [ ] **item 모양**: inbox·history·단건·송신 응답의 `Message` 열세 키 순서(`IF-WIRE-012`), `null` 생략 없음.
+- [ ] **item 모양**: inbox·history·단건·송신 응답의 `Message` 열세 키 순서(`IF-WIRE-012`), `null` 생략 없음. 스레드 글 inbox item의 `woke`(`IF-WIRE-014`): 깨운 참여자·지목된 agent는 `true`, 비참여 member·mute한 참여자(지목 없음)·sender는 `false`.
 - [ ] **삭제**: 참여자를 지우면 `thread_participants` 행이 사라지고 재등록 agent는 참여자가 아니다. 그 agent의 글은 남는다.
 - [ ] **로그**: body·note·mentions 값 없음, participation 로그는 ID와 `muted`만.
 - [ ] **CLI**: `send --corrects` body·단독 사용 exit 2, `thread show|mute|unmute` 출력·`--json`·exit code(비참여 exit 1 `thread_not_found`), `history --thread|--top-level`·둘 다 exit 2, inbox·history 새 열.
