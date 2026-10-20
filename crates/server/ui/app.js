@@ -25,6 +25,16 @@
 // state in words, the busy note as text, and for offline agents how long
 // ago their key was last seen. No new endpoint, polling or storage; the
 // delivery pill stays a separate, owner-only signal.
+//
+// Slice S15 folds threads: the room timeline reads top-level messages
+// (`top_level=true`) and shows "답글 n개 ›" under a root; new replies come
+// from the same feed poll (every message after the cursor) and are folded
+// into their root by `thread_id`. Replying (button or swipe) opens the
+// thread panel, which reads `thread_id=<root>` and answers with `reply_to`
+// only: the quoted message, or else the thread's last message. "나" may
+// mute a thread it takes part in. A correction is a new message with
+// `corrects` (own messages only), marked on both sides. No new timer or
+// storage.
 
 const TOKEN_STORAGE_KEY = 'agents-platform.owner-token';
 const PREF_STYLE = 'agents-console-style';
@@ -42,6 +52,8 @@ const INBOX_PAGE_SIZE = 20;
 const OLDER_TRIGGER_PX = 120;
 const BOTTOM_SLACK_PX = 48;
 const MAX_POLL_PAGES = 5;
+// The thread panel reads up to this many messages per page (the hub's max).
+const THREAD_PAGE_SIZE = 100;
 const MAX_JUMP_PAGES = 10;
 const SNIPPET_CONCURRENCY = 4;
 // Swipe-left-to-reply on touch: the drag claims the gesture at SWIPE_CLAIM_PX
@@ -78,12 +90,15 @@ const API = Object.freeze({
   delivery: (agentId) => `/v1/agents/${encodeURIComponent(agentId)}/delivery`,
   retry: (agentId) => `/v1/agents/${encodeURIComponent(agentId)}/delivery/retry`,
   inbox: (agentId) => `/v1/agents/${encodeURIComponent(agentId)}/inbox`,
+  thread: (rootId) => `/v1/threads/${encodeURIComponent(rootId)}`,
+  participation: (rootId) => `/v1/threads/${encodeURIComponent(rootId)}/participation`,
 });
 
 const GENDER_LABEL = { female: '여성형', male: '남성형', none: '없음' };
 const AGE_LABEL = { child: '어린이', teen: '10대', '20s': '20대', '30s_40s': '30~40대', '50s_plus': '50대 이상', none: '없음' };
 const STATE_LABEL = { idle: 'idle', pending: 'pending', blocked: 'blocked' };
 const PRESENCE_LABEL = { online: '온라인', busy: '바쁨', offline: '오프라인' };
+const JOINED_LABEL = { root: '시작한 사람', opener: '첫 답글', poster: '답글', mentioned: '지목됨', barged: '끼어듦' };
 const NEVER_SEEN = '본 적 없음';
 const NONE_TEXT = '—';
 
@@ -111,7 +126,12 @@ const S = {
   pollBusy: false,
   newFrom: null,
   q: '',
-  replyTo: null,
+  // The highest event_seq of a reply the feed poll folded into a root.
+  foldedSeq: '0',
+  // The open thread panel (see openThread), or null.
+  thread: null,
+  // The message the room composer is correcting, or null.
+  correcting: null,
   expanded: new Set(),
   quotes: new Map(),
   style: 'bubble',
@@ -175,6 +195,7 @@ const ICONS = {
   back: [['path', { d: 'M15 18l-6-6 6-6' }]],
   logout: [['path', { d: 'M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3' }], ['path', { d: 'M10 17l-5-5 5-5M5 12h11' }]],
   topic: [['path', { d: 'M3 5h12v8H8l-5 3z' }], ['path', { d: 'M18 9h3v11l-4-3h-6v-1' }]],
+  fix: [['path', { d: 'M4 20h4L19 9l-4-4L4 16z' }], ['path', { d: 'M13 7l4 4' }]],
 };
 
 function icon(name) {
@@ -622,7 +643,7 @@ function renderTop() {
     glyph ? icon(glyph) : roomIcon(room, 28),
     h('b', { text: roomTitle(room) }),
     h('span', { class: 'sub', text: sub }));
-  $('infoBtn').classList.toggle('on', !app.classList.contains('info-off'));
+  $('infoBtn').classList.toggle('on', !app.classList.contains('info-off') && !S.thread);
 }
 
 function renderStyle() {
@@ -650,10 +671,12 @@ function renderMe() {
 // -------------------------------------------------------------------- feed
 
 const feed = $('feed');
+const threadFeed = $('threadFeed');
 const findMessage = (id) => S.msgs.find((message) => message.message_id === id) || null;
+const findThreadMessage = (id) => (S.thread && S.thread.msgs.find((message) => message.message_id === id)) || null;
 
 function quoteTarget(id) {
-  const loaded = findMessage(id);
+  const loaded = findMessage(id) || findThreadMessage(id);
   if (loaded) return loaded;
   const cached = S.quotes.get(id);
   if (cached) return cached;
@@ -696,10 +719,16 @@ function textBody(message) {
   ];
 }
 
-function actions(message) {
+// The hover menu (and long press) of a message: answer it, and correct it
+// when "나" wrote it. `where` is 'feed' or 'thread', the list it is in.
+function actions(message, where) {
   if (!canWrite()) return null;
+  const prefix = where === 'thread' ? 'thread-' : '';
   return h('div', { class: 'actions' },
-    h('button', { data: { act: 'reply', k: message.message_id } }, icon('reply'), '답장'));
+    h('button', { data: { act: `${prefix}reply`, k: message.message_id } }, icon('reply'), '답장'),
+    message.sender_id === S.me
+      ? h('button', { data: { act: `${prefix}correct`, k: message.message_id } }, icon('fix'), '정정')
+      : null);
 }
 
 function isBargeIn(message, room) {
@@ -712,15 +741,55 @@ function quoteParts(target) {
   return { who: nameOf(target.sender_id), text: firstLine(target.body), sender: target.sender_id };
 }
 
-function flatMessage(item, room) {
+// Every message on screen (timeline and thread panel) that corrects
+// another, by the corrected message's id.
+function correctionsOnScreen() {
+  const found = new Map();
+  const shown = S.msgs.concat(S.thread ? S.thread.msgs : []);
+  for (const message of shown) {
+    if (message.corrects && !found.has(message.corrects)) found.set(message.corrects, message.message_id);
+  }
+  return found;
+}
+
+// A quote is shown for a reply to anything but the thread's root, which
+// the thread panel already shows on top.
+function quoteOf(message, where) {
+  if (!message.reply_to) return null;
+  if (where === 'thread' && S.thread && message.reply_to === S.thread.root) return null;
+  return quoteParts(quoteTarget(message.reply_to));
+}
+
+// The correction marks of a message: "정정" with a way to the original,
+// and "정정됨 → 보기" on an original whose correction is on screen.
+function correctionMarks(message, corrections) {
+  const marks = [];
+  if (message.corrects) {
+    marks.push(h('span', { class: 'tag', text: '정정' }),
+      h('button', { class: 'fixlink', data: { act: 'jump', k: message.corrects }, text: '원 글 보기' }));
+  }
+  const fixedBy = corrections.get(message.message_id);
+  if (fixedBy) marks.push(h('button', { class: 'fixlink', data: { act: 'jump', k: fixedBy }, text: '정정됨 → 보기' }));
+  return marks.length > 0 ? h('div', { class: 'fix' }, marks) : null;
+}
+
+// "답글 n개 ›" under a root of the timeline.
+function repliesButton(message, where) {
+  const summary = message.thread_summary;
+  if (where !== 'feed' || !summary || summary.reply_count === 0) return null;
+  return h('button', { class: 'replies', data: { act: 'thread', k: message.message_id }, text: `답글 ${summary.reply_count}개 ›` });
+}
+
+function flatMessage(item, room, where, corrections) {
   const message = item.message;
-  const quote = message.reply_to ? quoteParts(quoteTarget(message.reply_to)) : null;
+  const quote = quoteOf(message, where);
   const date = new Date(message.created_at);
   const nodes = [];
   if (quote) {
     nodes.push(h('button', { class: 'quote', data: { act: 'jump', k: message.reply_to } },
       quote.sender ? av(quote.sender, 16) : null, quote.who ? h('b', { text: quote.who }) : null, h('span', { text: quote.text })));
   }
+  const content = [correctionMarks(message, corrections), textBody(message), repliesButton(message, where)];
   if (item.head) {
     const name = h('span', { class: 'name', text: nameOf(message.sender_id), bg: null });
     name.style.color = colorOf(message.sender_id);
@@ -728,31 +797,67 @@ function flatMessage(item, room) {
       h('div', { class: 'meta' }, name,
         isBargeIn(message, room) ? h('span', { class: 'tag', text: '끼어듦' }) : null,
         h('time', { datetime: message.created_at, text: clock(date) })),
-      textBody(message)));
+      content));
   } else {
-    nodes.push(h('span', { class: 'gut', text: shortClock(date) }), h('div', null, textBody(message)));
+    nodes.push(h('span', { class: 'gut', text: shortClock(date) }), h('div', null, content));
   }
-  nodes.push(actions(message));
-  return h('div', { class: `msg${item.head ? ' head' : ''}`, id: `m-${message.message_id}` }, nodes);
+  nodes.push(actions(message, where));
+  return h('div', { class: `msg${item.head ? ' head' : ''}`, id: rowId(where, message.message_id) }, nodes);
 }
 
-function bubbleMessage(item, room) {
+function bubbleMessage(item, room, where, corrections) {
   const message = item.message;
   const mine = message.sender_id === S.me;
-  const quote = message.reply_to ? quoteParts(quoteTarget(message.reply_to)) : null;
+  const quote = quoteOf(message, where);
   const bq = quote ? h('button', { class: 'bq', data: { act: 'jump', k: message.reply_to } },
     quote.who ? h('b', { text: quote.who }) : null, h('span', { text: quote.text })) : null;
   let top = null;
   if (item.head && mine && isBargeIn(message, room)) top = h('div', { class: 'b-name' }, h('span', { class: 'tag', text: '끼어듦' }));
   if (item.head && !mine) top = h('div', { class: 'b-name', text: nameOf(message.sender_id) });
   const classes = ['b-row', mine ? 'mine' : 'other', item.head ? 'head' : '', item.tail ? 'tail' : ''].filter(Boolean).join(' ');
-  return h('div', { class: classes, id: `m-${message.message_id}` },
+  return h('div', { class: classes, id: rowId(where, message.message_id) },
     mine ? null : h('div', { class: 'b-av' }, item.head ? av(message.sender_id, 36) : null),
     h('div', { class: 'b-col' }, top,
       h('div', { class: 'b-line' },
-        h('div', { class: 'bubble' }, bq, textBody(message)),
+        h('div', { class: 'bubble' }, bq, correctionMarks(message, corrections), textBody(message)),
         item.tail ? h('time', { class: 'b-time', datetime: message.created_at, text: clock(new Date(message.created_at)) }) : null,
-        actions(message))));
+        actions(message, where)),
+      repliesButton(message, where)));
+}
+
+// Timeline rows are `m-<id>`, thread panel rows `t-<id>`.
+const rowId = (where, id) => `${where === 'thread' ? 't' : 'm'}-${id}`;
+
+// The day separators, "새 메시지" mark and message rows of `messages`
+// (oldest first) for the timeline or the thread panel.
+function messageNodes(messages, room, where) {
+  const bubble = S.style === 'bubble';
+  const corrections = correctionsOnScreen();
+  const items = messages.map((message) => ({ message, date: new Date(message.created_at) }));
+  // The panel shows the root on top, apart from its replies, once loaded.
+  const rootFirst = where === 'thread' && messages.length > 0 && messages[0].message_id === S.thread.root;
+  const firstReply = (index) => rootFirst && index === 1;
+  items.forEach((item, index) => {
+    const previous = items[index - 1];
+    item.day = !previous || dayKey(previous.date) !== dayKey(item.date);
+    item.fresh = where === 'feed' && !S.q && S.newFrom === item.message.message_id;
+    // In the bubble style the quote sits inside the bubble, so a reply does
+    // not break a group. The thread's root stands apart from its replies.
+    item.head = item.day || item.fresh || previous.message.sender_id !== item.message.sender_id
+      || (Boolean(quoteOf(item.message, where)) && !bubble) || item.date - previous.date > GROUP_GAP_MS
+      || firstReply(index);
+  });
+  items.forEach((item, index) => {
+    item.tail = !items[index + 1] || items[index + 1].head;
+  });
+  const nodes = [];
+  items.forEach((item, index) => {
+    if (firstReply(index)) nodes.push(h('div', { class: 'day' }, h('span', { text: `답글 ${items.length - 1}개` })));
+    else if (item.day) nodes.push(h('div', { class: 'day' }, h('span', { text: dayLabel(item.date) })));
+    if (item.fresh) nodes.push(h('div', { class: 'newmark', text: '새 메시지' }));
+    nodes.push(bubble ? bubbleMessage(item, room, where, corrections) : flatMessage(item, room, where, corrections));
+  });
+  return nodes;
 }
 
 function renderFeed() {
@@ -773,36 +878,18 @@ function renderFeed() {
     feed.replaceChildren(h('div', { class: 'empty', text: S.q ? `“${S.q}”와 맞는 메시지가 없습니다` : '아직 메시지가 없습니다' }));
     return;
   }
-  const bubble = S.style === 'bubble';
-  const items = S.msgs.map((message) => ({ message, date: new Date(message.created_at) }));
-  items.forEach((item, index) => {
-    const previous = items[index - 1];
-    item.day = !previous || dayKey(previous.date) !== dayKey(item.date);
-    item.fresh = !S.q && S.newFrom === item.message.message_id;
-    // In the bubble style the quote sits inside the bubble, so a reply does
-    // not break a group.
-    item.head = item.day || item.fresh || previous.message.sender_id !== item.message.sender_id
-      || (Boolean(item.message.reply_to) && !bubble) || item.date - previous.date > GROUP_GAP_MS;
-  });
-  items.forEach((item, index) => {
-    item.tail = !items[index + 1] || items[index + 1].head;
-  });
   const nodes = [];
   if (S.hasOlder) nodes.push(h('div', { class: 'older', text: S.olderBusy ? '이전 메시지를 불러오는 중…' : '위로 스크롤하면 이전 메시지를 불러옵니다' }));
-  for (const item of items) {
-    if (item.day) nodes.push(h('div', { class: 'day' }, h('span', { text: dayLabel(item.date) })));
-    if (item.fresh) nodes.push(h('div', { class: 'newmark', text: '새 메시지' }));
-    nodes.push(bubble ? bubbleMessage(item, room) : flatMessage(item, room));
-  }
+  nodes.push(...messageNodes(S.msgs, room, 'feed'));
   feed.replaceChildren(...nodes);
-  unfoldShortTexts();
+  unfoldShortTexts(feed);
 }
 
 // A folded text that fits in the clamp needs no "더 보기".
-function unfoldShortTexts() {
-  // A hidden feed (the phone's room list) has no layout to measure.
-  if (feed.clientHeight === 0) return;
-  for (const text of feed.querySelectorAll('.text.clamp')) {
+function unfoldShortTexts(list) {
+  // A hidden list (the phone's room list) has no layout to measure.
+  if (list.clientHeight === 0) return;
+  for (const text of list.querySelectorAll('.text.clamp')) {
     if (text.scrollHeight - text.clientHeight > 1) continue;
     text.classList.remove('clamp');
     const more = text.nextElementSibling;
@@ -838,8 +925,38 @@ function mergeMessages(items) {
   return fresh.length;
 }
 
+// Folds replies into their roots on the timeline: a reply newer than the
+// root's summary raises its count (the summary the hub sent already holds
+// the older ones), and a reply of the open thread joins the panel.
+// Returns whether the timeline and the panel changed.
+function foldReplies(replies) {
+  let feedChanged = false;
+  let threadChanged = false;
+  for (const reply of replies) {
+    if (seqNum(reply.event_seq) > seqNum(S.foldedSeq)) S.foldedSeq = reply.event_seq;
+    rememberSnippet(reply);
+    const root = findMessage(reply.thread_id);
+    const summary = root && root.thread_summary;
+    if (root && (!summary || seqNum(reply.event_seq) > seqNum(summary.last_event_seq))) {
+      root.thread_summary = { reply_count: (summary ? summary.reply_count : 0) + 1, last_event_seq: reply.event_seq };
+      feedChanged = true;
+    }
+    if (S.thread && S.thread.root === reply.thread_id && addThreadMessage(reply)) threadChanged = true;
+  }
+  return { feedChanged, threadChanged };
+}
+
+// New messages of the room, wherever they belong: top-level ones join the
+// timeline, replies fold into their roots.
+function absorb(messages) {
+  const added = mergeMessages(messages.filter((message) => !message.thread_id));
+  const folded = foldReplies(messages.filter((message) => message.thread_id));
+  return { feedChanged: added > 0 || folded.feedChanged, threadChanged: folded.threadChanged };
+}
+
+// The timeline holds top-level messages only (S15).
 function historyParams(extra) {
-  return Object.assign({ room_id: S.room, q: S.q || null }, extra);
+  return Object.assign({ room_id: S.room, top_level: 'true', q: S.q || null }, extra);
 }
 
 async function loadFeed() {
@@ -882,22 +999,31 @@ async function loadOlder() {
   }
 }
 
+// The poll's cursor: past the newest top-level message and every folded
+// reply.
 function newestSeq() {
   const last = S.msgs[S.msgs.length - 1];
-  return last ? last.event_seq : '0';
+  const top = last ? last.event_seq : '0';
+  return seqNum(S.foldedSeq) > seqNum(top) ? S.foldedSeq : top;
 }
 
 async function pollFeed() {
   if (!S.token || !S.room || !S.feedLoaded || S.feedError || S.pollBusy || document.hidden) return;
   S.pollBusy = true;
   const seq = S.feedSeq;
-  let added = 0;
+  let feedChanged = false;
+  let threadChanged = false;
+  let arrived = 0;
   try {
     let after = newestSeq();
     for (let page = 0; page < MAX_POLL_PAGES; page += 1) {
-      const result = await request('GET', API.messages(), { params: historyParams({ after_event_seq: after, limit: POLL_PAGE_SIZE }) });
+      // Every message after the cursor, replies included: they are folded.
+      const result = await request('GET', API.messages(), { params: { room_id: S.room, q: S.q || null, after_event_seq: after, limit: POLL_PAGE_SIZE } });
       if (seq !== S.feedSeq) return;
-      added += mergeMessages(result.items);
+      const changed = absorb(result.items);
+      arrived += result.items.length;
+      feedChanged = feedChanged || changed.feedChanged;
+      threadChanged = threadChanged || changed.threadChanged;
       if (!result.has_more || !result.next_after_event_seq) break;
       after = result.next_after_event_seq;
     }
@@ -906,18 +1032,19 @@ async function pollFeed() {
   } finally {
     S.pollBusy = false;
   }
-  if (added === 0 || seq !== S.feedSeq) return;
+  if (seq !== S.feedSeq) return;
+  if (threadChanged) {
+    rerenderThread();
+    loadThreadView();
+  }
+  if (arrived === 0) return;
+  // Replies to roots off screen count as seen too: they are in this room.
   markSeen(currentRoom());
-  rerenderFeed();
+  if (feedChanged) rerenderFeed();
   renderRooms();
 }
 
-async function jumpTo(id) {
-  let target = $(`m-${id}`);
-  for (let page = 0; !target && page < MAX_JUMP_PAGES; page += 1) {
-    if (!(await loadOlder())) break;
-    target = $(`m-${id}`);
-  }
+function flash(target) {
   if (!target) return;
   target.scrollIntoView({ block: 'center', behavior: 'smooth' });
   target.classList.remove('flash');
@@ -925,12 +1052,52 @@ async function jumpTo(id) {
   target.classList.add('flash');
 }
 
+// The message `id` from what is loaded, or fetched once.
+async function lookup(id) {
+  const loaded = findMessage(id) || findThreadMessage(id);
+  if (loaded) return loaded;
+  const cached = S.quotes.get(id);
+  if (cached && !cached.pending) return cached.missing ? null : cached;
+  try {
+    const message = await request('GET', API.message(id));
+    S.quotes.set(id, message);
+    return message;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Shows message `id`: in the open thread panel, in its thread (opened for
+// it), or in the timeline, loading older pages as needed.
+async function jumpTo(id) {
+  if (S.thread && $(`t-${id}`)) {
+    flash($(`t-${id}`));
+    return;
+  }
+  const room = S.room;
+  const message = await lookup(id);
+  if (S.room !== room) return;
+  if (message && message.thread_id) {
+    await openThread(message.thread_id);
+    flash($(`t-${id}`));
+    return;
+  }
+  // An overlaid thread panel (narrow screens) would hide the timeline.
+  if (S.thread && window.matchMedia('(max-width:1280px)').matches) closeThread();
+  let target = $(`m-${id}`);
+  for (let page = 0; !target && page < MAX_JUMP_PAGES; page += 1) {
+    if (!(await loadOlder())) break;
+    target = $(`m-${id}`);
+  }
+  flash(target);
+}
+
 // ---------------------------------------------------------------- swipe to reply
 
+// Answering a timeline message opens its thread (S15); the panel answers
+// the thread's last message unless one is quoted.
 function startReply(id) {
-  S.replyTo = id;
-  renderComposer();
-  $('input').focus();
+  openThread(id);
 }
 
 let swipe = null;
@@ -949,10 +1116,10 @@ function onSwipeDown(event) {
     return;
   }
   const row = event.target.closest('.msg, .b-row');
-  if (!row || !row.id.startsWith('m-')) return;
+  if (!row || !(row.id.startsWith('m-') || row.id.startsWith('t-'))) return;
   swipe = {
-    row, id: row.id.slice(2), pointerId: event.pointerId, x: event.clientX, y: event.clientY,
-    at: event.timeStamp, claimed: false, offset: 0, icon: null,
+    row, id: row.id.slice(2), inThread: row.id.startsWith('t-'), pointerId: event.pointerId,
+    x: event.clientX, y: event.clientY, at: event.timeStamp, claimed: false, offset: 0, icon: null,
   };
 }
 
@@ -1044,15 +1211,22 @@ function onSwipeEnd(event) {
   swallowNextClick();
   if (event.type !== 'pointerup' || -state.offset < SWIPE_REPLY_PX) return;
   if (navigator.vibrate) navigator.vibrate(SWIPE_HAPTIC_MS);
-  startReply(state.id);
+  if (state.inThread) quoteInThread(state.id);
+  else startReply(state.id);
 }
 
+// The timeline and the thread panel answer a swipe the same way.
 function bindSwipe() {
   feed.addEventListener('pointerdown', onSwipeDown, { passive: true });
   feed.addEventListener('pointermove', onSwipeMove, { passive: true });
   feed.addEventListener('touchmove', onSwipeTouchMove, { passive: false });
   feed.addEventListener('pointerup', onSwipeEnd, { passive: true });
   feed.addEventListener('pointercancel', onSwipeEnd, { passive: true });
+  threadFeed.addEventListener('pointerdown', onSwipeDown, { passive: true });
+  threadFeed.addEventListener('pointermove', onSwipeMove, { passive: true });
+  threadFeed.addEventListener('touchmove', onSwipeTouchMove, { passive: false });
+  threadFeed.addEventListener('pointerup', onSwipeEnd, { passive: true });
+  threadFeed.addEventListener('pointercancel', onSwipeEnd, { passive: true });
 }
 
 // ---------------------------------------------------------------- composer
@@ -1083,12 +1257,8 @@ function renderComposer() {
       h('span', null, h('b', { text: '조용히' }), ' 보냅니다 — 아무도 깨우지 않고 inbox에만 남깁니다'),
       h('button', { class: 'x', data: { act: 'quiet' }, 'aria-label': '조용히 끄기' }, icon('close'))));
   }
-  const target = writable && S.replyTo && (findMessage(S.replyTo) || S.quotes.get(S.replyTo));
-  if (target && target.sender_id) {
-    strips.push(h('div', { class: 'strip' },
-      h('span', null, h('b', { text: nameOf(target.sender_id) }), '에게 답장'),
-      h('button', { class: 'x', data: { act: 'unreply' }, 'aria-label': '답장 취소' }, icon('close'))));
-  }
+  const fixing = writable && S.correcting && findMessage(S.correcting);
+  if (fixing) strips.push(correctingStrip(fixing, 'uncorrect'));
   if (S.sendError) {
     strips.push(h('div', { class: 'strip bad', role: 'alert' }, h('span', { class: 'dot' }),
       h('span', null, h('b', { text: S.sendError.code }), ` — ${S.sendError.message}`),
@@ -1118,33 +1288,48 @@ function grow() {
   updateSendButton();
 }
 
+// "정정: <원문>" above a composer that is correcting `target`.
+function correctingStrip(target, cancelAct) {
+  return h('div', { class: 'strip' }, h('span', { class: 'dot' }),
+    h('span', null, h('b', { text: '정정' }), ` — ${firstLine(target.body)}`),
+    h('button', { class: 'x', data: { act: cancelAct }, 'aria-label': '정정 취소' }, icon('close')));
+}
+
+// The one destination of a correction (S15): a message outside threads is
+// corrected in the room, a thread message in its thread (quoting it).
+function correctionDestination(target, roomId) {
+  return target.thread_id ? { reply_to: target.message_id } : { room_id: roomId };
+}
+
 async function send() {
   const room = currentRoom();
   const box = $('input');
   const text = box.value.trim();
   if (!text || !room || !canWrite() || S.sending) return;
-  const replyTo = S.replyTo;
   const quiet = S.quiet;
+  const fixing = S.correcting && findMessage(S.correcting);
+  const corrects = fixing ? fixing.message_id : null;
   // A retry of the same request keeps its key, so a lost response cannot
-  // post the message twice (the hub compares room, body, reply and wake).
+  // post the message twice (the hub compares room, body, reply, wake and
+  // the corrected message).
   const pending = S.pendingSend;
   const same = pending && pending.room === room.room_id && pending.text === text
-    && pending.replyTo === replyTo && pending.quiet === quiet;
+    && pending.corrects === corrects && pending.quiet === quiet;
   const clientKey = same ? pending.key : `console-${ulid()}`;
-  S.pendingSend = { room: room.room_id, text, replyTo, quiet, key: clientKey };
+  S.pendingSend = { room: room.room_id, text, corrects, quiet, key: clientKey };
   S.sending = true;
   updateSendButton();
-  // Exactly one destination: a reply names only the original (the hub puts
-  // it in that message's room), a new message names the room.
-  const body = { sender_id: S.me, body: text, client_key: clientKey };
-  if (replyTo) body.reply_to = replyTo;
-  else body.room_id = room.room_id;
+  // Exactly one destination: the room for a new message (answers go
+  // through the thread panel).
+  const body = Object.assign({ sender_id: S.me, body: text, client_key: clientKey },
+    fixing ? correctionDestination(fixing, room.room_id) : { room_id: room.room_id });
+  if (corrects) body.corrects = corrects;
   if (quiet) body.wake = false;
   try {
     const message = await request('POST', API.messages(), { json: body });
     S.pendingSend = null;
     S.sendError = null;
-    S.replyTo = null;
+    S.correcting = null;
     S.newFrom = null;
     box.value = '';
     grow();
@@ -1153,8 +1338,9 @@ async function send() {
       $('histQ').value = '';
       await reloadRoom();
     } else if (S.room === message.room_id) {
-      mergeMessages([message]);
+      const changed = absorb([message]);
       renderFeed();
+      if (changed.threadChanged) rerenderThread();
     }
     renderComposer();
     toBottom();
@@ -1165,6 +1351,331 @@ async function send() {
   } finally {
     S.sending = false;
     updateSendButton();
+  }
+}
+
+// ------------------------------------------------------------ thread panel
+
+// Opens the thread of `rootId` (a timeline message) in the panel: on wide
+// screens on the right, on a phone over everything. Only one thread is
+// open; its messages come from `thread_id=<root>` and the feed poll.
+async function openThread(rootId) {
+  if (S.thread && S.thread.root === rootId) {
+    $('threadInput').focus();
+    return;
+  }
+  S.thread = {
+    root: rootId, room: S.room, msgs: [], loaded: false, error: null,
+    view: null, hasOlder: false, olderCursor: null, olderBusy: false, replyTo: null,
+    correcting: null, sending: false, sendError: null, pendingSend: null, muteBusy: false,
+    muteError: null,
+  };
+  $('threadInput').value = '';
+  // Narrow screens show one overlay at a time.
+  if (window.matchMedia('(max-width:1280px)').matches) app.classList.add('info-off');
+  renderThread();
+  await loadThread();
+  if (canWrite() && !window.matchMedia('(max-width:720px)').matches) $('threadInput').focus();
+}
+
+function closeThread() {
+  S.thread = null;
+  renderThread();
+  renderTop();
+}
+
+const threadIsCurrent = (thread) => S.thread === thread;
+
+async function loadThread() {
+  const thread = S.thread;
+  if (!thread) return;
+  // A timeline root without a summary has no reply yet: the hub would
+  // answer thread_not_found, so the panel shows the root alone.
+  const known = findMessage(thread.root);
+  if (known && !known.thread_summary) {
+    thread.msgs = [known];
+    thread.loaded = true;
+    renderThread();
+    return;
+  }
+  const views = loadThreadView();
+  try {
+    const page = await request('GET', API.messages(), { params: { room_id: thread.room, thread_id: thread.root, limit: THREAD_PAGE_SIZE } });
+    if (!threadIsCurrent(thread)) return;
+    thread.msgs = page.items.slice().reverse();
+    thread.hasOlder = page.has_more;
+    thread.olderCursor = page.next_before_event_seq || null;
+  } catch (error) {
+    if (!threadIsCurrent(thread)) return;
+    const failure = asFailure(error);
+    if (failure.code !== 'thread_not_found') {
+      thread.error = failure;
+    } else {
+      // No reply yet: the thread is the root alone until the first answer.
+      const root = await lookup(thread.root);
+      if (!threadIsCurrent(thread)) return;
+      thread.msgs = root ? [root] : [];
+    }
+  }
+  await views;
+  if (!threadIsCurrent(thread)) return;
+  thread.loaded = true;
+  renderThread();
+  threadToBottom();
+}
+
+// The participants and counts; a thread without replies has none yet.
+async function loadThreadView() {
+  const thread = S.thread;
+  if (!thread) return;
+  try {
+    const view = await request('GET', API.thread(thread.root));
+    if (threadIsCurrent(thread)) thread.view = view;
+  } catch (error) {
+    if (threadIsCurrent(thread) && asFailure(error).code === 'thread_not_found') thread.view = null;
+  }
+  if (threadIsCurrent(thread) && thread.loaded) renderThreadMeta();
+}
+
+async function loadOlderInThread() {
+  const thread = S.thread;
+  if (!thread || !thread.hasOlder || thread.olderBusy || !thread.olderCursor) return;
+  thread.olderBusy = true;
+  renderThread();
+  try {
+    const page = await request('GET', API.messages(), { params: { room_id: thread.room, thread_id: thread.root, before_event_seq: thread.olderCursor, limit: THREAD_PAGE_SIZE } });
+    if (!threadIsCurrent(thread)) return;
+    for (const message of page.items) addThreadMessage(message);
+    thread.hasOlder = page.has_more;
+    thread.olderCursor = page.next_before_event_seq || null;
+  } catch (_) {
+    // The button stays; another press retries.
+  } finally {
+    thread.olderBusy = false;
+  }
+  if (threadIsCurrent(thread)) rerenderThread();
+}
+
+// Adds a message of the open thread in event_seq order; false if known.
+function addThreadMessage(message) {
+  const thread = S.thread;
+  if (!thread || thread.msgs.some((known) => known.message_id === message.message_id)) return false;
+  thread.msgs = thread.msgs.concat([message]).sort((a, b) => seqNum(a.event_seq) - seqNum(b.event_seq));
+  return true;
+}
+
+// What the panel's composer answers: the quoted message, or else the
+// thread's last message (the root while it has no reply).
+function threadReplyTarget(thread) {
+  if (thread.replyTo) return thread.replyTo;
+  const last = thread.msgs[thread.msgs.length - 1];
+  return last ? last.message_id : thread.root;
+}
+
+function quoteInThread(id) {
+  if (!S.thread || !canWrite()) return;
+  S.thread.replyTo = id;
+  S.thread.correcting = null;
+  renderThreadComposer();
+  $('threadInput').focus();
+}
+
+function correctInThread(id) {
+  if (!S.thread || !canWrite()) return;
+  S.thread.correcting = id;
+  S.thread.replyTo = null;
+  renderThreadComposer();
+  $('threadInput').focus();
+}
+
+// "나" among the participants, or null: only a participant may mute.
+function threadMe(thread) {
+  if (!thread.view || !S.me) return null;
+  return thread.view.participants.find((participant) => participant.agent_id === S.me) || null;
+}
+
+async function toggleThreadMute() {
+  const thread = S.thread;
+  const me = thread && threadMe(thread);
+  if (!me || thread.muteBusy) return;
+  thread.muteBusy = true;
+  thread.muteError = null;
+  renderThreadMeta();
+  try {
+    // `wake` is the opposite of the new mute; the owner names "나".
+    const changed = await request('PUT', API.participation(thread.root), { json: { wake: me.muted, agent_id: S.me } });
+    if (threadIsCurrent(thread)) me.muted = changed.muted;
+  } catch (error) {
+    if (threadIsCurrent(thread)) thread.muteError = asFailure(error);
+  } finally {
+    thread.muteBusy = false;
+  }
+  if (threadIsCurrent(thread)) renderThreadMeta();
+}
+
+function renderThread() {
+  const thread = S.thread;
+  $('thread').hidden = !thread;
+  app.classList.toggle('thread-on', Boolean(thread));
+  if (!thread) {
+    threadFeed.replaceChildren();
+    $('threadMeta').replaceChildren();
+    $('threadStrips').replaceChildren();
+    return;
+  }
+  const room = allRooms().find((candidate) => candidate.room_id === thread.room);
+  $('threadTitle').replaceChildren(h('b', { text: '스레드' }), room ? h('span', { class: 'sub', text: roomTitle(room) }) : null);
+  renderThreadMeta();
+  renderThreadFeed();
+  renderThreadComposer();
+}
+
+// Re-renders the panel's list without moving what the reader looks at.
+function rerenderThread() {
+  if (!S.thread) return;
+  const atBottom = threadFeed.scrollHeight - threadFeed.scrollTop - threadFeed.clientHeight < BOTTOM_SLACK_PX;
+  const top = threadFeed.scrollTop;
+  renderThreadFeed();
+  renderThreadComposer();
+  threadFeed.scrollTop = atBottom ? threadFeed.scrollHeight : top;
+}
+
+function threadToBottom() {
+  threadFeed.scrollTop = threadFeed.scrollHeight;
+}
+
+function renderThreadMeta() {
+  const thread = S.thread;
+  if (!thread) return;
+  const nodes = [];
+  const participants = thread.view ? thread.view.participants : [];
+  if (participants.length > 0) {
+    nodes.push(h('div', { class: 'chips', 'aria-label': '참여자' },
+      h('span', { class: 'muted', text: `참여자 ${participants.length}` }),
+      participants.map((participant) => h('span', {
+        class: `chip${participant.muted ? ' muted-chip' : ''}`,
+        title: `${JOINED_LABEL[participant.joined_via] || participant.joined_via}${participant.muted ? ' · 알림 끔' : ''}`,
+      }, av(participant.agent_id, 16), nameOf(participant.agent_id)))));
+  } else if (thread.loaded) {
+    nodes.push(h('p', { class: 'muted flush', text: '아직 답글이 없습니다. 첫 답글이 스레드를 엽니다.' }));
+  }
+  const me = threadMe(thread);
+  if (me) {
+    nodes.push(h('div', { class: 'toggle-row' },
+      h('span', null, '이 스레드 알림', h('small', { text: me.muted ? '꺼짐 — 지목될 때만 깨어납니다' : '켜짐 — 스레드 글로 깨어납니다' })),
+      h('button', {
+        class: 'switch', role: 'switch', 'aria-checked': String(!me.muted), 'aria-label': '이 스레드 알림',
+        data: { act: 'thread-mute' }, disabled: thread.muteBusy,
+      })));
+  }
+  if (thread.muteError) nodes.push(h('div', { class: 'err', role: 'alert', text: failureText(thread.muteError) }));
+  $('threadMeta').replaceChildren(...nodes);
+}
+
+function renderThreadFeed() {
+  const thread = S.thread;
+  const room = allRooms().find((candidate) => candidate.room_id === thread.room);
+  if (thread.error) {
+    threadFeed.replaceChildren(h('div', { class: 'empty', text: `불러오지 못했습니다 — ${failureText(thread.error)}` }));
+    return;
+  }
+  if (!thread.loaded || !room) {
+    threadFeed.replaceChildren(h('div', { class: 'empty', text: '불러오는 중…' }));
+    return;
+  }
+  const nodes = [];
+  if (thread.hasOlder) {
+    nodes.push(h('button', { class: 'older-btn', data: { act: 'thread-older' }, disabled: thread.olderBusy,
+      text: thread.olderBusy ? '이전 답글을 불러오는 중…' : '이전 답글 불러오기' }));
+  }
+  nodes.push(...messageNodes(thread.msgs, room, 'thread'));
+  threadFeed.replaceChildren(...nodes);
+  unfoldShortTexts(threadFeed);
+}
+
+function renderThreadComposer() {
+  const thread = S.thread;
+  if (!thread) return;
+  const writable = canWrite();
+  const strips = [];
+  const fixing = writable && thread.correcting && findThreadMessage(thread.correcting);
+  if (fixing) {
+    strips.push(correctingStrip(fixing, 'thread-uncorrect'));
+  } else if (writable && thread.replyTo) {
+    const target = findThreadMessage(thread.replyTo);
+    if (target) {
+      strips.push(h('div', { class: 'strip' },
+        h('span', null, h('b', { text: nameOf(target.sender_id) }), '에게 답장'),
+        h('button', { class: 'x', data: { act: 'thread-unquote' }, 'aria-label': '답장 취소' }, icon('close'))));
+    }
+  }
+  if (thread.sendError) {
+    strips.push(h('div', { class: 'strip bad', role: 'alert' }, h('span', { class: 'dot' }),
+      h('span', null, h('b', { text: thread.sendError.code }), ` — ${thread.sendError.message}`),
+      h('button', { class: 'x', data: { act: 'thread-dismiss' }, 'aria-label': '오류 닫기' }, icon('close'))));
+  }
+  $('threadStrips').replaceChildren(...strips);
+  const input = $('threadInput');
+  input.disabled = !writable;
+  input.placeholder = writable ? '스레드에 답장' : (S.me ? '보관된 방은 읽기만 됩니다' : '보낼 명의가 없습니다');
+  updateThreadSendButton();
+}
+
+function updateThreadSendButton() {
+  const thread = S.thread;
+  const writable = canWrite() && Boolean(thread);
+  const busy = Boolean(thread && thread.sending);
+  $('threadSend').classList.toggle('ready', writable && !busy && Boolean($('threadInput').value.trim()));
+  $('threadSend').disabled = !writable || busy;
+}
+
+function growThread() {
+  const box = $('threadInput');
+  box.style.height = 'auto';
+  box.style.height = `${box.scrollHeight}px`;
+  updateThreadSendButton();
+}
+
+// Sends into the open thread: `reply_to` only (the hub keeps it in the
+// thread), or a correction by the same destination rule as the room's.
+async function sendThread() {
+  const thread = S.thread;
+  const box = $('threadInput');
+  const text = box.value.trim();
+  if (!thread || !text || !canWrite() || thread.sending) return;
+  const fixing = thread.correcting && findThreadMessage(thread.correcting);
+  const replyTo = fixing ? null : threadReplyTarget(thread);
+  const corrects = fixing ? fixing.message_id : null;
+  const pending = thread.pendingSend;
+  const same = pending && pending.text === text && pending.replyTo === replyTo && pending.corrects === corrects;
+  const clientKey = same ? pending.key : `console-${ulid()}`;
+  thread.pendingSend = { text, replyTo, corrects, key: clientKey };
+  thread.sending = true;
+  updateThreadSendButton();
+  const body = Object.assign({ sender_id: S.me, body: text, client_key: clientKey },
+    fixing ? correctionDestination(fixing, thread.room) : { reply_to: replyTo });
+  if (corrects) body.corrects = corrects;
+  try {
+    const message = await request('POST', API.messages(), { json: body });
+    if (!threadIsCurrent(thread)) return;
+    thread.pendingSend = null;
+    thread.sendError = null;
+    thread.replyTo = null;
+    thread.correcting = null;
+    box.value = '';
+    growThread();
+    const changed = S.room === message.room_id ? absorb([message]) : { feedChanged: false };
+    if (changed.feedChanged) rerenderFeed();
+    rerenderThread();
+    threadToBottom();
+    loadThreadView();
+    refreshRooms();
+  } catch (error) {
+    if (threadIsCurrent(thread)) thread.sendError = asFailure(error);
+    renderThreadComposer();
+  } finally {
+    thread.sending = false;
+    updateThreadSendButton();
   }
 }
 
@@ -1598,7 +2109,7 @@ async function archiveRoom(room) {
   if (!confirmed || S.room !== room.room_id) return;
   roomAction(async () => {
     await request('POST', API.roomArchive(room.room_id));
-    S.replyTo = null;
+    S.correcting = null;
     S.quiet = false;
   });
 }
@@ -1898,6 +2409,7 @@ function resetRoomState() {
   S.olderCursor = null;
   S.olderBusy = false;
   S.newFrom = null;
+  S.foldedSeq = '0';
   S.expanded.clear();
 }
 
@@ -1911,7 +2423,8 @@ async function openRoom(id, enter = true) {
   S.q = '';
   $('histQ').value = '';
   $('top').classList.remove('searching');
-  S.replyTo = null;
+  S.correcting = null;
+  S.thread = null;
   S.edit = false;
   S.profileError = null;
   S.member = null;
@@ -1951,6 +2464,7 @@ function renderAll() {
   renderFeed();
   renderComposer();
   renderInfo();
+  renderThread();
 }
 
 // ---------------------------------------------------------------- session
@@ -2045,6 +2559,8 @@ function logout(message) {
   S.inbox.clear();
   S.room = null;
   S.me = null;
+  S.thread = null;
+  S.correcting = null;
   S.quiet = false;
   S.roomError = null;
   S.mk = null;
@@ -2067,8 +2583,62 @@ function onClick(event) {
       app.classList.remove('in-room');
       break;
     case 'info':
-      app.classList.toggle('info-off');
+      // The info panel and the thread panel share the right side.
+      if (S.thread) {
+        closeThread();
+        app.classList.remove('info-off');
+      } else {
+        app.classList.toggle('info-off');
+      }
       renderTop();
+      break;
+    case 'scrim':
+      if (S.thread) closeThread();
+      else app.classList.add('info-off');
+      renderTop();
+      break;
+    case 'thread':
+      openThread(target.dataset.k);
+      break;
+    case 'thread-close':
+      closeThread();
+      break;
+    case 'thread-send':
+      sendThread();
+      break;
+    case 'thread-reply':
+      quoteInThread(target.dataset.k);
+      break;
+    case 'thread-correct':
+      correctInThread(target.dataset.k);
+      break;
+    case 'thread-unquote':
+      if (S.thread) S.thread.replyTo = null;
+      renderThreadComposer();
+      break;
+    case 'thread-uncorrect':
+      if (S.thread) S.thread.correcting = null;
+      renderThreadComposer();
+      break;
+    case 'thread-dismiss':
+      if (S.thread) S.thread.sendError = null;
+      renderThreadComposer();
+      break;
+    case 'thread-mute':
+      toggleThreadMute();
+      break;
+    case 'thread-older':
+      loadOlderInThread();
+      break;
+    case 'correct':
+      if (!canWrite()) break;
+      S.correcting = target.dataset.k;
+      renderComposer();
+      $('input').focus();
+      break;
+    case 'uncorrect':
+      S.correcting = null;
+      renderComposer();
       break;
     case 'search':
       $('top').classList.toggle('searching');
@@ -2137,10 +2707,6 @@ function onClick(event) {
       break;
     case 'reply':
       startReply(target.dataset.k);
-      break;
-    case 'unreply':
-      S.replyTo = null;
-      renderComposer();
       break;
     case 'dismiss-send':
       S.sendError = null;
@@ -2244,9 +2810,16 @@ function onSearch(event) {
 
 function onKeydown(event) {
   if (event.key !== 'Escape') return;
-  if (S.replyTo) {
-    S.replyTo = null;
+  const thread = S.thread;
+  if (thread && (thread.replyTo || thread.correcting)) {
+    thread.replyTo = null;
+    thread.correcting = null;
+    renderThreadComposer();
+  } else if (S.correcting) {
+    S.correcting = null;
     renderComposer();
+  } else if (thread && !document.querySelector('dialog[open]')) {
+    closeThread();
   } else if (S.receiverEdit) {
     S.receiverEdit = null;
     renderInfo();
@@ -2269,6 +2842,13 @@ function init() {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       send();
+    }
+  });
+  $('threadInput').addEventListener('input', growThread);
+  $('threadInput').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      sendThread();
     }
   });
   bindSwipe();

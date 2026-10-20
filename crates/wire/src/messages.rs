@@ -14,7 +14,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::agents::present_nullable;
-use crate::{AgentId, AgentIdError, RoomKind, Seq};
+use crate::{AgentId, AgentIdError, RoomKind, Seq, ThreadSummary};
 
 /// Maximum decoded UTF-8 length of a message `body` in bytes (`IF-API-COMMON`: 16 KiB).
 pub const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -284,7 +284,9 @@ impl fmt::Display for RoomId {
 /// to be non-null; the server checks it. A missing key means the same as
 /// `null`; serializing leaves out every `None` key. `sender_id` is the
 /// owner's posting identity; an agent sending it gets `unexpected_field`
-/// from the server.
+/// from the server. `corrects` (S15, `IF-WIRE-015`) names the sender's own
+/// message this one corrects; it is no destination. There is no
+/// `thread_id`: a `reply_to` decides the thread.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
@@ -303,12 +305,18 @@ pub struct SendMessageRequest {
     pub mentions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrects: Option<String>,
 }
 
 /// A stored message, as history, single-message lookups and the send
-/// response carry it (`IF-WIRE-012`): always these ten keys in this order.
-/// `wake` is the sender's choice; `mentions` is in ASCII order, `[]` when
-/// nobody was named.
+/// response carry it (`IF-WIRE-012`): always these thirteen keys in this
+/// order, `null` never omitted. `wake` is the sender's choice; `mentions`
+/// is in ASCII order, `[]` when nobody was named. `thread_id` is the root
+/// of the thread the message is in (`null` for a root and any message
+/// outside a thread); `corrects` the sender's own message it corrects.
+/// `thread_summary` is counted when read and only for a root with replies;
+/// the send response always has `null`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub message_id: MessageId,
@@ -318,8 +326,11 @@ pub struct Message {
     pub sender_id: AgentId,
     pub body: String,
     pub reply_to: Option<MessageId>,
+    pub thread_id: Option<MessageId>,
+    pub corrects: Option<MessageId>,
     pub wake: bool,
     pub mentions: Vec<AgentId>,
+    pub thread_summary: Option<ThreadSummary>,
     pub created_at: String,
 }
 
@@ -480,8 +491,11 @@ mod tests {
             sender_id: agent("agent-a"),
             body: "hi".into(),
             reply_to: None,
+            thread_id: None,
+            corrects: None,
             wake: true,
             mentions: vec![],
+            thread_summary: None,
             created_at: "2026-10-14T10:00:00.000Z".into(),
         }
     }
@@ -503,8 +517,11 @@ mod tests {
                 "sender_id": "agent-a",
                 "body": "hi",
                 "reply_to": null,
+                "thread_id": null,
+                "corrects": null,
                 "wake": true,
                 "mentions": [],
+                "thread_summary": null,
                 "created_at": "2026-10-14T10:00:00.000Z",
                 "deduplicated": true
             })

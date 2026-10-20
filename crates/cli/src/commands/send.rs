@@ -1,6 +1,7 @@
-//! `send` → `POST /v1/messages` (`IF-CLI-001` S13): exactly one of
-//! `--room`, `--to` and `--reply-to`; `--quiet`, `--mention` and `--as`
-//! fill the rest of the one send body.
+//! `send` → `POST /v1/messages` (`IF-CLI-001` S13, S15): exactly one of
+//! `--room`, `--to` and `--reply-to`; `--quiet`, `--mention`, `--as` and
+//! `--corrects` fill the rest of the one send body. A `--reply-to` lands
+//! in the original's thread; there is no option to pick a thread.
 
 use std::path::PathBuf;
 
@@ -24,9 +25,14 @@ pub struct SendArgs {
     #[arg(long, value_name = "AGENT_ID")]
     to: Option<AgentId>,
 
-    /// A reply; it lands in the room of that message
+    /// A reply; it lands in the room and the thread of that message
     #[arg(long, value_name = "MESSAGE_ID")]
     reply_to: Option<MessageId>,
+
+    /// Mark this message as a correction of your own MESSAGE_ID in the same
+    /// room (with one of the destinations above)
+    #[arg(long, value_name = "MESSAGE_ID", requires = "destination")]
+    corrects: Option<MessageId>,
 
     /// Message body, sent byte for byte
     #[arg(long, value_name = "TEXT")]
@@ -76,6 +82,7 @@ pub async fn run(args: SendArgs, context: &Context) -> Result<(), CliError> {
         mentions: (!args.mentions.is_empty())
             .then(|| args.mentions.into_iter().map(String::from).collect()),
         sender_id: args.sender.map(String::from),
+        corrects: args.corrects.map(String::from),
     };
     let response = context
         .client

@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
 use super::delivery as delivery_queries;
 use super::messages::{MESSAGE_COLUMNS, StoredMessage, stored_seq};
+use super::threads as thread_queries;
 use crate::store::StoreError;
 
 /// `inbox_rows.kind` of a message event.
@@ -55,7 +56,8 @@ struct Cursor {
 
 /// One page of `query.agent_id`'s inbox, `after_seq < inbox_seq <=
 /// snapshot_head_seq` in ascending order, fetching `limit + 1` rows to learn
-/// `has_more`. `None` when the agent does not exist. Reads only.
+/// `has_more`, with the summary of every root on the page. `None` when the
+/// agent does not exist. Reads only.
 ///
 /// Every statement runs on the DB thread's single connection, the only
 /// writer, so the marker, head and rows form one consistent snapshot.
@@ -89,6 +91,7 @@ pub fn page(conn: &Connection, query: &InboxQuery) -> Result<Option<InboxSlice>,
     }
     let has_more = items.len() > query.limit as usize;
     items.truncate(query.limit as usize);
+    thread_queries::attach_summaries(conn, items.iter_mut().filter_map(InboxItem::as_message_mut))?;
 
     Ok(Some(InboxSlice {
         read_marker: cursor.read_marker,

@@ -20,6 +20,7 @@ pub mod presence;
 pub mod profile;
 pub mod rooms;
 pub mod seq;
+pub mod threads;
 
 pub use agent_id::{AgentId, AgentIdError};
 pub use agents::{
@@ -55,3 +56,7 @@ pub use rooms::{
     RoomSummary, RoomTitleError, validate_room_title,
 };
 pub use seq::{Seq, SeqError};
+pub use threads::{
+    JoinedVia, ParticipationRequest, ParticipationResponse, ThreadParticipant, ThreadSummary,
+    ThreadView,
+};

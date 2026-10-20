@@ -656,3 +656,91 @@ async fn presence_notes_and_last_seen_writes_stay_out_of_the_logs() {
         .collect();
     assert!(touch_info.is_empty(), "{touch_info:?}");
 }
+
+/// S15: a thread message's commit line names its thread (ids and counts
+/// only, no body or mention values), a correction logs no body, and the
+/// participation line carries only the thread, the agent and `muted`.
+#[tokio::test]
+async fn thread_sends_and_participation_log_ids_only() {
+    let captured = install_capture();
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config_with_owner(&["human"])).await;
+    let api = server.api();
+    let a = api.register("agent-a", None).await;
+    let b = api.register("agent-b", None).await;
+    api.register("s15-mentioned", None).await;
+
+    let body = "S15-BODY-MARKER-do-not-log";
+    let root = api
+        .post(
+            "/v1/messages",
+            &a.api_key,
+            json!({"room_id": "all", "body": body, "client_key": "s15-root"}),
+        )
+        .await;
+    assert_eq!(root.status.as_u16(), 201, "{}", root.body);
+    let root_id = root.body["message_id"].as_str().unwrap().to_owned();
+    let reply = api
+        .post(
+            "/v1/messages",
+            &b.api_key,
+            json!({"reply_to": root_id, "body": body, "client_key": "s15-reply", "mentions": ["s15-mentioned"]}),
+        )
+        .await;
+    assert_eq!(reply.status.as_u16(), 201, "{}", reply.body);
+    let correction = api
+        .post(
+            "/v1/messages",
+            &a.api_key,
+            json!({"room_id": "all", "body": body, "client_key": "s15-fix", "corrects": root_id}),
+        )
+        .await;
+    assert_eq!(correction.status.as_u16(), 201, "{}", correction.body);
+    let muted = api
+        .put(
+            &format!("/v1/threads/{root_id}/participation"),
+            &a.api_key,
+            json!({"wake": false}),
+        )
+        .await;
+    assert_eq!(muted.status.as_u16(), 200, "{}", muted.body);
+    server.shutdown().await.unwrap();
+
+    let logs = captured.text();
+    assert!(
+        !logs.contains("S15-BODY-MARKER"),
+        "a message body was logged"
+    );
+    let reply_id = reply.body["message_id"].as_str().unwrap();
+    let committed: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("message committed") && line.contains(reply_id))
+        .collect();
+    assert_eq!(committed.len(), 1, "{logs}");
+    assert!(
+        committed[0].contains(&format!("thread_id={root_id}")),
+        "{}",
+        committed[0]
+    );
+    assert!(
+        !committed[0].contains("s15-mentioned"),
+        "mention values are not logged: {}",
+        committed[0]
+    );
+    let participation: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("thread participation"))
+        .collect();
+    assert_eq!(participation.len(), 1, "{logs}");
+    for field in [
+        format!("thread_id={root_id}"),
+        "agent_id=agent-a".to_owned(),
+        "muted=true".to_owned(),
+    ] {
+        assert!(
+            participation[0].contains(&field),
+            "{field}: {}",
+            participation[0]
+        );
+    }
+}

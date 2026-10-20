@@ -9,7 +9,7 @@ use super::StoreError;
 use crate::clock;
 
 /// Latest schema version this binary knows. `/healthz` reports it.
-pub const LATEST_SCHEMA_VERSION: u32 = 6;
+pub const LATEST_SCHEMA_VERSION: u32 = 7;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
@@ -27,7 +27,14 @@ struct Migration {
     /// A query run in the version's transaction right before it commits:
     /// any row it returns rolls the version back and refuses startup.
     /// `PRAGMA foreign_key_check` must then be empty as well.
-    post_check: Option<&'static str>,
+    post_check: Option<PostCheck>,
+}
+
+/// A post-migration invariant: `sql` returns the first offending id (one
+/// text column) or no row; `broken` says what such an id violates.
+struct PostCheck {
+    sql: &'static str,
+    broken: &'static str,
 }
 
 /// Versions start at 1 and are contiguous; each is applied in one transaction.
@@ -60,13 +67,26 @@ const MIGRATIONS: &[Migration] = &[
         version: 5,
         sql: V5_SCHEMA,
         rebuilds_tables: false,
-        post_check: Some(V5_POST_CHECK),
+        post_check: Some(PostCheck {
+            sql: V5_POST_CHECK,
+            broken: "has no rooms row",
+        }),
     },
     Migration {
         version: 6,
         sql: V6_SCHEMA,
         rebuilds_tables: false,
         post_check: None,
+    },
+    Migration {
+        version: 7,
+        sql: V7_SCHEMA,
+        rebuilds_tables: false,
+        post_check: Some(PostCheck {
+            sql: V7_POST_CHECK,
+            broken: "breaks the thread invariant (its root is in a thread or in another room, \
+                     or it is a reply outside any thread)",
+        }),
     },
 ];
 
@@ -254,6 +274,61 @@ const V6_SCHEMA: &str = "
 ALTER TABLE agents ADD COLUMN last_seen_at TEXT;
 ";
 
+/// v7 (S15): threads and corrections (ADR-0013). Two message columns,
+/// the thread index and the participant table, then the backfill: every
+/// old `reply_to` chain is walked down from its root so each reply points
+/// at the topmost message (no nesting), and the participants of each
+/// thread are inserted in the order root, opener/poster, mentioned —
+/// `INSERT OR IGNORE`, registered agents only, so the first row an agent
+/// gets stays (its `joined_via` is approximate, ADR-0013). One
+/// transaction, no table rebuild; every v6 row and value stays.
+const V7_SCHEMA: &str = "
+ALTER TABLE messages ADD COLUMN thread_id TEXT REFERENCES messages(message_id);
+ALTER TABLE messages ADD COLUMN corrects TEXT REFERENCES messages(message_id);
+CREATE INDEX messages_thread_event ON messages(thread_id, event_seq);
+CREATE TABLE thread_participants (
+    thread_id TEXT NOT NULL REFERENCES messages(message_id),
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+    joined_via TEXT NOT NULL,
+    muted INTEGER NOT NULL DEFAULT 0,
+    joined_at TEXT NOT NULL,
+    PRIMARY KEY (thread_id, agent_id)
+);
+WITH RECURSIVE chain(message_id, root_id) AS (
+  SELECT message_id, message_id FROM messages WHERE reply_to IS NULL
+  UNION ALL
+  SELECT m.message_id, chain.root_id FROM messages m JOIN chain ON m.reply_to = chain.message_id
+)
+UPDATE messages SET thread_id = (SELECT root_id FROM chain WHERE chain.message_id = messages.message_id)
+WHERE reply_to IS NOT NULL;
+INSERT OR IGNORE INTO thread_participants (thread_id, agent_id, joined_via, muted, joined_at)
+  SELECT r.message_id, r.sender_id, 'root', 0,
+         (SELECT created_at FROM messages t WHERE t.thread_id = r.message_id ORDER BY t.event_seq LIMIT 1)
+  FROM messages r JOIN agents a ON a.agent_id = r.sender_id
+  WHERE EXISTS (SELECT 1 FROM messages t WHERE t.thread_id = r.message_id);
+INSERT OR IGNORE INTO thread_participants (thread_id, agent_id, joined_via, muted, joined_at)
+  SELECT t.thread_id, t.sender_id,
+         CASE WHEN t.event_seq = (SELECT MIN(event_seq) FROM messages WHERE thread_id = t.thread_id)
+              THEN 'opener' ELSE 'poster' END,
+         0, t.created_at
+  FROM messages t JOIN agents a ON a.agent_id = t.sender_id
+  WHERE t.thread_id IS NOT NULL ORDER BY t.event_seq;
+INSERT OR IGNORE INTO thread_participants (thread_id, agent_id, joined_via, muted, joined_at)
+  SELECT t.thread_id, mm.agent_id, 'mentioned', 0, t.created_at
+  FROM messages t JOIN message_mentions mm ON mm.message_id = t.message_id
+                  JOIN agents a ON a.agent_id = mm.agent_id
+  WHERE t.thread_id IS NOT NULL ORDER BY t.event_seq;
+";
+
+/// The thread invariant: a thread's root is outside any thread and in the
+/// same room, and every reply is in a thread.
+const V7_POST_CHECK: &str = "
+SELECT t.message_id FROM messages t JOIN messages r ON r.message_id = t.thread_id
+WHERE r.thread_id IS NOT NULL OR r.room_id <> t.room_id
+UNION ALL
+SELECT message_id FROM messages WHERE reply_to IS NOT NULL AND thread_id IS NULL
+LIMIT 1";
+
 /// Opens the database file and applies and verifies the connection PRAGMAs.
 /// Refuses to continue unless the journal mode is WAL.
 pub fn open_connection(path: &Path) -> Result<Connection, StoreError> {
@@ -340,13 +415,13 @@ fn apply_one(conn: &mut Connection, migration: &Migration) -> Result<(), StoreEr
         "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
         params![migration.version, clock::now_rfc3339_ms()],
     )?;
-    if let Some(check) = migration.post_check {
-        let offending: Option<String> = tx.query_row(check, [], |row| row.get(0)).optional()?;
-        if let Some(room_id) = offending {
+    if let Some(check) = &migration.post_check {
+        let offending: Option<String> = tx.query_row(check.sql, [], |row| row.get(0)).optional()?;
+        if let Some(id) = offending {
             // Dropping `tx` rolls the version back.
             return Err(StoreError::PostCheck {
                 version: migration.version,
-                detail: format!("room_id '{room_id}' has no rooms row"),
+                detail: format!("'{id}' {}", check.broken),
             });
         }
     }

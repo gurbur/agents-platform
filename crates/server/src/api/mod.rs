@@ -16,6 +16,7 @@ mod query;
 mod receiver_url;
 mod request_id;
 mod rooms;
+mod threads;
 mod ui;
 
 use std::sync::Arc;
@@ -103,6 +104,7 @@ pub fn router(state: AppState) -> Router {
         .merge(messages::routes())
         .merge(inbox::routes())
         .merge(rooms::routes())
+        .merge(threads::routes())
         .merge(owner::routes())
         .merge(identity::routes())
         .merge(ui::routes())

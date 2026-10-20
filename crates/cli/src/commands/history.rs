@@ -1,7 +1,8 @@
-//! `history` → `GET /v1/messages`.
+//! `history` → `GET /v1/messages` (`IF-CLI-001` S15: `--thread` or
+//! `--top-level`, never both).
 
 use clap::Args;
-use platform_wire::{HistoryPage, RoomId, Seq};
+use platform_wire::{HistoryPage, MessageId, RoomId, Seq};
 
 use super::Context;
 use crate::client::Query;
@@ -10,9 +11,17 @@ use crate::output;
 
 #[derive(Debug, Args)]
 pub struct HistoryArgs {
-    /// `all` or a canonical `dm:<a>:<b>` room (a < b)
+    /// `all`, a canonical `dm:<a>:<b>` room (a < b) or `room:<slug>`
     #[arg(long, value_name = "ROOM")]
     room: RoomId,
+
+    /// Only this thread: its root and replies
+    #[arg(long, value_name = "ROOT_ID", conflicts_with = "top_level")]
+    thread: Option<MessageId>,
+
+    /// Only messages outside threads (roots included)
+    #[arg(long)]
+    top_level: bool,
 
     /// Oldest first, strictly after event_seq N
     #[arg(long, value_name = "N", conflicts_with = "before")]
@@ -34,6 +43,12 @@ pub struct HistoryArgs {
 impl HistoryArgs {
     fn query(&self) -> Query {
         let mut query: Query = vec![("room_id", self.room.to_string())];
+        if let Some(thread) = &self.thread {
+            query.push(("thread_id", thread.to_string()));
+        }
+        if self.top_level {
+            query.push(("top_level", "true".to_owned()));
+        }
         if let Some(after) = self.after {
             query.push(("after_event_seq", after.to_string()));
         }

@@ -19,6 +19,7 @@ use crate::commands::profile::ProfileCommand;
 use crate::commands::receiver::ReceiverCommand;
 use crate::commands::rooms::RoomCommand;
 use crate::commands::send::SendArgs;
+use crate::commands::thread::ThreadCommand;
 use crate::error::CliError;
 
 #[derive(Debug, Parser)]
@@ -74,6 +75,9 @@ pub enum Command {
     /// Single message lookup
     #[command(subcommand)]
     Message(MessageCommand),
+    /// Threads: show one, mute or unmute its wakes
+    #[command(subcommand)]
+    Thread(ThreadCommand),
     /// Delivery diagnostics and manual retry
     Delivery(DeliveryArgs),
     /// Identity tokens for third parties

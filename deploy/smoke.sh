@@ -2,17 +2,20 @@
 # Acceptance smoke against a running platformd, through the `platform` CLI
 # and curl. Prints a PASS/FAIL/SKIP table; exits 1 if anything failed.
 #
-# Usage: deploy/smoke.sh <base-url> <owner-token-file> [--receiver-url URL] [--receiver-log FILE] [--identity-aud AUD] [--post-as AGENT_ID] [--platform PATH]
+# Usage: deploy/smoke.sh <base-url> <owner-token-file> [--receiver-url URL] [--receiver-log FILE] [--identity-aud AUD] [--post-as AGENT_ID] [--post-as-token FILE] [--platform PATH]
 #   <base-url>          e.g. http://100.x.y.z:7340 or http://127.0.0.1:7340
 #   <owner-token-file>  file holding the owner token (read, never printed)
 #   --receiver-url URL  a mock receiver the server can reach (deploy/mock-receiver.py);
-#                       without it the receiver scenarios (5, 19-21) are SKIP
+#                       without it the receiver scenarios (5, 19-21) are SKIP and
+#                       the thread scenario (25-29) judges wakes without 202s
 #   --receiver-log FILE that mock receiver's stdout, to check the wake body keys (21)
 #   --identity-aud AUD  audience for the identity token scenario (default: garage-docs);
 #                       a hub without [identity] makes that scenario SKIP
 #   --post-as AGENT_ID  a registered agent in the hub's [owner] post_as (e.g. human);
-#                       without it the owner barge-in parts (14, 18) and the
+#                       without it the owner barge-in parts (14, 18, 27) and the
 #                       protected-id part of the deletion scenario are skipped
+#   --post-as-token FILE that agent's API key (read, never printed), for its own
+#                       thread reads in 27; without it those reads are unchecked
 #   --platform PATH     platform CLI binary (default: `platform` on PATH)
 #
 # Every run registers new agents named smoke-<ulid>, so runs never collide.
@@ -44,6 +47,7 @@ receiver_url=""
 receiver_log=""
 identity_aud="$DEFAULT_IDENTITY_AUD"
 post_as=""
+post_as_token=""
 platform_bin=platform
 workdir=""
 
@@ -58,7 +62,7 @@ all_message_id="" dm_message_id="" dm_room="" topic_room="" wake_room=""
 snapshot_head=""
 
 usage() {
-  sed -n '5,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '5,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -86,6 +90,11 @@ parse_args() {
         post_as="$2"
         shift
         ;;
+      --post-as-token)
+        [[ $# -ge 2 ]] || usage
+        post_as_token="$2"
+        shift
+        ;;
       --platform)
         [[ $# -ge 2 ]] || usage
         platform_bin="$2"
@@ -101,6 +110,7 @@ parse_args() {
   owner_token_file="${positional[1]}"
   [[ "$base_url" =~ ^https?://[^[:space:]]+$ ]] || die "base URL must be http(s)://...: $base_url"
   [[ -r "$owner_token_file" ]] || die "cannot read owner token file: $owner_token_file"
+  [[ -z "$post_as_token" || -r "$post_as_token" ]] || die "cannot read post-as token file: $post_as_token"
 }
 
 # ---- helpers ---------------------------------------------------------------
@@ -1201,6 +1211,212 @@ check_wake_policy_always() {
   note="$agent_c woken, $agent_b idle, body $body"
 }
 
+# ---- threads and corrections (S15) ----------------------------------------
+
+# Whether AGENT owes a wake (`pending_seq` set). The wake transition is
+# written in the send transaction, so this holds right after the send.
+is_woken() {
+  local json
+  json="$(cli "$owner_token_file" delivery "$1")" || return 1
+  jq -e '.pending_seq != null' >/dev/null <<<"$json"
+}
+
+# AGENT's item for MESSAGE_ID woke it: its `woke` is true, a wake is owed,
+# and with a receiver the hub got a 202 for its new head.
+woken_by() {
+  local agent="$1" message_id="$2" head="$3"
+  item_woke_is "$agent" "$message_id" true || return 1
+  is_woken "$agent" || {
+    note="$agent owes no wake for $message_id"
+    return 1
+  }
+  [[ -z "$receiver_url" ]] || wait_accepted "$agent" "$head"
+}
+
+# AGENT got a row for MESSAGE_ID that did not wake it: `woke` is false, no
+# wake is owed and `last_accepted_seq` stayed LAST.
+row_only() {
+  local agent="$1" message_id="$2" last="$3"
+  item_woke_is "$agent" "$message_id" false || return 1
+  not_woken "$agent" || {
+    note="$agent was woken by $message_id"
+    return 1
+  }
+  [[ "$(delivery_field "$agent" last_accepted_seq)" == "$last" ]] || {
+    note="$agent's last_accepted_seq moved for $message_id"
+    return 1
+  }
+}
+
+# The participants of a thread as `agent:joined_via:muted` lines, sorted.
+participants_of() {
+  cli "$owner_token_file" thread show "$1" |
+    jq -r '.participants[] | "\(.agent_id):\(.joined_via):\(.muted)"' | sort
+}
+
+thread_send() {
+  local token="$1"
+  shift
+  cli "$token" send "$@" | jq -r .message_id
+}
+
+# Scenarios 25-29: B's answer to A's `all` message opens a thread (A root,
+# B opener); C, a member outside it, gets a row and no wake while A wakes;
+# a mention makes C a participant and wakes it; muted, C only gets rows
+# until mentioned again; a quiet thread message wakes no participant; the
+# top-level view hides the replies and summarises the root, the thread
+# view holds root and replies. With --post-as: the owner barges into A's
+# and B's DM, A answers, and that identity is the root participant (with
+# --post-as-token it reads the thread and not the whole room).
+check_threads() {
+  local key_a key_b key_c root reply json last_c head_c expected
+  key_a="$(token_file "$agent_a")"
+  key_b="$(token_file "$agent_b")"
+  key_c="$(token_file "$agent_c")"
+  if [[ -n "$receiver_url" ]]; then
+    cli "$key_c" receiver set "$agent_c" "$receiver_url" --wake-policy sender >/dev/null || {
+      note="receiver set $agent_c --wake-policy sender failed: $(cli_error)"
+      return 1
+    }
+  fi
+  ack_head "$agent_a" && ack_head "$agent_b" && ack_head "$agent_c" || return 1
+
+  # 25
+  root="$(thread_send "$key_a" --room all --body "smoke thread root")" || return 1
+  ack_head "$agent_a" && ack_head "$agent_c" || return 1
+  last_c="$(delivery_field "$agent_c" last_accepted_seq)" || return 1
+  json="$(cli "$key_b" send --reply-to "$root" --body "smoke thread reply")" || {
+    note="send --reply-to failed: $(cli_error)"
+    return 1
+  }
+  reply="$(jq -r .message_id <<<"$json")"
+  expect_json "$json" ".thread_id == \"$root\" and .reply_to == \"$root\"" "the reply's thread: $json" || return 1
+  expected="$(printf '%s\n' "$agent_a:root:false" "$agent_b:opener:false" | sort)"
+  [[ "$(participants_of "$root")" == "$expected" ]] || {
+    note="participants after the first reply: $(participants_of "$root" | tr '\n' ' ')"
+    return 1
+  }
+  item_woke_is "$agent_a" "$reply" true || return 1
+  is_woken "$agent_a" || {
+    note="the author of the root was not woken by the first reply"
+    return 1
+  }
+  row_only "$agent_c" "$reply" "$last_c" || return 1
+  json="$(cli "$key_a" send --reply-to "$reply" --body "smoke nested")" || return 1
+  expect_json "$json" ".thread_id == \"$root\" and .reply_to == \"$reply\"" "no nested thread: $json" || return 1
+  ack_head "$agent_a" && ack_head "$agent_b" && ack_head "$agent_c" || return 1
+
+  # 26
+  head_c="$(head_of "$agent_c")" || return 1
+  local named
+  named="$(thread_send "$key_a" --reply-to "$root" --mention "$agent_c" --body "smoke c?")" || return 1
+  participants_of "$root" | grep -qx "$agent_c:mentioned:false" || {
+    note="$agent_c is not a mentioned participant: $(participants_of "$root" | tr '\n' ' ')"
+    return 1
+  }
+  woken_by "$agent_c" "$named" "$((head_c + 1))" || return 1
+  ack_head "$agent_c" || return 1
+  json="$(cli "$key_c" thread mute "$root")" || {
+    note="thread mute failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" ".muted == true and .agent_id == \"$agent_c\"" "mute output: $json" || return 1
+  last_c="$(delivery_field "$agent_c" last_accepted_seq)" || return 1
+  local quiet_for_c
+  quiet_for_c="$(thread_send "$key_b" --reply-to "$root" --body "smoke more")" || return 1
+  row_only "$agent_c" "$quiet_for_c" "$last_c" || return 1
+  ack_head "$agent_c" || return 1
+  head_c="$(head_of "$agent_c")" || return 1
+  named="$(thread_send "$key_b" --reply-to "$root" --mention "$agent_c" --body "smoke c!")" || return 1
+  woken_by "$agent_c" "$named" "$((head_c + 1))" || return 1
+  expect_cli_error thread_not_found "mute by a non-participant" "$(token_file "$agent_p")" thread mute "$root" ||
+    return 1
+
+  # 29
+  ack_head "$agent_a" && ack_head "$agent_b" && ack_head "$agent_c" || return 1
+  local hushed
+  hushed="$(thread_send "$key_b" --reply-to "$root" --quiet --body "smoke hush")" || return 1
+  item_woke_is "$agent_a" "$hushed" false || return 1
+  not_woken "$agent_a" || {
+    note="a participant woke for a quiet thread message"
+    return 1
+  }
+
+  # 28
+  local root_seq
+  root_seq="$(cli "$key_a" message show "$root" | jq -r .event_seq)" || return 1
+  json="$(cli "$key_a" history --room all --top-level --after "$((root_seq - 1))" --limit 100)" || {
+    note="history --top-level failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" "(.items[0].message_id == \"$root\") and (.items[0].thread_summary.reply_count == 6)
+      and all(.items[]; .thread_id == null)" "top-level view: $(jq -c '.items[0] | {message_id, thread_summary}' <<<"$json")" ||
+    return 1
+  json="$(cli "$key_a" history --room all --thread "$root" --after "$((root_seq - 1))" --limit 100)" || return 1
+  expect_json "$json" "(.items | length == 7) and all(.items[]; .message_id == \"$root\" or .thread_id == \"$root\")" \
+    "thread view: $(jq -c '[.items[] | .message_id]' <<<"$json")" || return 1
+  api GET "/v1/messages?room_id=all&thread_id=$root&top_level=true" "$key_a"
+  expect_status 422 "thread_id with top_level" || return 1
+
+  local receipts=""
+  [[ -n "$receiver_url" ]] || receipts=" (wakes judged by woke and pending_seq; 202s need --receiver-url)"
+  if [[ -z "$post_as" ]]; then
+    skip_note="threads pass$receipts; the barge-in part (27) needs --post-as"
+    return 0
+  fi
+  # 27
+  local barge answer head
+  barge="$(cli "$owner_token_file" send --as "$post_as" --room "$dm_room" --body "smoke barge-in 3" | jq -r .message_id)" || {
+    note="owner barge-in failed: $(cli_error)"
+    return 1
+  }
+  head="$(head_of "$post_as")" || return 1
+  answer="$(thread_send "$key_a" --reply-to "$barge" --body "smoke answer without a mention")" || return 1
+  participants_of "$barge" | grep -qx "$post_as:root:false" || {
+    note="$post_as is not the root participant: $(participants_of "$barge" | tr '\n' ' ')"
+    return 1
+  }
+  api GET "/v1/agents/$post_as/inbox?after_seq=$head&limit=100" "$owner_token_file"
+  expect_status 200 "owner view of $post_as's inbox" || return 1
+  expect_json "$http_body" "any(.items[]; .message_id == \"$answer\" and .woke == true)" \
+    "$post_as's inbox lacks the woken answer" || return 1
+  if [[ -z "$post_as_token" ]]; then
+    note="threads 25-29 pass$receipts; $post_as's own reads unchecked (no --post-as-token)"
+    return 0
+  fi
+  api GET "/v1/messages?room_id=$dm_room&thread_id=$barge" "$post_as_token"
+  expect_status 200 "$post_as's thread history" || return 1
+  expect_json "$http_body" "any(.items[]; .message_id == \"$answer\") and any(.items[]; .message_id == \"$barge\")" \
+    "$post_as's thread history lacks root or answer" || return 1
+  api GET "/v1/messages?room_id=$dm_room" "$post_as_token"
+  expect_status 403 "$post_as's whole-room history" || return 1
+  note="threads 25-29 pass$receipts; $post_as reads its thread (200) and not $dm_room (403)"
+}
+
+# Scenarios 30-31: A corrects its own `all` message (201, `corrects` set);
+# B's message, A's DM message and a missing id are refused with
+# corrects_not_own, corrects_room_mismatch and corrects_not_found.
+check_corrections() {
+  local key_a key_b own theirs json
+  key_a="$(token_file "$agent_a")"
+  key_b="$(token_file "$agent_b")"
+  own="$(thread_send "$key_a" --room all --body "smoke to be corrected")" || return 1
+  theirs="$(thread_send "$key_b" --room all --body "smoke not yours")" || return 1
+  json="$(cli "$key_a" send --room all --corrects "$own" --body "smoke correction")" || {
+    note="send --corrects failed: $(cli_error)"
+    return 1
+  }
+  expect_json "$json" ".corrects == \"$own\" and .thread_id == null" "correction: $(jq -c '{corrects, thread_id}' <<<"$json")" ||
+    return 1
+  expect_cli_error corrects_not_own "another sender's message" "$key_a" send --room all --corrects "$theirs" --body x ||
+    return 1
+  expect_cli_error corrects_room_mismatch "a message of another room" "$key_a" send --room all --corrects "$dm_message_id" --body x ||
+    return 1
+  expect_cli_error corrects_not_found "a missing message" "$key_a" send --room all --corrects msg-00000000000000000000000000 --body x ||
+    return 1
+  note="201 with corrects; not_own, room_mismatch 422; not_found 404"
+}
+
 # Deletes the smoke agents so they stop accumulating; their messages stay.
 check_cleanup() {
   local agent failed=""
@@ -1290,6 +1506,8 @@ main() {
       record "$skipped" SKIP "no --receiver-url"
     done
   fi
+  scenario "threads (25-29)" check_threads
+  scenario "corrections (30-31)" check_corrections
   scenario "cleanup (delete smoke agents)" check_cleanup
   print_table
 }

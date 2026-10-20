@@ -538,13 +538,15 @@ pub struct DeletedAgent {
 /// Tables holding rows keyed to an agent, each with its key column, in the
 /// order [`delete`] empties them: referencing tables first, `agents` last
 /// (`IF-DB-001` "agent 삭제 cascade"). `memberships` covers every room
-/// kind. `messages`, `rooms` and `message_mentions` are not among them.
-const AGENT_STATE_TABLES: [(&str, &str); 7] = [
+/// kind; `thread_participants` (S15) means a re-registered agent is in no
+/// thread. `messages`, `rooms` and `message_mentions` are not among them.
+const AGENT_STATE_TABLES: [(&str, &str); 8] = [
     ("agent_avatars", "agent_id"),
     ("idempotency", "sender_id"),
     ("inbox_rows", "agent_id"),
     ("read_state", "agent_id"),
     ("notification_pending", "agent_id"),
+    ("thread_participants", "agent_id"),
     ("memberships", "agent_id"),
     ("agents", "agent_id"),
 ];

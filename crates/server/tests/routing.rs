@@ -262,6 +262,8 @@ async fn reply_to_alone_lands_in_the_room_of_the_original() {
     }
 
     // The owner barges into a's and b's DM as human; a answers in place.
+    // S15: the answer opens human's thread, so human (its root author)
+    // gets it without a mention (scenario 27, corrected scenario 18).
     let barge = sent(
         &api,
         OWNER_TOKEN,
@@ -278,8 +280,8 @@ async fn reply_to_alone_lands_in_the_room_of_the_original() {
     let rows = rows_for(&fx, answer["message_id"].as_str().unwrap()).await;
     assert_eq!(
         recipients(&rows),
-        ["agent-a", "agent-b"],
-        "without a mention human does not get the answer"
+        ["agent-a", "agent-b", "human"],
+        "human is the thread's root participant"
     );
     server.shutdown().await.unwrap();
 }
@@ -628,7 +630,10 @@ async fn inbox_and_history_items_carry_the_event_fields() {
         .await
         .text();
     let items_text = &raw[raw.find("\"items\":[").unwrap() + "\"items\":[".len()..];
-    let first_item = &items_text[..=items_text.find('}').unwrap()];
+    // S15: the first item is a root with a summary object; cut after the
+    // item's own `created_at`.
+    let created = items_text.find("\"created_at\"").unwrap();
+    let first_item = &items_text[..=created + items_text[created..].find('}').unwrap()];
     assert_eq!(
         common::ordered_keys(first_item),
         [
@@ -642,8 +647,11 @@ async fn inbox_and_history_items_carry_the_event_fields() {
             "sender_id",
             "body",
             "reply_to",
+            "thread_id",
+            "corrects",
             "wake",
             "mentions",
+            "thread_summary",
             "created_at"
         ]
     );
@@ -663,7 +671,7 @@ async fn inbox_and_history_items_carry_the_event_fields() {
         )
         .await;
     let first = &history.body["items"][0];
-    assert_eq!(first.as_object().unwrap().len(), 10);
+    assert_eq!(first.as_object().unwrap().len(), 13, "S15: thirteen keys");
     let single = api
         .get(
             &format!("/v1/messages/{}", original["message_id"].as_str().unwrap()),

@@ -171,10 +171,14 @@ async fn snapshot_head_bounds_every_page_of_a_traversal() {
             "sender_id",
             "body",
             "reply_to",
+            "thread_id",
+            "corrects",
             "wake",
             "mentions",
+            "thread_summary",
             "created_at"
-        ])
+        ]),
+        "S15 adds thread_id, corrects and thread_summary (IF-WIRE-012)"
     );
     assert_eq!(item["room_id"], "all");
     assert_eq!(item["sender_id"], "agent-a");

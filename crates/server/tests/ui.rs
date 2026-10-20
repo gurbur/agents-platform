@@ -297,7 +297,8 @@ fn endpoint_literals(source: &str) -> BTreeSet<&str> {
 }
 
 /// What the page calls: API name, method, path literal, and a concrete
-/// request for it.
+/// request for it. `{root}` in a path or body stands for the root of a
+/// thread the test opens first (S15).
 struct Call {
     name: &'static str,
     method: Method,
@@ -305,6 +306,8 @@ struct Call {
     path: &'static str,
     body: Option<(&'static str, Vec<u8>)>,
 }
+
+const ROOT_PLACEHOLDER: &str = "{root}";
 
 fn json_body(value: serde_json::Value) -> Option<(&'static str, Vec<u8>)> {
     Some(("application/json", serde_json::to_vec(&value).unwrap()))
@@ -372,6 +375,50 @@ fn calls() -> Vec<Call> {
             "/v1/messages/${encodeURIComponent(messageId)}",
             "/v1/messages/msg-01JZZZZZZZZZZZZZZZZZZZZZZZ",
             None,
+        ),
+        // S15: the timeline reads top-level messages, the thread panel one
+        // thread, its participants and the "나" mute toggle.
+        call(
+            "messages",
+            Method::GET,
+            "/v1/messages",
+            "/v1/messages?room_id=all&top_level=true",
+            None,
+        ),
+        call(
+            "messages",
+            Method::GET,
+            "/v1/messages",
+            "/v1/messages?room_id=all&thread_id={root}",
+            None,
+        ),
+        call(
+            "thread",
+            Method::GET,
+            "/v1/threads/${encodeURIComponent(rootId)}",
+            "/v1/threads/{root}",
+            None,
+        ),
+        call(
+            "participation",
+            Method::PUT,
+            "/v1/threads/${encodeURIComponent(rootId)}/participation",
+            "/v1/threads/{root}/participation",
+            json_body(json!({"wake": false, "agent_id": "human"})),
+        ),
+        // S15: a correction is the one send with `corrects`.
+        call(
+            "messages",
+            Method::POST,
+            "/v1/messages",
+            "/v1/messages",
+            json_body(json!({
+                "sender_id": "human",
+                "room_id": "all",
+                "body": "fixed",
+                "client_key": "console-fix",
+                "corrects": "{root}"
+            })),
         ),
         call(
             "roomMember",
@@ -487,19 +534,47 @@ async fn every_endpoint_the_page_calls_answers_the_owner() {
     let fx = Fixture::new();
     let server = RunningServer::start(&fx.load_config_with_owner(&["human"])).await;
     let api = server.api();
-    api.register("agent-a", None).await;
+    let agent = api.register("agent-a", None).await;
     api.register("human", None).await;
+    // A thread human started in `all` and agent-a opened.
+    let root = api
+        .post(
+            "/v1/messages",
+            OWNER_TOKEN,
+            json!({"sender_id": "human", "room_id": "all", "body": "root", "client_key": "root"}),
+        )
+        .await;
+    assert_eq!(root.status.as_u16(), 201, "{}", root.body);
+    let root_id = root.body["message_id"].as_str().unwrap().to_owned();
+    let reply = api
+        .post(
+            "/v1/messages",
+            &agent.api_key,
+            json!({"reply_to": root_id, "body": "re", "client_key": "re"}),
+        )
+        .await;
+    assert_eq!(reply.status.as_u16(), 201, "{}", reply.body);
     for call in &calls {
         let (content_type, body) = match &call.body {
+            Some((content_type, body)) if *content_type == "application/json" => (
+                vec![("content-type", *content_type)],
+                Some(
+                    String::from_utf8(body.clone())
+                        .expect("a JSON body is UTF-8")
+                        .replace(ROOT_PLACEHOLDER, &root_id)
+                        .into_bytes(),
+                ),
+            ),
             Some((content_type, body)) => {
                 (vec![("content-type", *content_type)], Some(body.clone()))
             }
             None => (Vec::new(), None),
         };
+        let path = call.path.replace(ROOT_PLACEHOLDER, &root_id);
         let reply = api
             .send_bytes(
                 call.method.clone(),
-                call.path,
+                &path,
                 Some(OWNER_TOKEN),
                 &content_type,
                 body,
@@ -515,7 +590,7 @@ async fn every_endpoint_the_page_calls_answers_the_owner() {
             reply.status.is_success(),
             "{} {}: {} {}",
             call.method,
-            call.path,
+            path,
             reply.status,
             String::from_utf8_lossy(&reply.bytes)
         );
@@ -552,4 +627,41 @@ fn registration_credentials_are_never_logged_or_stored() {
         );
     }
     assert!(APP_JS.contains("$('cred').addEventListener('close', onCredentialsClosed);"));
+}
+
+/// S15: the timeline reads `top_level=true` and folds new replies from the
+/// one existing feed poll (no new timer); the thread panel reads
+/// `thread_id`, replies with `reply_to` only, and mutes "나" by naming it
+/// as `agent_id`; a correction carries `corrects`. Server text stays text.
+#[test]
+fn threads_and_corrections_use_the_documented_queries_and_no_new_polling() {
+    for needle in [
+        "top_level: 'true'",
+        "thread_id: ",
+        "corrects",
+        "thread_summary",
+        "reply_count",
+        "agent_id: S.me",
+        "답글 ",
+        "정정됨",
+    ] {
+        assert!(APP_JS.contains(needle), "app.js lacks {needle}");
+    }
+    assert_eq!(
+        APP_JS.matches("setInterval(").count(),
+        2,
+        "the feed poll and the room refresh stay the only timers"
+    );
+    // The panel exists in the page and has a phone layout.
+    assert!(INDEX_HTML.contains("id=\"thread\""));
+    let phone = APP_CSS
+        .split("@media (max-width:720px){")
+        .nth(1)
+        .expect("phone media query");
+    assert!(
+        phone.contains(".thread{"),
+        "no phone layout for the thread panel"
+    );
+    // A send names one destination: reply_to for a thread, room_id otherwise.
+    assert!(!APP_JS.contains("body.thread_id"));
 }

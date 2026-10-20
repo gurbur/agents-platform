@@ -3,15 +3,18 @@
 //!
 //! Permission is one `memberships` row whatever the room kind: a row reads
 //! the room (its whole history), `joined = 1` writes to it and receives its
-//! events. The owner reads every room. Topic room management is the owner's
+//! events. The owner reads every room. S15 widens reading only: a thread's
+//! participant reads that thread and its messages without a membership
+//! (`IF-WIRE-014`); writing stays membership. Topic room management is the owner's
 //! and lives here too; deleting a topic membership row is the only
 //! `memberships` DELETE outside the agent deletion cascade.
 
-use platform_wire::{AgentId, OWNER_CREATOR, RoomId, RoomKind, RoomSummary};
+use platform_wire::{AgentId, Message, MessageId, OWNER_CREATOR, RoomId, RoomKind, RoomSummary};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
 use super::agents::{agent_exists, current_event_seq, stored_agent_id};
 use super::messages::stored_seq;
+use super::threads as thread_queries;
 use crate::store::StoreError;
 
 /// `epoch` of a membership row a send, a registration or an invitation
@@ -71,8 +74,11 @@ pub enum ReadAccess {
     Allowed,
     /// The owner asked for a room that does not exist.
     UnknownRoom,
-    /// An agent without a membership row, whether or not the room exists.
+    /// An agent without a membership row (nor, for a thread page, a
+    /// participant row), whether or not the room exists.
     Forbidden,
+    /// A thread page whose `thread_id` is no open thread of the room.
+    ThreadNotFound,
 }
 
 /// Why a topic room operation changed nothing.
@@ -121,6 +127,65 @@ pub fn read_access(
         Viewer::Agent(_) => ReadAccess::Forbidden,
     };
     Ok(decision)
+}
+
+/// History permission with the S15 thread filter (`IF-WIRE-005`):
+/// [`read_access`], or for an agent asking for one thread, being its
+/// participant; then the thread must be an open thread of this room.
+pub fn history_access(
+    conn: &Connection,
+    viewer: &Viewer,
+    room_id: &RoomId,
+    thread: Option<&MessageId>,
+) -> Result<ReadAccess, StoreError> {
+    let mut decision = read_access(conn, viewer, room_id)?;
+    if let (ReadAccess::Forbidden, Viewer::Agent(agent_id), Some(root)) = (decision, viewer, thread)
+        && thread_queries::is_participant(conn, root, agent_id)?
+    {
+        decision = ReadAccess::Allowed;
+    }
+    if decision != ReadAccess::Allowed {
+        return Ok(decision);
+    }
+    if let Some(root) = thread
+        && thread_queries::open_root_room(conn, root)?.as_ref() != Some(room_id)
+    {
+        return Ok(ReadAccess::ThreadNotFound);
+    }
+    Ok(ReadAccess::Allowed)
+}
+
+/// `GET /v1/messages/{message_id}` (`IF-WIRE-014` (b)): reading the room,
+/// or being a participant of the thread the message is in (a root is in
+/// its own thread).
+pub fn can_read_message(
+    conn: &Connection,
+    viewer: &Viewer,
+    message: &Message,
+) -> Result<bool, StoreError> {
+    if read_access(conn, viewer, &message.room_id)? == ReadAccess::Allowed {
+        return Ok(true);
+    }
+    let Viewer::Agent(agent_id) = viewer else {
+        return Ok(false);
+    };
+    let root = message.thread_id.as_ref().unwrap_or(&message.message_id);
+    thread_queries::is_participant(conn, root, agent_id)
+}
+
+/// `GET /v1/threads/{root_id}`: the owner, an agent reading the room, or a
+/// participant of the thread.
+pub fn can_read_thread(
+    conn: &Connection,
+    viewer: &Viewer,
+    room_id: &RoomId,
+    root: &MessageId,
+) -> Result<bool, StoreError> {
+    match viewer {
+        Viewer::Owner => Ok(true),
+        Viewer::Agent(agent_id) => Ok(access(conn, room_id, agent_id)?.can_read()
+            || thread_queries::is_participant(conn, root, agent_id)?),
+    }
 }
 
 pub fn find(conn: &Connection, room_id: &RoomId) -> Result<Option<RoomRow>, StoreError> {

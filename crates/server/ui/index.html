@@ -56,10 +56,23 @@
     </div>
   </main>
 
-  <div class="scrim" data-act="info"></div>
+  <div class="scrim" data-act="scrim"></div>
   <aside class="info" id="info" aria-label="정보">
     <div class="info-head"><span>정보</span><button class="btn icon" data-act="info" aria-label="닫기"><svg class="svg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
     <div class="info-body" id="infoBody"></div>
+  </aside>
+
+  <aside class="thread" id="thread" aria-label="스레드" hidden>
+    <div class="info-head"><span class="thread-ttl" id="threadTitle">스레드</span><button class="btn icon" data-act="thread-close" aria-label="스레드 닫기"><svg class="svg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="thread-meta" id="threadMeta"></div>
+    <div class="thread-feed" id="threadFeed"></div>
+    <div class="composer">
+      <div id="threadStrips"></div>
+      <div class="box">
+        <textarea id="threadInput" rows="1" placeholder="스레드에 답장"></textarea>
+        <button class="send" id="threadSend" data-act="thread-send" aria-label="스레드에 보내기"><svg class="svg" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+      </div>
+    </div>
   </aside>
 </div>
 

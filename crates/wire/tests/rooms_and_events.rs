@@ -140,8 +140,11 @@ fn sample_message() -> Message {
         sender_id: agent("agent-a"),
         body: "…".into(),
         reply_to: None,
+        thread_id: None,
+        corrects: None,
         wake: false,
         mentions: vec![agent("human")],
+        thread_summary: None,
         created_at: "2026-10-20T09:00:00.000Z".into(),
     }
 }
@@ -190,7 +193,7 @@ fn a_send_body_omits_every_absent_option() {
 }
 
 #[test]
-fn a_message_has_ten_keys_in_order_and_keeps_nulls_and_empty_mentions() {
+fn a_message_has_thirteen_keys_in_order_and_keeps_nulls_and_empty_mentions() {
     let mut message = sample_message();
     message.mentions.clear();
     let value = serde_json::to_value(&message).unwrap();
@@ -204,8 +207,11 @@ fn a_message_has_ten_keys_in_order_and_keeps_nulls_and_empty_mentions() {
             "sender_id",
             "body",
             "reply_to",
+            "thread_id",
+            "corrects",
             "wake",
             "mentions",
+            "thread_summary",
             "created_at"
         ]
     );
@@ -222,12 +228,13 @@ fn a_message_event_is_flat_and_round_trips() {
         value,
         json!({"inbox_seq": "42", "kind": "message", "woke": true, "message_id": "msg-01J00000000000000000000000",
                "event_seq": "57", "room_id": "dm:agent-a:agent-b", "room_kind": "dm",
-               "sender_id": "agent-a", "body": "…", "reply_to": null, "wake": false,
-               "mentions": ["human"], "created_at": "2026-10-20T09:00:00.000Z"})
+               "sender_id": "agent-a", "body": "…", "reply_to": null, "thread_id": null,
+               "corrects": null, "wake": false, "mentions": ["human"], "thread_summary": null,
+               "created_at": "2026-10-20T09:00:00.000Z"})
     );
     let order = ordered_keys(&serde_json::to_string(&item).unwrap());
     assert_eq!(order[..4], ["inbox_seq", "kind", "woke", "message_id"]);
-    assert_eq!(order.len(), 13);
+    assert_eq!(order.len(), 16);
     let back: InboxItem = serde_json::from_value(value).unwrap();
     assert_eq!(back, item);
     assert_eq!(back.kind(), "message");
@@ -259,7 +266,8 @@ fn an_unknown_event_kind_is_accepted_not_an_error() {
         sample_message(),
     ))
     .unwrap();
-    extended["thread_id"] = json!("t-1");
+    // S15 made `thread_id` a field; a later slice's key stands in.
+    extended["reactions"] = json!([]);
     assert!(serde_json::from_value::<InboxItem>(extended).is_ok());
     // Without its sequence or kind an item is still malformed.
     assert!(serde_json::from_value::<InboxItem>(json!({"kind": "message"})).is_err());

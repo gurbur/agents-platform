@@ -1,7 +1,8 @@
 //! `POST /v1/messages` (`IF-API-SEND`, `IF-WIRE-010`): one send for
 //! agents and the owner. This handler runs steps 1–11 (format, allowlist,
-//! self DM); [`message_queries::commit_send`] runs 12–18 in one
-//! transaction.
+//! self DM; S15 adds the `corrects` format to step 8);
+//! [`message_queries::commit_send`] runs 12–18 in one transaction,
+//! including the thread a reply lands in and the `corrects` checks.
 
 use std::collections::BTreeSet;
 
@@ -40,6 +41,7 @@ struct ValidSend {
     body: String,
     wake: bool,
     mentions: Vec<AgentId>,
+    corrects: Option<MessageId>,
 }
 
 /// The body arrives as a `Result` so an agent's malformed `sender_id` is
@@ -71,6 +73,7 @@ async fn send(
                 body: valid.body,
                 wake: valid.wake,
                 mentions: valid.mentions,
+                corrects: valid.corrects,
                 post_as,
                 message_id: new_message_id(),
                 created_at: clock::now_rfc3339_ms(),
@@ -88,12 +91,15 @@ async fn send(
             if woken > 0 {
                 state.delivery.notify();
             }
-            // Counts only: no body, no mention values (`IF-WIRE-010`).
+            // Counts only: no body, no mention values (`IF-WIRE-010`); the
+            // thread's root id for a thread message (`IF-WIRE-014`).
+            let thread_id = message.thread_id.as_ref().map(tracing::field::display);
             info!(
                 message_id = %message.message_id,
                 room_id = %message.room_id,
                 sender_id = %message.sender_id,
                 event_seq = %message.event_seq,
+                thread_id,
                 recipients,
                 woken,
                 wake = message.wake,
@@ -137,6 +143,7 @@ fn validate(
         wake,
         mentions,
         sender_id,
+        corrects,
     } = request;
 
     // 3 and 4: who sends.
@@ -167,6 +174,7 @@ fn validate(
     check_body_size(&body)?;
     // 8
     let destination = parse_destination(room_id, reply_to, to)?;
+    let corrects = parse_message_id("corrects", corrects)?;
     // 9
     let mentions = parse_mentions(mentions.unwrap_or_default(), &sender_text)?;
     // 10
@@ -187,6 +195,7 @@ fn validate(
         body,
         wake: wake.unwrap_or(true),
         mentions,
+        corrects,
     })
 }
 
@@ -202,7 +211,7 @@ fn parse_destination(
             .map_err(|err: RoomIdError| ApiError::invalid_field("room_id", err.to_string()))?;
         return Ok(Destination::Room(room));
     }
-    if let Some(reply_to) = parse_reply_to(reply_to)? {
+    if let Some(reply_to) = parse_message_id("reply_to", reply_to)? {
         return Ok(Destination::ReplyTo(reply_to));
     }
     let to = to.unwrap_or_default();
@@ -276,11 +285,12 @@ fn check_body_size(body: &str) -> Result<(), ApiError> {
     ))
 }
 
-/// The optional `reply_to`, which must be a `msg-` ULID (`IF-WIRE-005`).
-fn parse_reply_to(raw: Option<String>) -> Result<Option<MessageId>, ApiError> {
+/// The optional `reply_to` or `corrects`, which must be a `msg-` ULID
+/// (`IF-WIRE-005`, `IF-WIRE-015`).
+fn parse_message_id(field: &str, raw: Option<String>) -> Result<Option<MessageId>, ApiError> {
     raw.map(|raw| raw.parse::<MessageId>())
         .transpose()
-        .map_err(|err| ApiError::invalid_field("reply_to", err.to_string()))
+        .map_err(|err| ApiError::invalid_field(field, err.to_string()))
 }
 
 fn is_valid_client_key(client_key: &str) -> bool {
@@ -333,6 +343,20 @@ fn rejection_error(rejection: SendRejection) -> ApiError {
         )
         .with_detail("field", "mentions")
         .with_detail("agent_id", agent_id.as_str()),
+        SendRejection::CorrectsNotFound => {
+            ApiError::not_found(codes::CORRECTS_NOT_FOUND, "corrects names no message")
+                .with_detail("field", "corrects")
+        }
+        SendRejection::CorrectsRoomMismatch => ApiError::unprocessable(
+            codes::CORRECTS_ROOM_MISMATCH,
+            "corrects names a message in another room",
+        )
+        .with_detail("field", "corrects"),
+        SendRejection::CorrectsNotOwn => ApiError::unprocessable(
+            codes::CORRECTS_NOT_OWN,
+            "corrects names a message the sender did not write",
+        )
+        .with_detail("field", "corrects"),
     }
 }
 

@@ -66,7 +66,9 @@ const V1_ROWS: [(&str, &str); 8] = [
 /// Rows a v1 server could have written: two agents in `all`, one broadcast
 /// (fanned out to both) and one DM from agent-a to agent-b, an idempotency
 /// record and a read marker. Hand-written because the current register
-/// path writes v2 columns.
+/// path writes v2 columns. The DM is no reply: a v1 server refused a reply
+/// into another room (`reply_to_room_mismatch`), and v7's thread invariant
+/// refuses such a row.
 fn v1_rows() -> String {
     format!(
         "INSERT INTO agents (agent_id, api_key_hash, receiver_secret, receiver_url, route_version, inbox_head, created_at) VALUES
@@ -78,7 +80,7 @@ fn v1_rows() -> String {
          UPDATE sequences SET value = 2 WHERE name = 'event_seq';
          INSERT INTO messages (message_id, event_seq, room_id, sender_id, body, reply_to, created_at) VALUES
            ('{MESSAGE_ALL}', 1, 'all', 'agent-a', 'hello all', NULL, '2026-10-15T00:00:02.000Z'),
-           ('{MESSAGE_DM}', 2, 'dm:agent-a:agent-b', 'agent-a', 'hello b', '{MESSAGE_ALL}', '2026-10-15T00:00:03.000Z');
+           ('{MESSAGE_DM}', 2, 'dm:agent-a:agent-b', 'agent-a', 'hello b', NULL, '2026-10-15T00:00:03.000Z');
          INSERT INTO inbox_rows (agent_id, inbox_seq, message_id) VALUES
            ('agent-a', 1, '{MESSAGE_ALL}'),
            ('agent-b', 1, '{MESSAGE_ALL}'),
@@ -477,14 +479,17 @@ async fn a_v3_database_rebuilds_messages_without_the_sender_foreign_key() {
         .await;
     assert_eq!(after, before.0, "every row and value is unchanged");
     assert_eq!(extra, before.1, "avatars are unchanged");
+    // v7 adds `thread_id` and `corrects`, which refer to messages too.
+    let mut fks = fks;
+    fks.sort();
     assert_eq!(
         fks,
-        [(
+        ["corrects", "reply_to", "thread_id"].map(|from| (
             "messages".to_owned(),
-            "reply_to".to_owned(),
+            from.to_owned(),
             "message_id".to_owned()
-        )],
-        "only reply_to keeps a foreign key"
+        )),
+        "no foreign key to agents: only references to other messages"
     );
     assert_eq!(violations, 0, "PRAGMA foreign_key_check is empty");
     assert!(
@@ -1042,8 +1047,8 @@ async fn an_empty_database_starts_at_v6() {
         .json()
         .await
         .unwrap();
-    assert_eq!(health["schema_version"], 6);
-    assert_eq!(LATEST_SCHEMA_VERSION, 6);
+    // S15: the latest version is 7 and includes v6.
+    assert_eq!(health["schema_version"], LATEST_SCHEMA_VERSION);
     let api = server.api();
     api.register("agent-a", None).await;
     let directory = api.get("/v1/agents", OWNER_TOKEN).await;
@@ -1055,7 +1060,7 @@ async fn an_empty_database_starts_at_v6() {
         .await;
     assert!(has_column);
     let versions: Vec<u32> = versions.into_iter().map(|(version, _)| version).collect();
-    assert_eq!(versions, (1..=6).collect::<Vec<u32>>());
+    assert_eq!(versions, (1..=LATEST_SCHEMA_VERSION).collect::<Vec<u32>>());
 }
 
 #[tokio::test]
@@ -1070,7 +1075,7 @@ async fn a_v5_database_gains_an_empty_last_seen_at_column() {
         .json()
         .await
         .unwrap();
-    assert_eq!(health["schema_version"], 6);
+    assert_eq!(health["schema_version"], LATEST_SCHEMA_VERSION);
     // The migrated agents read as offline and never seen.
     let directory = server.api().get("/v1/agents", OWNER_TOKEN).await;
     for item in directory.body["items"].as_array().unwrap() {
@@ -1093,7 +1098,7 @@ async fn a_v5_database_gains_an_empty_last_seen_at_column() {
     assert_eq!(last_seen, [vec![SqlValue::Null]], "no backfill");
     assert_eq!(violations, 0, "PRAGMA foreign_key_check is empty");
     let numbers: Vec<u32> = versions.iter().map(|(version, _)| *version).collect();
-    assert_eq!(numbers, (1..=6).collect::<Vec<u32>>());
+    assert_eq!(numbers, (1..=LATEST_SCHEMA_VERSION).collect::<Vec<u32>>());
 
     // Reopening is a no-op.
     let server = RunningServer::start(&config).await;
@@ -1103,4 +1108,308 @@ async fn a_v5_database_gains_an_empty_last_seen_at_column() {
         .await;
     assert_eq!(again, before);
     assert_eq!(versions_again, versions, "nothing re-applied");
+}
+
+// ---- v7 (S15): threads and corrections -----------------------------------------------
+
+const R1: &str = "msg-01M700000000000000000007R1";
+const C1: &str = "msg-01M700000000000000000008C1";
+const C2: &str = "msg-01M700000000000000000009C2";
+const C3: &str = "msg-01M70000000000000000000AC3";
+const R2: &str = "msg-01M70000000000000000000BR2";
+const D1: &str = "msg-01M70000000000000000000CD1";
+const D2: &str = "msg-01M70000000000000000000DD2";
+const E1: &str = "msg-01M70000000000000000000EE1";
+const E2: &str = "msg-01M70000000000000000000FE2";
+const L1: &str = "msg-01M70000000000000000000GN1";
+
+/// S13/S14-era rows on top of the v5 fixture (which already holds the reply
+/// `V5_DM_2 → V5_DM_1` and agent-z's root `V5_ALL_Z`; agent-z is not
+/// registered): a chain three replies deep, a root with two replies one of
+/// which mentions a registered and an unregistered agent, a deleted agent's
+/// root with a reply from it and to it, and a message nobody answered.
+fn v6_extra() -> String {
+    format!(
+        "UPDATE sequences SET value = 16 WHERE name = 'event_seq';
+         INSERT INTO messages (message_id, event_seq, room_id, sender_id, body, reply_to, created_at, wake) VALUES
+           ('{R1}', 7, 'all', 'agent-a', 'r1', NULL, '2026-10-20T01:00:07.000Z', 1),
+           ('{C1}', 8, 'all', 'agent-b', 'c1', '{R1}', '2026-10-20T01:00:08.000Z', 1),
+           ('{C2}', 9, 'all', 'agent-a', 'c2', '{C1}', '2026-10-20T01:00:09.000Z', 1),
+           ('{C3}', 10, 'all', 'agent-c', 'c3', '{C2}', '2026-10-20T01:00:10.000Z', 0),
+           ('{R2}', 11, 'all', 'agent-b', 'r2', NULL, '2026-10-20T01:00:11.000Z', 1),
+           ('{D1}', 12, 'all', 'agent-a', 'd1', '{R2}', '2026-10-20T01:00:12.000Z', 1),
+           ('{D2}', 13, 'all', 'agent-b', 'd2', '{D1}', '2026-10-20T01:00:13.000Z', 1),
+           ('{E1}', 14, 'all', 'agent-a', 'e1', '{V5_ALL_Z}', '2026-10-20T01:00:14.000Z', 1),
+           ('{E2}', 15, 'all', 'agent-z', 'e2', '{E1}', '2026-10-20T01:00:15.000Z', 1),
+           ('{L1}', 16, 'all', 'agent-b', 'l1', NULL, '2026-10-20T01:00:16.000Z', 1);
+         INSERT INTO message_mentions (message_id, agent_id) VALUES
+           ('{D1}', 'agent-c'),
+           ('{D1}', 'agent-z');
+         UPDATE agents SET last_seen_at = '2026-10-20T02:00:00.000Z' WHERE agent_id = 'agent-a';"
+    )
+}
+
+/// Every v6 column: the v5 rows plus `agents.last_seen_at` and the v6
+/// migration row.
+fn v6_snapshot(conn: &rusqlite::Connection) -> Result<Rows, StoreError> {
+    let mut rows = v5_snapshot(conn)?;
+    rows.push((
+        "agents.last_seen_at",
+        select_all(
+            conn,
+            "SELECT agent_id, last_seen_at FROM agents ORDER BY agent_id",
+        )?,
+    ));
+    rows.push((
+        "schema_migrations v6",
+        select_all(
+            conn,
+            "SELECT version, applied_at FROM schema_migrations WHERE version = 6",
+        )?,
+    ));
+    Ok(rows)
+}
+
+/// Builds a v6 database (the v5 fixture migrated, plus [`v6_extra`] and
+/// `extra`) and returns its rows.
+async fn write_v6_database(fx: &Fixture, extra: &'static str) -> Rows {
+    write_v5_database(fx).await;
+    let (store, thread) = Store::open(&fx.db_path()).unwrap();
+    let version = store
+        .run(|conn| migrations::apply_through(conn, 6))
+        .await
+        .unwrap();
+    assert_eq!(version, 6);
+    let rows = v6_extra();
+    let snapshot = store
+        .transaction(move |tx| {
+            tx.execute_batch(&rows)?;
+            tx.execute_batch(extra)?;
+            v6_snapshot(tx)
+        })
+        .await
+        .unwrap();
+    drop(store);
+    thread.shutdown(JOIN_LIMIT).await.unwrap();
+    snapshot
+}
+
+fn int(value: i64) -> SqlValue {
+    SqlValue::Integer(value)
+}
+
+#[tokio::test]
+async fn an_empty_database_starts_at_v7_with_thread_columns_and_participants() {
+    let fx = Fixture::new();
+    let server = RunningServer::start(&fx.load_config()).await;
+    let health: Value = reqwest::get(server.url("/healthz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["schema_version"], 7);
+    assert_eq!(LATEST_SCHEMA_VERSION, 7);
+    server.shutdown().await.unwrap();
+
+    let (columns, participants, indexes) = fx
+        .read_db(|conn| {
+            Ok((
+                select_all(
+                    conn,
+                    "SELECT name FROM pragma_table_info('messages')
+                     WHERE name IN ('thread_id', 'corrects') ORDER BY name",
+                )?,
+                select_all(
+                    conn,
+                    "SELECT name FROM pragma_table_info('thread_participants') ORDER BY cid",
+                )?,
+                index_names(conn, "messages")?,
+            ))
+        })
+        .await;
+    assert_eq!(columns, [vec![text("corrects")], vec![text("thread_id")]]);
+    assert_eq!(
+        participants,
+        ["thread_id", "agent_id", "joined_via", "muted", "joined_at"].map(|name| vec![text(name)])
+    );
+    assert!(
+        indexes.iter().any(|name| name == "messages_thread_event"),
+        "{indexes:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_v6_database_binds_old_reply_chains_into_threads() {
+    let fx = Fixture::new();
+    let before = write_v6_database(&fx, "").await;
+    let config = fx.load_config();
+    let server = RunningServer::start(&config).await;
+    let health: Value = reqwest::get(server.url("/healthz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["schema_version"], 7);
+    // The API sees the backfill: a top-level view without the old replies.
+    let top = server
+        .api()
+        .get("/v1/messages?room_id=all&top_level=true", OWNER_TOKEN)
+        .await;
+    let summary = top.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["message_id"] == R1)
+        .map(|item| item["thread_summary"].clone())
+        .unwrap();
+    assert_eq!(summary, json!({"reply_count": 3, "last_event_seq": "10"}));
+    server.shutdown().await.unwrap();
+
+    let (after, threads, participants, violations, post_check, versions) = fx
+        .read_db(|conn| {
+            Ok((
+                v6_snapshot(conn)?,
+                select_all(
+                    conn,
+                    "SELECT message_id, thread_id, corrects FROM messages ORDER BY event_seq",
+                )?,
+                select_all(
+                    conn,
+                    "SELECT thread_id, agent_id, joined_via, muted, joined_at FROM thread_participants
+                     ORDER BY thread_id, joined_at, agent_id",
+                )?,
+                foreign_key_violations(conn)?,
+                select_all(
+                    conn,
+                    "SELECT t.message_id FROM messages t JOIN messages r ON r.message_id = t.thread_id
+                     WHERE r.thread_id IS NOT NULL OR r.room_id <> t.room_id
+                     UNION ALL SELECT message_id FROM messages WHERE reply_to IS NOT NULL AND thread_id IS NULL",
+                )?,
+                applied_migrations(conn)?,
+            ))
+        })
+        .await;
+    assert_eq!(after, before, "every v6 row and value is unchanged");
+    let thread_of = |message: &str| -> SqlValue {
+        threads
+            .iter()
+            .find(|row| row[0] == text(message))
+            .map(|row| row[1].clone())
+            .unwrap()
+    };
+    for (message, root) in [
+        (V5_DM_2, Some(V5_DM_1)),
+        (C1, Some(R1)),
+        (C2, Some(R1)),
+        (C3, Some(R1)),
+        (D1, Some(R2)),
+        (D2, Some(R2)),
+        (E1, Some(V5_ALL_Z)),
+        (E2, Some(V5_ALL_Z)),
+        (V5_ALL_1, None),
+        (V5_DM_1, None),
+        (V5_DM_Z, None),
+        (V5_ALL_Z, None),
+        (R1, None),
+        (R2, None),
+        (L1, None),
+    ] {
+        let expected = root.map_or(SqlValue::Null, text);
+        assert_eq!(thread_of(message), expected, "{message}");
+    }
+    assert!(
+        threads.iter().all(|row| row[2] == SqlValue::Null),
+        "no corrects backfill"
+    );
+    let row = |thread: &str, agent: &str, via: &str, at: &str| {
+        vec![text(thread), text(agent), text(via), int(0), text(at)]
+    };
+    let mut expected = vec![
+        row(V5_DM_1, "agent-a", "root", "2026-10-19T01:00:02.000Z"),
+        row(V5_DM_1, "agent-b", "opener", "2026-10-19T01:00:02.000Z"),
+        row(R1, "agent-a", "root", "2026-10-20T01:00:08.000Z"),
+        row(R1, "agent-b", "opener", "2026-10-20T01:00:08.000Z"),
+        row(R1, "agent-c", "poster", "2026-10-20T01:00:10.000Z"),
+        row(R2, "agent-a", "opener", "2026-10-20T01:00:12.000Z"),
+        row(R2, "agent-b", "root", "2026-10-20T01:00:12.000Z"),
+        row(R2, "agent-c", "mentioned", "2026-10-20T01:00:12.000Z"),
+        // agent-z's own root and reply register nobody but agent-a.
+        row(V5_ALL_Z, "agent-a", "opener", "2026-10-20T01:00:14.000Z"),
+    ];
+    expected.sort_by(|left, right| {
+        let key = |row: &Vec<SqlValue>| format!("{:?}{:?}{:?}", row[0], row[4], row[1]);
+        key(left).cmp(&key(right))
+    });
+    assert_eq!(participants, expected);
+    assert!(
+        post_check.is_empty(),
+        "the post check holds: {post_check:?}"
+    );
+    assert_eq!(violations, 0, "PRAGMA foreign_key_check is empty");
+    let numbers: Vec<u32> = versions.iter().map(|(version, _)| *version).collect();
+    assert_eq!(numbers, (1..=7).collect::<Vec<u32>>());
+
+    // Reopening is a no-op.
+    let server = RunningServer::start(&config).await;
+    server.shutdown().await.unwrap();
+    let (again, participants_again, versions_again) = fx
+        .read_db(|conn| {
+            Ok((
+                v6_snapshot(conn)?,
+                select_all(conn, "SELECT COUNT(*) FROM thread_participants")?,
+                applied_migrations(conn)?,
+            ))
+        })
+        .await;
+    assert_eq!(again, before);
+    assert_eq!(participants_again, [vec![int(9)]]);
+    assert_eq!(versions_again, versions, "nothing re-applied");
+}
+
+#[tokio::test]
+async fn a_v7_post_check_violation_rolls_back_and_refuses_to_start() {
+    let fx = Fixture::new();
+    // An old reply into another room breaks the thread invariant.
+    write_v6_database(
+        &fx,
+        "UPDATE sequences SET value = 17 WHERE name = 'event_seq';
+         INSERT INTO messages (message_id, event_seq, room_id, sender_id, body, reply_to, created_at, wake)
+         VALUES ('msg-01M70000000000000000000HX1', 17, 'dm:agent-a:agent-b', 'agent-a', 'x',
+                 'msg-01M700000000000000000007R1', '2026-10-20T03:00:00.000Z', 1);",
+    )
+    .await;
+
+    let (store, thread) = Store::open(&fx.db_path()).unwrap();
+    let (refused, version, has_participants, has_thread_column) = store
+        .run(|conn| {
+            let refused = migrations::apply(conn).is_err();
+            let version = migrations::current_version(conn)?;
+            let has_participants: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'thread_participants'",
+                [],
+                |row| row.get(0),
+            )?;
+            let has_thread_column: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'thread_id'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((refused, version, has_participants, has_thread_column))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (refused, version, has_participants, has_thread_column),
+        (true, 6, 0, 0),
+        "rolled back to v6"
+    );
+    drop(store);
+    thread.shutdown(JOIN_LIMIT).await.unwrap();
+
+    assert!(
+        platformd::start(&fx.load_config()).await.is_err(),
+        "startup is refused"
+    );
 }

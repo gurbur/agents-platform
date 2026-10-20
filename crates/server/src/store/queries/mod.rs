@@ -8,3 +8,4 @@ pub mod delivery;
 pub mod inbox;
 pub mod messages;
 pub mod rooms;
+pub mod threads;

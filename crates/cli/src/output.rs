@@ -8,9 +8,10 @@ use std::io::Write;
 use platform_wire::{
     AgentEntry, AgentId, AgentProfile, AvatarResponse, DeliveryRetryResponse, DeliveryState,
     DeliveryStatus, HealthStatus, HistoryCursor, HistoryPage, IdentityTokenResponse, InboxItem,
-    InboxPage, MembershipResponse, Message, MessageResponse, OwnerAgentEntry, Presence,
-    PresenceResponse, ProfileResponse, ReadMarkerResponse, ReceiverResponse, RegisterAgentResponse,
-    RoomSummary, RotateTokensResponse, Seq,
+    InboxPage, MembershipResponse, Message, MessageResponse, OwnerAgentEntry,
+    ParticipationResponse, Presence, PresenceResponse, ProfileResponse, ReadMarkerResponse,
+    ReceiverResponse, RegisterAgentResponse, RoomSummary, RotateTokensResponse, Seq,
+    ThreadParticipant, ThreadView,
 };
 
 use crate::error::CliError;
@@ -423,6 +424,8 @@ pub fn sent(response: &MessageResponse, client_key: &str) -> String {
         ("room_kind", message.room_kind.as_str().to_owned()),
         ("sender_id", message.sender_id.to_string()),
         ("reply_to", or_none(message.reply_to.as_ref())),
+        ("thread_id", or_none(message.thread_id.as_ref())),
+        ("corrects", or_none(message.corrects.as_ref())),
         ("wake", message.wake.to_string()),
         ("mentions", id_list(&message.mentions)),
         ("created_at", message.created_at.clone()),
@@ -450,6 +453,8 @@ fn inbox_table(items: &[InboxItem]) -> String {
         "WOKE",
         "REPLY_TO",
         "MENTIONS",
+        "THREAD_ID",
+        "CORRECTS",
         "BODY",
     ]);
     for item in items {
@@ -465,9 +470,11 @@ fn inbox_table(items: &[InboxItem]) -> String {
                 or_none(item.woke()),
                 or_none(message.reply_to.as_ref()),
                 id_list(&message.mentions),
+                or_none(message.thread_id.as_ref()),
+                or_none(message.corrects.as_ref()),
                 escape_body(&message.body),
             ]),
-            None => row.extend(std::iter::repeat_n(NONE.to_owned(), 10)),
+            None => row.extend(std::iter::repeat_n(NONE.to_owned(), 12)),
         }
         table.push(row);
     }
@@ -519,6 +526,9 @@ pub fn history_page(page: &HistoryPage) -> String {
         "WAKE",
         "REPLY_TO",
         "MENTIONS",
+        "THREAD_ID",
+        "CORRECTS",
+        "REPLIES",
         "BODY",
     ]);
     for message in &page.items {
@@ -530,6 +540,9 @@ pub fn history_page(page: &HistoryPage) -> String {
             wake_cell(message.wake).to_owned(),
             or_none(message.reply_to.as_ref()),
             id_list(&message.mentions),
+            or_none(message.thread_id.as_ref()),
+            or_none(message.corrects.as_ref()),
+            or_none(message.thread_summary.map(|summary| summary.reply_count)),
             escape_body(&message.body),
         ]);
     }
@@ -547,6 +560,7 @@ pub fn history_page(page: &HistoryPage) -> String {
 }
 
 pub fn message(message: &Message) -> String {
+    let summary = message.thread_summary;
     key_values(&[
         ("message_id", message.message_id.to_string()),
         ("event_seq", message.event_seq.to_string()),
@@ -554,10 +568,60 @@ pub fn message(message: &Message) -> String {
         ("room_kind", message.room_kind.as_str().to_owned()),
         ("sender_id", message.sender_id.to_string()),
         ("reply_to", or_none(message.reply_to.as_ref())),
+        ("thread_id", or_none(message.thread_id.as_ref())),
+        ("corrects", or_none(message.corrects.as_ref())),
+        (
+            "reply_count",
+            or_none(summary.map(|summary| summary.reply_count)),
+        ),
+        (
+            "last_reply_seq",
+            or_none(summary.map(|summary| summary.last_event_seq)),
+        ),
         ("wake", message.wake.to_string()),
         ("mentions", id_list(&message.mentions)),
         ("created_at", message.created_at.clone()),
         ("body", escape_body(&message.body)),
+    ])
+}
+
+/// `thread show`: the thread as key-value lines, then its participants.
+pub fn thread(view: &ThreadView) -> String {
+    let mut text = key_values(&[
+        ("thread_id", view.thread_id.to_string()),
+        ("room_id", view.room_id.to_string()),
+        ("root_sender_id", view.root_sender_id.to_string()),
+        ("reply_count", view.reply_count.to_string()),
+        ("last_event_seq", view.last_event_seq.to_string()),
+        ("last_message_at", view.last_message_at.clone()),
+    ]);
+    let mut table = Table::new(vec!["AGENT_ID", "JOINED_VIA", "MUTED", "JOINED_AT"]);
+    for participant in &view.participants {
+        table.push(vec![
+            participant.agent_id.to_string(),
+            participant.joined_via.as_str().to_owned(),
+            participant.muted.to_string(),
+            participant.joined_at.clone(),
+        ]);
+    }
+    text.push_str(&table.render());
+    text
+}
+
+/// `thread mute|unmute`: the participant after the change.
+pub fn participation(changed: &ParticipationResponse) -> String {
+    let ThreadParticipant {
+        agent_id,
+        joined_via,
+        muted,
+        joined_at,
+    } = &changed.participant;
+    key_values(&[
+        ("thread_id", changed.thread_id.to_string()),
+        ("agent_id", agent_id.to_string()),
+        ("joined_via", joined_via.as_str().to_owned()),
+        ("muted", muted.to_string()),
+        ("joined_at", joined_at.clone()),
     ])
 }
 

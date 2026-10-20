@@ -75,6 +75,13 @@ pub mod codes {
     pub const ROOM_ID_TAKEN: &str = "room_id_taken";
     pub const INVALID_DESTINATION: &str = "invalid_destination";
     pub const MENTION_NOT_MEMBER: &str = "mention_not_member";
+    /// S15 thread and correction codes (`IF-WIRE-003`, `IF-WIRE-014`,
+    /// `IF-WIRE-015`). `thread_not_found` also hides a thread the caller
+    /// cannot read.
+    pub const THREAD_NOT_FOUND: &str = "thread_not_found";
+    pub const CORRECTS_NOT_FOUND: &str = "corrects_not_found";
+    pub const CORRECTS_ROOM_MISMATCH: &str = "corrects_room_mismatch";
+    pub const CORRECTS_NOT_OWN: &str = "corrects_not_own";
     /// Directory avatar codes (API_V1 "Directory avatar", `IF-WIRE-008`).
     pub const AVATAR_TOO_LARGE: &str = "avatar_too_large";
     pub const AVATAR_NOT_FOUND: &str = "avatar_not_found";

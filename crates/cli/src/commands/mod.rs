@@ -16,6 +16,7 @@ pub mod profile;
 pub mod receiver;
 pub mod rooms;
 pub mod send;
+pub mod thread;
 
 use std::io::Read;
 use std::path::Path;
@@ -59,6 +60,7 @@ pub async fn run(command: Command, context: &Context) -> Result<(), CliError> {
         Command::Profile(command) => profile::run(command, context).await,
         Command::Presence(command) => presence::run(command, context).await,
         Command::Room(command) => rooms::run(command, context).await,
+        Command::Thread(command) => thread::run(command, context).await,
         Command::Health => health::run(context).await,
     }
 }

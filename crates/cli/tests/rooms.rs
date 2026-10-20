@@ -249,12 +249,18 @@ async fn inbox_history_and_message_show_print_the_event_fields() {
             "WOKE",
             "REPLY_TO",
             "MENTIONS",
+            "THREAD_ID",
+            "CORRECTS",
             "BODY"
         ]
     );
     assert_eq!(rows[1][..3], ["1", "message", "dm:agent-a:agent-b"]);
-    // a's own row never wakes a; b's quiet answer names a, so it did.
-    assert_eq!(rows[1][6..], ["agent-a", "wake", "false", "-", "-", "q"]);
+    // a's own row never wakes a; b's quiet answer names a, so it did. S15:
+    // the answer is in the thread of a's message.
+    assert_eq!(
+        rows[1][6..],
+        ["agent-a", "wake", "false", "-", "-", "-", "-", "q"]
+    );
     assert_eq!(
         rows[2][6..],
         [
@@ -263,6 +269,8 @@ async fn inbox_history_and_message_show_print_the_event_fields() {
             "true",
             first_id.as_str(),
             "agent-a",
+            first_id.as_str(),
+            "-",
             "a"
         ]
     );
@@ -284,12 +292,29 @@ async fn inbox_history_and_message_show_print_the_event_fields() {
             "WAKE",
             "REPLY_TO",
             "MENTIONS",
+            "THREAD_ID",
+            "CORRECTS",
+            "REPLIES",
             "BODY"
         ]
     );
     assert_eq!(
+        rows[1][7..],
+        ["-", "-", "1", "q"],
+        "S15: the root's replies"
+    );
+    assert_eq!(
         rows[2][3..],
-        ["agent-b", "quiet", first_id.as_str(), "agent-a", "a"]
+        [
+            "agent-b",
+            "quiet",
+            first_id.as_str(),
+            "agent-a",
+            first_id.as_str(),
+            "-",
+            "-",
+            "a"
+        ]
     );
 
     let shown = ok(&server.cli(&a, &["message", "show", &first_id]).await);
@@ -305,7 +330,7 @@ async fn inbox_all_pages_json_keeps_unknown_kinds_and_fields() {
         "inbox_seq": "1", "kind": "message", "woke": true, "message_id": "msg-01J00000000000000000000000",
         "event_seq": "5", "room_id": "room:launch", "room_kind": "topic", "sender_id": "agent-b",
         "body": "x", "reply_to": null, "wake": true, "mentions": [],
-        "created_at": "2026-10-20T09:00:00.000Z", "thread_id": "t-1"
+        "created_at": "2026-10-20T09:00:00.000Z", "reactions": []
     });
     let reaction = json!({"inbox_seq": "2", "kind": "reaction", "emoji": "👍"});
     let first = json!({
@@ -344,7 +369,7 @@ async fn inbox_all_pages_json_keeps_unknown_kinds_and_fields() {
     assert_eq!(
         rows[1],
         [
-            "2", "reaction", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"
+            "2", "reaction", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"
         ]
     );
 }

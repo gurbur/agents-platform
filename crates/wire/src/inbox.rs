@@ -16,6 +16,11 @@ pub const MESSAGE_KIND: &str = "message";
 
 /// What an inbox row records.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "consumers in other repositories match `Message { message, .. }` by value; \
+              a page holds at most 100 items"
+)]
 pub enum InboxEvent {
     /// `kind = "message"`: `woke`, then the message's fields flat next to
     /// `inbox_seq` and `kind`. `woke` is per recipient: whether the
@@ -58,6 +63,13 @@ impl InboxItem {
         }
     }
 
+    pub fn as_message_mut(&mut self) -> Option<&mut Message> {
+        match &mut self.event {
+            InboxEvent::Message { message, .. } => Some(message),
+            InboxEvent::Unknown { .. } => None,
+        }
+    }
+
     /// `woke` of a message event; `None` for other kinds.
     pub fn woke(&self) -> Option<bool> {
         match &self.event {
@@ -68,7 +80,7 @@ impl InboxItem {
 }
 
 /// The serialized shape of a message event: `inbox_seq`, `kind`, `woke`,
-/// then the ten message keys.
+/// then the thirteen message keys.
 #[derive(Serialize)]
 struct MessageEvent<'a> {
     inbox_seq: Seq,
@@ -184,8 +196,11 @@ mod tests {
                     sender_id: "agent-a".parse().unwrap(),
                     body: "hi".into(),
                     reply_to: None,
+                    thread_id: None,
+                    corrects: None,
                     wake: true,
                     mentions: vec![],
+                    thread_summary: None,
                     created_at: "2026-10-14T10:00:00.000Z".into(),
                 },
             )],
@@ -210,8 +225,11 @@ mod tests {
                     "sender_id": "agent-a",
                     "body": "hi",
                     "reply_to": null,
+                    "thread_id": null,
+                    "corrects": null,
                     "wake": true,
                     "mentions": [],
+                    "thread_summary": null,
                     "created_at": "2026-10-14T10:00:00.000Z"
                 }],
                 "next_after_seq": "42",
