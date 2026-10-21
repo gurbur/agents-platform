@@ -1,6 +1,6 @@
 # 슬라이스 S14: presence
 
-- **상태**: **implemented (2026-10-21, Pi 배포 대기)** — 커밋 `0395e8e`. 테스트 514→563, aarch64 빌드 GLIBC_2.38. schema v6. 설계는 2026-10-20 [ADR-0012](../adr/0012-presence-in-memory-with-persisted-last-seen.md)으로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §4(상태)·§7 4번(P1+, 사용자 결정 2026-10-20)·§1.6 7번. S13(room 모델과 inbox/wake 분리) 위에 얹는다. S13 구현과 병행해 freeze했으며 구현은 S13 뒤에 시작한다(같은 파일 — `api::agents`, `store::queries::agents`, `store::migrations`, `platform-wire::agents` — 을 건드린다).
+- **상태**: **done (2026-10-21)** — 운영 Pi 반영 08:52 KST(S13~S16 조정 배포, 아래 "운영 반영"). 커밋 `0395e8e`. 테스트 514→563, aarch64 빌드 GLIBC_2.38. schema v6. 설계는 2026-10-20 [ADR-0012](../adr/0012-presence-in-memory-with-persisted-last-seen.md)으로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §4(상태)·§7 4번(P1+, 사용자 결정 2026-10-20)·§1.6 7번. S13(room 모델과 inbox/wake 분리) 위에 얹는다. S13 구현과 병행해 freeze했으며 구현은 S13 뒤에 시작한다(같은 파일 — `api::agents`, `store::queries::agents`, `store::migrations`, `platform-wire::agents` — 을 건드린다).
 - **위험/의존도**: 중 — 인증 계층에 쓰기 하나가 붙는 첫 슬라이스다. throttle이 틀리면 모든 agent 요청이 fsync를 일으키고, 갱신을 요청 경로에서 기다리면 요청 지연이 늘며, owner 요청이 갱신하면 `last_seen_at`이 거짓이 된다. 메모리 맵이 삭제·재등록을 따라가지 않으면 새 agent가 옛 상태를 물려받는다. schema v6은 컬럼 하나다. S1(인증·등록)·S9(directory)·S11(콘솔)·S12(삭제)·S13 위에 얹는다.
 
 ## 목표
@@ -54,9 +54,11 @@ S13 "에이전트 공지"의 선택 항목 끝(10번 뒤)에 그대로 붙여 �
 - [x] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
 - [x] fmt/clippy/test 그린. 코드 미학(`CLAUDE.md` 규약). directory item 키를 정확히 단언하던 기존 테스트(`IF-WIRE-001` 모양)만 두 키를 더해 고치고 핸드오프에 목록을 남긴다. 그 밖의 단언은 바꾸지 않는다.
 
-## 운영 반영
-- **배포 대기** (2026-10-21) — 구현 방안 13의 운영 메모 순서대로 오케스트레이터가 실행한다(S13~S16을 한 번의 조정 배포로 묶을 수 있다: backup은 v4 DB에서 한 번, 기동 시 v5→v8 migration이 차례로 적용된다).
-- [ ] 운영 Pi 반영(backup → deploy → `/healthz` schema_version → smoke → 공지)
+## 운영 반영 (2026-10-21)
+- **08:52 KST**: S13~S16 조정 배포로 `9a88bdd`에서 재배포(backup·rehearsal·journal은 [S13 "운영 반영"](S13-room-model-and-inbox-wake-split.md#운영-반영-2026-10-21)). schema migration v6(`agents.last_seen_at`)이 같은 기동에서 적용됐다. `/healthz` `{"status":"ok","schema_version":8}`, 공존하는 기존 unit 네 개 전후 동일.
+- 남은 것: agent들의 receiver는 [에이전트 공지](../agent-kit/HUB_NOTICE_2026-10.md)에 맞춰 다시 설계될 때까지 끊긴 채다. 운영 허브 대상 smoke와 공지 전달은 이 기록에 없다.
+- [x] 운영 Pi 반영: backup → deploy → `/healthz` schema_version (2026-10-21)
+- [ ] 운영 smoke → 공지(agent receiver 재설계 뒤)
 
 ## 검증 방법 (증거 필수)
 - `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` 끝부분(테스트 수 전후). 새 hub 테스트는 구현 전에 실패하는 것을 먼저 보인다.

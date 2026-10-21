@@ -1,6 +1,6 @@
 # 슬라이스 S15: threads-and-corrections
 
-- **상태**: **implemented (2026-10-21, Pi 배포 대기)** — 커밋 `1163aee`. 테스트 563→600, aarch64 빌드 GLIBC_2.38. schema v7. 설계는 2026-10-20 [ADR-0013](../adr/0013-threads-by-reply-with-participant-wake.md)으로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §2(스레드, fan-out (d), 참여자, mute, 정정)·§1.5·§7 1·10·11번(사용자 결정 2026-10-20)·§8.1. S13(송신 계약, R/W)·S14(schema v6) 위에 얹는다. S13 구현과 병행해 freeze했으며 구현은 S13·S14 뒤에 시작한다(`store::queries::messages`의 `commit_send`, `api::history`, `platform-wire::messages`를 다시 건드린다). 맡음(`claim`)은 S16 반응 종류라 여기 없다.
+- **상태**: **done (2026-10-21)** — 운영 Pi 반영 08:52 KST(S13~S16 조정 배포, 아래 "운영 반영"). 커밋 `1163aee`. 테스트 563→600, aarch64 빌드 GLIBC_2.38. schema v7. 설계는 2026-10-20 [ADR-0013](../adr/0013-threads-by-reply-with-participant-wake.md)으로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §2(스레드, fan-out (d), 참여자, mute, 정정)·§1.5·§7 1·10·11번(사용자 결정 2026-10-20)·§8.1. S13(송신 계약, R/W)·S14(schema v6) 위에 얹는다. S13 구현과 병행해 freeze했으며 구현은 S13·S14 뒤에 시작한다(`store::queries::messages`의 `commit_send`, `api::history`, `platform-wire::messages`를 다시 건드린다). 맡음(`claim`)은 S16 반응 종류라 여기 없다.
 - **위험/의존도**: 상 — R과 W에 "스레드 안이면"이라는 분기가 붙고, member가 아닌 참여자에게 읽기 권한이 생기는 첫 슬라이스다. 참여자 등록 순서가 틀리면 첫 답장이 root 작성자를 깨우지 못하고, 읽기 확장이 넓으면 참여자가 room 전체 history를 읽는다. v7 backfill이 옛 `reply_to` 사슬을 스레드로 다시 묶는다. S2·S3·S4·S12·S13·S14 위에 얹는다.
 
 ## 목표
@@ -70,9 +70,11 @@ S13·S14 공지의 선택 항목 끝(S14의 11번 뒤)에 그대로 붙여 보�
 - [x] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
 - [x] fmt/clippy/test 그린. 코드 미학. **이 슬라이스가 바꾼 wire를 단언하던 기존 테스트**(`Message` 열 키, `reply_to` 답장이 room 전원을 깨운다는 S13 단언, history query 이름 목록)만 새 정본에 맞게 고치고 핸드오프에 목록을 남긴다.
 
-## 운영 반영
-- **배포 대기** (2026-10-21) — 구현 방안 10의 운영 메모 순서대로 오케스트레이터가 실행한다(S13~S16을 한 번의 조정 배포로 묶을 수 있다: backup은 v4 DB에서 한 번, 기동 시 v5→v8 migration이 차례로 적용된다).
-- [ ] 운영 Pi 반영(backup → deploy → `/healthz` schema_version → smoke → 공지)
+## 운영 반영 (2026-10-21)
+- **08:52 KST**: S13~S16 조정 배포로 `9a88bdd`에서 재배포(backup·rehearsal·journal은 [S13 "운영 반영"](S13-room-model-and-inbox-wake-split.md#운영-반영-2026-10-21)). schema migration v7이 같은 기동에서 적용됐다. backup 사본 rehearsal에서 옛 `reply_to` 사슬 backfill이 스레드에 든 메시지 460·참여자 431을 만들었다. `/healthz` `{"status":"ok","schema_version":8}`, 공존하는 기존 unit 네 개 전후 동일.
+- 남은 것: agent들의 receiver는 [에이전트 공지](../agent-kit/HUB_NOTICE_2026-10.md)에 맞춰 다시 설계될 때까지 끊긴 채다. 운영 허브 대상 smoke와 공지 전달은 이 기록에 없다.
+- [x] 운영 Pi 반영: backup → deploy → `/healthz` schema_version (2026-10-21)
+- [ ] 운영 smoke → 공지(agent receiver 재설계 뒤)
 
 ## 검증 방법 (증거 필수)
 - `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` 끝부분(테스트 수 전후). 새 hub 테스트는 구현 전에 실패하는 것을 먼저 보인다.

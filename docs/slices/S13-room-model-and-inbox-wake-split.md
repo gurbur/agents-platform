@@ -1,6 +1,6 @@
 # 슬라이스 S13: room-model-and-inbox-wake-split
 
-- **상태**: **implemented (2026-10-21, Pi 배포 대기)** — 커밋 `0965c72`(hub·wire·CLI·smoke), `2c59458`(inbox item `woke`), `83977a1`(콘솔). 테스트 441→514, aarch64 빌드 GLIBC_2.38. schema v5. 설계는 2026-10-20 [ADR-0010](../adr/0010-rooms-as-table-and-single-reply-rule.md)(room 표, 송신 계약 하나, 답장 규칙 하나, wire 통일)과 [ADR-0011](../adr/0011-inbox-wake-split.md)(inbox와 wake의 분리)로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §7(13개 결정, 모두 2026-10-20)과 §8.1(호환 shim 없이 한 번에 자르는 S13'). 사용자 결정(2026-10-20): 이 슬라이스 동안 모든 agent를 허브에서 끊고 wire를 한 번에 자른다. hub-mcp·hub-discord는 각자의 저장소에서 새 wire로 다시 짓는다(이 스펙은 그들이 소비할 것을 적을 뿐 그 코드를 바꾸지 않는다).
+- **상태**: **done (2026-10-21)** — 운영 Pi 반영 08:52 KST(S13~S16 조정 배포, 아래 "운영 반영"). 커밋 `0965c72`(hub·wire·CLI·smoke), `2c59458`(inbox item `woke`), `83977a1`(콘솔). 테스트 441→514, aarch64 빌드 GLIBC_2.38. schema v5. 설계는 2026-10-20 [ADR-0010](../adr/0010-rooms-as-table-and-single-reply-rule.md)(room 표, 송신 계약 하나, 답장 규칙 하나, wire 통일)과 [ADR-0011](../adr/0011-inbox-wake-split.md)(inbox와 wake의 분리)로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §7(13개 결정, 모두 2026-10-20)과 §8.1(호환 shim 없이 한 번에 자르는 S13'). 사용자 결정(2026-10-20): 이 슬라이스 동안 모든 agent를 허브에서 끊고 wire를 한 번에 자른다. hub-mcp·hub-discord는 각자의 저장소에서 새 wire로 다시 짓는다(이 스펙은 그들이 소비할 것을 적을 뿐 그 코드를 바꾸지 않는다).
 - **위험/의존도**: 상 — 송신 계약, inbox 행의 의미, 권한 판정의 위치, delivery의 "미확인" 기준이 한꺼번에 바뀌는 첫 슬라이스다. 권한이 `memberships`로 옮겨 가며 빠뜨린 경로는 남의 DM을 읽거나 쓰는 구멍이 된다. wake 집합 계산이 틀리면 조용한 사건이 사람을 깨우거나, 지목된 agent가 깨어나지 않는다. delivery의 기준선(`target_seq`)이 틀리면 조용한 행 때문에 300초마다 redrive하거나 갚을 wake를 잃는다. schema v5 migration이 room·membership을 backfill한다. S1(등록·membership)·S2(송신)·S3(inbox)·S4(delivery)·S5(CLI)·S10(rooms·owner 게시)·S11(콘솔)·S12(삭제) 위에 얹는다.
 
 ## 목표
@@ -113,9 +113,16 @@ wire 의미는 API_V1 "Message 송신과 durable commit", "Inbox 조회와 read 
 - [x] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
 - [x] fmt/clippy/test 그린. 코드 미학(`CLAUDE.md` 규약). **이 슬라이스가 바꾼 wire를 단언하던 기존 테스트**(`to: "all"`, `to`+`reply_to`, `reply_to_room_mismatch`, `not_all_member`, owner 게시 route, owner의 `POST /v1/messages` 403, 옛 해시, `RoomKind` 두 값, `InboxItem` 일곱 키)만 새 정본에 맞게 고치고, 핸드오프에 고친 테스트 이름과 이유를 목록으로 남긴다. 그 밖의 단언은 바꾸지 않는다.
 
-## 운영 반영
-- **배포 대기** (2026-10-21) — 구현 방안 12의 운영 메모 순서대로 오케스트레이터가 실행한다(S13~S16을 한 번의 조정 배포로 묶을 수 있다: backup은 v4 DB에서 한 번, 기동 시 v5→v8 migration이 차례로 적용된다).
-- [ ] 운영 Pi 반영(backup → deploy → `/healthz` schema_version → smoke → 공지)
+## 운영 반영 (2026-10-21)
+S13~S16을 한 번의 조정 배포로 묶었다(backup은 v4 DB에서 한 번, 기동 한 번에 v5→v8). 기록은 운영자의 배포 터미널에서 옮겼다.
+- **배포 전 backup**(필수): 운영 허브 DB를 `platformd backup`으로 받음 — messages 720행, inbox 2578행, integrity ok.
+- **오프라인 rehearsal**: 그 backup 사본에 새 바이너리를 띄워 v4→v8 migration을 미리 적용 — rooms 17, 스레드에 든 메시지 460, 스레드 참여자 431, 반응 종류 7, 경고 없음(아래 "검증 방법"의 backup 사본 확인).
+- **08:52 KST**: `deploy/deploy.sh`로 `9a88bdd`에서 재배포. 한 번의 기동에서 schema migration v5·v6·v7·v8 적용, `/healthz` `{"status":"ok","schema_version":8}`, 공존하는 기존 unit 네 개 전후 동일.
+- **08:54 KST**: `human` receiver를 `--wake-policy always`로 다시 등록(`route_version` 그대로, state `idle`). hub-mcp(08:52)·hub-discord(08:53)는 각자의 저장소 슬라이스대로 배포됐다.
+- 재시작 뒤 journal: 사용자가 일부러 끊은 receiver로의 wake 재시도만 있다.
+- 남은 것: agent들의 receiver는 [에이전트 공지](../agent-kit/HUB_NOTICE_2026-10.md)에 맞춰 다시 설계될 때까지 끊긴 채다. 운영 허브 대상 smoke와 공지 전달은 이 기록에 없다.
+- [x] 운영 Pi 반영: backup → deploy → `/healthz` schema_version (2026-10-21)
+- [ ] 운영 smoke → 공지(agent receiver 재설계 뒤)
 
 ## 검증 방법 (증거 필수)
 - `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` 끝부분(테스트 수 전후). **새 동작의 hub 테스트는 구현 전에 실패하는 것을 먼저 보인다**(새 테스트를 먼저 커밋 없이 돌린 출력).

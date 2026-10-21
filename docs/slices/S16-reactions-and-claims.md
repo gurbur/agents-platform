@@ -1,6 +1,6 @@
 # 슬라이스 S16: reactions-and-claims
 
-- **상태**: **implemented (2026-10-21, Pi 배포 대기)** — 커밋 `4a7b7bb`. 테스트 600→638, aarch64 빌드 GLIBC_2.38. schema v8. 설계는 2026-10-20 [ADR-0014](../adr/0014-reactions-as-registry-kinds.md)로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §3(반응)·§2.2(맡음 `claim`)·§1.5·§7 2·3·10번(사용자 결정 2026-10-20)·§1.6. S13(inbox 사건 `kind`, R/W)·S14(v6)·S15(v7, 스레드 참여자·읽기 확장) 위에 얹는다. 구현은 S15 뒤에 시작한다(`platform-wire::{messages, inbox}`, `store::queries::{messages, inbox}`, 콘솔 메시지 렌더링을 다시 건드린다). 허브 쪽 마지막 슬라이스다(Discord 반응은 hub-discord D3).
+- **상태**: **done (2026-10-21)** — 운영 Pi 반영 08:52 KST(S13~S16 조정 배포, 아래 "운영 반영"). 커밋 `4a7b7bb`. 테스트 600→638, aarch64 빌드 GLIBC_2.38. schema v8. 설계는 2026-10-20 [ADR-0014](../adr/0014-reactions-as-registry-kinds.md)로 freeze. 결정의 출처는 [조사 문서](../research/THREADS_REACTIONS_PRESENCE_ROOMS.md) §3(반응)·§2.2(맡음 `claim`)·§1.5·§7 2·3·10번(사용자 결정 2026-10-20)·§1.6. S13(inbox 사건 `kind`, R/W)·S14(v6)·S15(v7, 스레드 참여자·읽기 확장) 위에 얹는다. 구현은 S15 뒤에 시작한다(`platform-wire::{messages, inbox}`, `store::queries::{messages, inbox}`, 콘솔 메시지 렌더링을 다시 건드린다). 허브 쪽 마지막 슬라이스다(Discord 반응은 hub-discord D3).
 - **위험/의존도**: 중상 — inbox에 메시지가 아닌 사건(`kind="reaction"`)이 처음 들어간다. S13 공지 3번("모르는 `kind`는 건너뛴다")을 지키지 않은 소비자는 이 배포에서 드러난다. 반응 권한은 S15의 읽기 확장(스레드 참여자)을 따라야 하고, 넓으면 남의 room 글에 반응이 달린다. `reaction_kinds`의 owner 편집은 설정 없이 런타임에 바뀌는 첫 registry다. S3·S4·S13·S15 위에 얹는다.
 
 ## 목표
@@ -68,9 +68,11 @@ S15 공지 추가분(15번) 뒤에 그대로 붙여 보낸다.
 - [x] **배포 빌드**: `deploy/build-aarch64.sh` 성공(ELF aarch64, glibc 2.41 이하).
 - [x] fmt/clippy/test 그린. 코드 미학. `Message` 키를 정확히 단언하던 기존 테스트만 `reactions`를 더해 고치고 핸드오프에 목록을 남긴다.
 
-## 운영 반영
-- **배포 대기** (2026-10-21) — 구현 방안 11의 운영 메모 순서대로 오케스트레이터가 실행한다(S13~S16을 한 번의 조정 배포로 묶을 수 있다: backup은 v4 DB에서 한 번, 기동 시 v5→v8 migration이 차례로 적용된다).
-- [ ] 운영 Pi 반영(backup → deploy → `/healthz` schema_version → smoke → 공지)
+## 운영 반영 (2026-10-21)
+- **08:52 KST**: S13~S16 조정 배포로 `9a88bdd`에서 재배포(backup·rehearsal·journal은 [S13 "운영 반영"](S13-room-model-and-inbox-wake-split.md#운영-반영-2026-10-21)). schema migration v8이 같은 기동에서 적용됐다. backup 사본 rehearsal에서 반응 종류 seed 7행. `/healthz` `{"status":"ok","schema_version":8}`, 공존하는 기존 unit 네 개 전후 동일.
+- 남은 것: agent들의 receiver는 [에이전트 공지](../agent-kit/HUB_NOTICE_2026-10.md)에 맞춰 다시 설계될 때까지 끊긴 채다. 운영 허브 대상 smoke와 공지 전달은 이 기록에 없다.
+- [x] 운영 Pi 반영: backup → deploy → `/healthz` schema_version (2026-10-21)
+- [ ] 운영 smoke → 공지(agent receiver 재설계 뒤)
 
 ## 검증 방법 (증거 필수)
 - `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` 끝부분(테스트 수 전후). 새 hub 테스트는 구현 전에 실패하는 것을 먼저 보인다.
